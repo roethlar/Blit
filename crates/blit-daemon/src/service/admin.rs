@@ -13,26 +13,81 @@ use tonic::Status;
 use super::util::{internal_err, io_to_status, resolve_relative_path, response_channel_closed};
 use blit_core::path_posix::request_path_to_posix;
 
-/// One operand of a removal as the request names it: its path below the
-/// module, or why it cannot be removed at all.
-pub(crate) type RmOperand = Result<PathBuf, String>;
+/// One operand of a removal as the request names it: where it is and how
+/// it was typed, or why it cannot be removed at all.
+pub(crate) type RmOperand = Result<TypedOperand, String>;
+
+/// An operand's place below the module, and what its writing said
+/// (cr-uv1-1, [`blit_core::admin::operand`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TypedOperand {
+    pub rel: PathBuf,
+    /// Typed with a separator after it: a directory, or nothing.
+    pub as_directory: bool,
+}
 
 /// Why the module's own root is not removed.
 const THE_MODULE_ROOT: &str = "refusing to remove the module's root; name a path inside it";
+
+/// `rm`'s own words for an operand whose last name is `.` or `..`.
+const DOT_OR_DOT_DOT: &str = "refusing to remove '.' or '..' directory";
+
+/// Where a read starts — `du`, `df`, `find` — from the path as typed: its
+/// place below the module, and whether it was typed as a directory.
+#[allow(clippy::result_large_err)]
+pub(crate) fn read_start(typed: &str) -> Result<TypedOperand, Status> {
+    use blit_core::admin::operand;
+    let rel = if operand::is_the_root(typed) {
+        PathBuf::from(".")
+    } else {
+        resolve_relative_path(typed)?
+    };
+    Ok(TypedOperand {
+        rel,
+        as_directory: operand::names_a_directory(typed),
+    })
+}
+
+impl TypedOperand {
+    /// The operand below `root`, written for the system as it was typed:
+    /// with a separator after it when it was typed as a directory. The
+    /// system then resolves a link standing there and refuses what is no
+    /// directory, as it does for the command run on this disk.
+    pub(crate) fn below(&self, root: &Path) -> PathBuf {
+        let mut path = root.join(&self.rel);
+        if self.as_directory {
+            path.push("");
+        }
+        path
+    }
+}
 
 /// Read a removal's operands. One that cannot be an operand — the
 /// module's root, a path with `..` in it — is THAT operand's failure and
 /// no more (cr-uv1-3): it used to refuse the request whole, where `rm`
 /// goes on to the operands it can remove.
+///
+/// Each is read as typed (cr-uv1-1). One whose last name is `.` or `..`
+/// is refused in `rm`'s words — `work/.` was read as `work`, and `work`
+/// removed with everything in it; one typed with a separator after it is
+/// a directory or nothing.
 pub(crate) fn read_operands(paths: Vec<String>) -> Vec<RmOperand> {
+    use blit_core::admin::operand;
     paths
         .into_iter()
-        .map(|raw| {
-            let rel = resolve_relative_path(&raw).map_err(|status| status.message().to_string())?;
-            if rel.as_os_str().is_empty() || rel == Path::new(".") {
+        .map(|typed| {
+            if operand::is_the_root(&typed) {
                 return Err(THE_MODULE_ROOT.to_string());
             }
-            Ok(rel)
+            if operand::names_dot(&typed) {
+                return Err(DOT_OR_DOT_DOT.to_string());
+            }
+            let rel =
+                resolve_relative_path(&typed).map_err(|status| status.message().to_string())?;
+            Ok(TypedOperand {
+                rel,
+                as_directory: operand::names_a_directory(&typed),
+            })
         })
         .collect()
 }
@@ -75,7 +130,8 @@ fn remove_operands_sync(
             }
         };
         let removal = blit_core::deletion::remove_as_rm(
-            &module_path.join(rel),
+            &module_path.join(&rel.rel),
+            rel.as_directory,
             Some(canonical_root),
             options,
             None,
@@ -200,11 +256,13 @@ pub(crate) fn list_completions(
 /// for any other entry.
 pub(crate) fn stream_disk_usage(
     module_root: PathBuf,
-    start_rel: PathBuf,
+    start: TypedOperand,
     options: UsageOptions,
     sender: &DiskUsageSender,
 ) -> Result<(), Status> {
-    let start_abs = module_root.join(&start_rel);
+    // As typed (cr-uv1-1): `du link/` measures the directory the link
+    // points to, and `du doc/` of a file is `Not a directory`.
+    let start_abs = start.below(&module_root);
     // F2: containment check before any filesystem operation. The walk
     // never follows a link, but the start point itself can be a symlink
     // that points outside the module root. `module_root` here is the
@@ -266,12 +324,15 @@ fn wire_path(relative: &Path) -> String {
 /// for any other entry.
 pub(crate) fn stream_find(
     module_root: PathBuf,
-    start_rel: PathBuf,
+    start: TypedOperand,
     start_name: Vec<u8>,
     options: FindOptions,
     sender: &FindSender,
 ) -> Result<(), Status> {
-    let start_abs = module_root.join(&start_rel);
+    // As typed (cr-uv1-1): `find link/` and `find link/.` start in the
+    // directory the link points to, and `find doc/` of a file is
+    // `Not a directory`.
+    let start_abs = start.below(&module_root);
     // F2: containment check before any filesystem operation. The walk
     // follows no link below the start, and a start that is itself a link
     // out of the module is refused here, whether or not it would be
@@ -473,6 +534,16 @@ mod rm_tests {
             found[1..],
             [(2, "", THE_MODULE_ROOT), (3, "", THE_MODULE_ROOT)]
         );
+        // A `..` as the last name is `rm`'s own refusal; one on the way is
+        // a path this daemon does not take.
+        assert_eq!(
+            read_operands(vec!["x/..".into(), "x/../y".into()])
+                .into_iter()
+                .map(|operand| operand.unwrap_err())
+                .map(|reason| reason.starts_with("path not allowed"))
+                .collect::<Vec<_>>(),
+            [false, true]
+        );
         assert_eq!(reply.entries_removed, 2);
         assert!(!root.join("first").exists() && !root.join("last").exists());
         assert!(root.is_dir(), "the module's root stands");
@@ -485,6 +556,109 @@ mod rm_tests {
             assert_eq!(reply.entries_removed, 1);
             assert!(elsewhere.join("victim").exists() && !root.join("first").exists());
         }
+    }
+}
+
+#[cfg(test)]
+mod typed_operand_tests {
+    //! cr-uv1-1: the daemon acts on a path as it was typed.
+
+    use super::*;
+    use std::fs;
+
+    /// The reviewer's three commands, as the request carries them. `work/.`
+    /// was read as `work`, and removed with everything in it; `doc/` was
+    /// read as `doc`, and the file unlinked; `report ` (a space after it)
+    /// was read as `report`, and the wrong file went.
+    #[test]
+    fn an_operand_is_removed_as_it_was_typed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let build = || {
+            fs::create_dir_all(root.join("work/sub")).unwrap();
+            for file in ["work/a", "work/sub/b", "doc", "report", "report "] {
+                fs::write(root.join(file), b"x").unwrap();
+            }
+        };
+        let removed = |paths: &[&str], recursive: bool, force: bool| {
+            build();
+            let operands = read_operands(paths.iter().map(|path| path.to_string()).collect());
+            let reply = remove_operands_sync(
+                &root,
+                &root,
+                &operands,
+                blit_core::deletion::RmOptions { recursive, force },
+            )
+            .expect("an answer for the request");
+            let failures: Vec<(u32, String)> = reply
+                .failures
+                .iter()
+                .map(|failure| (failure.operand, failure.reason.clone()))
+                .collect();
+            (reply.entries_removed, failures)
+        };
+
+        for dot in ["work/.", "work/..", "work/./", "work//.", "work/sub/.."] {
+            assert_eq!(
+                removed(&[dot, "doc"], true, true),
+                (1, vec![(0, DOT_OR_DOT_DOT.to_string())]),
+                "{dot}: refused, `-rf` or not, and the next operand removed"
+            );
+            assert!(root.join("work/sub/b").exists() && !root.join("doc").exists());
+        }
+
+        assert_eq!(
+            removed(&["doc/"], false, false),
+            (0, vec![(0, "Not a directory".to_string())])
+        );
+        assert!(root.join("doc").exists());
+        // `-f` passes over it, as it does a missing operand; the file stays.
+        assert_eq!(removed(&["doc/"], true, true), (0, vec![]));
+        assert!(root.join("doc").exists());
+
+        assert_eq!(removed(&["report "], false, false), (1, vec![]));
+        assert!(root.join("report").exists() && !root.join("report ").exists());
+        assert_eq!(
+            removed(&[" report"], false, false),
+            (0, vec![(0, "No such file or directory".to_string())])
+        );
+
+        // A directory typed as one, or with names on the way that say
+        // nothing, is the directory.
+        assert_eq!(
+            removed(&["work/sub/", "work/./a"], true, false),
+            (3, vec![])
+        );
+        assert!(root.join("work").is_dir() && !root.join("work/sub").exists());
+    }
+
+    /// Where a read starts, from the path as typed: the place, and
+    /// whether it was typed as a directory — which is how the system is
+    /// then asked.
+    #[test]
+    fn a_read_starts_where_the_path_as_typed_says() {
+        let root = Path::new("/srv/module");
+        for (typed, rel, as_directory, asked) in [
+            ("", ".", false, "/srv/module/."),
+            (".", ".", true, "/srv/module/./"),
+            ("dir", "dir", false, "/srv/module/dir"),
+            ("dir/", "dir", true, "/srv/module/dir/"),
+            ("dir//", "dir", true, "/srv/module/dir/"),
+            ("dir/.", "dir", true, "/srv/module/dir/"),
+            ("a/./b", "a/b", false, "/srv/module/a/b"),
+            ("report ", "report ", false, "/srv/module/report "),
+        ] {
+            let start = read_start(typed).expect(typed);
+            assert_eq!(
+                (start.rel.as_path(), start.as_directory),
+                (Path::new(rel), as_directory),
+                "{typed:?}"
+            );
+            if cfg!(unix) {
+                assert_eq!(start.below(root).as_os_str(), asked, "{typed:?}");
+            }
+        }
+        assert!(read_start("dir/..").is_err() && read_start("../x").is_err());
     }
 }
 
@@ -502,9 +676,9 @@ mod disk_usage_tests {
     fn sent(root: &Path, start: &str, options: UsageOptions) -> Vec<du_reply::Reply> {
         // Drain on this thread while a worker sends: both ends block.
         let (tx, mut rx) = mpsc::channel::<Result<DuReply, Status>>(4096);
-        let (module_root, start_rel) = (root.to_path_buf(), PathBuf::from(start));
+        let (module_root, start) = (root.to_path_buf(), read_start(start).expect("a start"));
         let worker =
-            std::thread::spawn(move || stream_disk_usage(module_root, start_rel, options, &tx));
+            std::thread::spawn(move || stream_disk_usage(module_root, start, options, &tx));
         let mut replies = Vec::new();
         while let Some(item) = rx.blocking_recv() {
             replies.push(item.expect("a reply").reply.expect("a row or a failure"));
@@ -679,7 +853,7 @@ mod status_mapping_tests {
         drop(disk_receiver);
         let disk_error = stream_disk_usage(
             module_root.clone(),
-            PathBuf::from("entry"),
+            read_start("entry").expect("a start"),
             UsageOptions::default(),
             &disk_sender,
         )
@@ -694,7 +868,7 @@ mod status_mapping_tests {
         drop(find_receiver);
         let find_error = stream_find(
             module_root,
-            PathBuf::from("entry"),
+            read_start("entry").expect("a start"),
             b"entry".to_vec(),
             FindOptions::default(),
             &find_sender,

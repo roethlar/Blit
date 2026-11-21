@@ -28,8 +28,13 @@ impl RemoteEndpoint {
     pub const DEFAULT_PORT: u16 = 9031;
 
     pub fn parse(raw: &str) -> Result<Self> {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
+        // cr-uv1-1: what follows the host is a PATH, and a space at the
+        // end of a path is part of its last name. The whole text was
+        // trimmed here, so `host:/m/report ` named `report` — another
+        // file, and `rm` removed it. Only what comes before the host is
+        // set aside; a bare host, which holds no path, is trimmed below.
+        let trimmed = raw.trim_start();
+        if trimmed.trim_end().is_empty() {
             bail!("remote location cannot be empty");
         }
 
@@ -91,7 +96,7 @@ impl RemoteEndpoint {
         }
 
         // Discovery (server or server:port)
-        let (host, port) = parse_host_port(trimmed)?;
+        let (host, port) = parse_host_port(trimmed.trim_end())?;
         Ok(Self {
             host,
             port,
@@ -313,6 +318,42 @@ mod tests {
             }
             _ => panic!("expected module path"),
         }
+    }
+
+    /// cr-uv1-1: a path is kept as typed — a space at its end, a
+    /// separator after it, a `.` as its last name. Only what stands
+    /// before the host, and around a bare host, is set aside.
+    #[test]
+    fn a_path_is_kept_as_typed() {
+        let typed = |raw: &str| match RemoteEndpoint::parse(raw).expect(raw).path {
+            RemotePath::Module { module, rel_path } => {
+                (module, rel_path.to_str().expect("text").to_string())
+            }
+            RemotePath::Root { rel_path } => {
+                (String::new(), rel_path.to_str().expect("text").to_string())
+            }
+            RemotePath::Discovery => panic!("{raw} holds a path"),
+        };
+        for (raw, rel) in [
+            ("srv:/m/report", "report"),
+            ("srv:/m/report ", "report "),
+            ("srv:/m/ report", " report"),
+            ("srv:/m/dir/", "dir/"),
+            ("srv:/m/dir//", "dir//"),
+            ("srv:/m/work/.", "work/."),
+            ("srv:/m/work/..", "work/.."),
+            ("srv:/m/a/./b", "a/./b"),
+            ("  srv:/m/report ", "report "),
+            ("srv:/m/", ""),
+            ("srv:/m/ ", " "),
+        ] {
+            assert_eq!(typed(raw), ("m".to_string(), rel.to_string()), "{raw:?}");
+        }
+        assert_eq!(typed("srv://dir/ "), (String::new(), "dir/ ".to_string()));
+        // A bare host holds no path: the space around it is nobody's name.
+        let host = RemoteEndpoint::parse("  example.com:9130  ").expect("a host");
+        assert_eq!((host.host.as_str(), host.port), ("example.com", 9130));
+        assert!(RemoteEndpoint::parse("   ").is_err());
     }
 
     #[test]

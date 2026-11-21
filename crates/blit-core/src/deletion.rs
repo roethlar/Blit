@@ -317,6 +317,16 @@ impl Removal {
 ///   `rm -r` leaves it. ([`execute_deletion_plan`] stops at the first
 ///   failure; a mirror's delete pass wants that, a user's `rm` does not.)
 ///
+/// `as_directory` is how the operand was TYPED (cr-uv1-1): with a
+/// separator after it. `rm` then removes it only if it is a directory —
+/// `rm doc/` of a file is `Not a directory`, which `-f` passes over as it
+/// does a missing operand, the file left where it is. A link typed so is
+/// not removed and NOT GONE THROUGH: `Is a directory` without `-r` when it
+/// points to one, as `rm` says, and `Not a directory` with it. That last
+/// is where this is not `rm`, which empties the directory the link points
+/// to before saying the same words; nothing here is ever removed through
+/// a link.
+///
 /// `target` must lie in `canonical_root`, and that is found out before
 /// anything is removed. One that does not — or whose place cannot be found
 /// out, below a directory that cannot be searched — is a FAILURE OF THAT
@@ -343,13 +353,26 @@ impl Removal {
 /// whatever had not gone yet and one failure, reported for the operand.
 pub fn remove_as_rm(
     target: &Path,
+    as_directory: bool,
     canonical_root: Option<&Path>,
     options: RmOptions,
     abort: Option<&AtomicBool>,
 ) -> Result<Removal, DeletionError> {
     let mut removal = Removal::default();
-    remove_operand(target, canonical_root, options, abort, &mut removal)?;
+    remove_operand(
+        target,
+        as_directory,
+        canonical_root,
+        options,
+        abort,
+        &mut removal,
+    )?;
     Ok(removal)
+}
+
+/// The system's words for a name typed as a directory that is none.
+fn not_a_directory() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::NotADirectory, "Not a directory")
 }
 
 const RM_OPERATION: &str = "rm";
@@ -370,6 +393,7 @@ fn is_a_directory() -> std::io::Error {
 #[cfg(unix)]
 fn remove_operand(
     target: &Path,
+    as_directory: bool,
     canonical_root: Option<&Path>,
     options: RmOptions,
     abort: Option<&AtomicBool>,
@@ -426,6 +450,20 @@ fn remove_operand(
         }
     };
     if !is_dir {
+        if as_directory {
+            // Typed as a directory, and no directory stands there. A link
+            // to one is a directory to `rm` without `-r`; anything else
+            // is none, and nothing is removed either way.
+            let error = if !options.recursive && above.points_to_directory(&name) {
+                is_a_directory()
+            } else {
+                not_a_directory()
+            };
+            if !absent(&error) {
+                removal.fail(PathBuf::new(), error);
+            }
+            return Ok(());
+        }
         match above.remove(&name, false) {
             Ok(()) => removal.removed += 1,
             Err(error) => removal.fail(PathBuf::new(), error),
@@ -553,6 +591,7 @@ fn remove_operand(
 #[cfg(not(unix))]
 fn remove_operand(
     target: &Path,
+    as_directory: bool,
     canonical_root: Option<&Path>,
     options: RmOptions,
     abort: Option<&AtomicBool>,
@@ -577,6 +616,17 @@ fn remove_operand(
         }
     };
     if !metadata.is_dir() {
+        if as_directory {
+            // Typed as a directory, and no directory stands there
+            // (cr-uv1-1): nothing is removed.
+            let through = std::fs::metadata(target).is_ok_and(|found| found.is_dir());
+            if !options.recursive && through {
+                removal.fail(PathBuf::new(), is_a_directory());
+            } else if !options.force {
+                removal.fail(PathBuf::new(), not_a_directory());
+            }
+            return Ok(());
+        }
         #[cfg(windows)]
         crate::win_fs::clear_readonly_recursive(target);
         match std::fs::remove_file(target) {
@@ -813,6 +863,17 @@ mod anchored {
             Ok(mode & libc::S_IFMT == libc::S_IFDIR)
         }
 
+        /// Whether the entry called `name` here is a directory once a link
+        /// is resolved. Asked only to choose the words of a refusal.
+        pub(super) fn points_to_directory(&self, name: &CStr) -> bool {
+            let mut found = std::mem::MaybeUninit::<stat>::uninit();
+            // SAFETY: as in `is_directory`.
+            let answered =
+                unsafe { fstatat(self.descriptor(), name.as_ptr(), found.as_mut_ptr(), 0) };
+            // SAFETY: read only when the call succeeded and filled it in.
+            answered == 0 && unsafe { found.assume_init() }.st_mode & libc::S_IFMT == libc::S_IFDIR
+        }
+
         /// Remove the entry called `name` in this directory: an empty
         /// directory when `directory`, anything else otherwise — a link
         /// as the link it is.
@@ -901,13 +962,104 @@ mod rm_tests {
     }
 
     fn rm(root: &Path, rel: &str, recursive: bool, force: bool) -> Removal {
+        typed(root, rel, false, recursive, force)
+    }
+
+    /// The same, for an operand typed with a separator after it or not.
+    fn typed(root: &Path, rel: &str, as_directory: bool, recursive: bool, force: bool) -> Removal {
         remove_as_rm(
             &root.join(rel),
+            as_directory,
             Some(root),
             RmOptions { recursive, force },
             None,
         )
         .expect("an answer about the operand")
+    }
+
+    /// cr-uv1-1: an operand typed as a directory — `doc/` — is removed
+    /// only if it is one. A file typed so is `Not a directory` and stays
+    /// (`blit rm HOST:/m/doc/` unlinked it); `-f` passes over that as it
+    /// does a missing operand, and the file still stays. A directory typed
+    /// so is treated as any directory. Each row is what `rm` 9.12 does.
+    #[test]
+    fn an_operand_typed_as_a_directory_is_removed_only_if_it_is_one() {
+        use std::io::ErrorKind::{IsADirectory, NotADirectory, NotFound};
+        for (rel, recursive, force, kind) in [
+            ("a.txt", false, false, Some(NotADirectory)),
+            ("a.txt", true, false, Some(NotADirectory)),
+            ("a.txt", false, true, None),
+            ("a.txt", true, true, None),
+            ("empty", false, false, Some(IsADirectory)),
+            ("nothing-here", true, false, Some(NotFound)),
+            ("nothing-here", true, true, None),
+        ] {
+            let (_tmp, root) = tree();
+            let removal = typed(&root, rel, true, recursive, force);
+            let found: Vec<_> = removal.failures.iter().map(|f| f.error.kind()).collect();
+            let expected: Vec<_> = kind.into_iter().collect();
+            assert_eq!(
+                found, expected,
+                "{rel}/ recursive {recursive} force {force}"
+            );
+            assert_eq!(removal.removed, 0, "{rel}/");
+            assert!(root.join("a.txt").exists() && root.join("empty").exists());
+        }
+        let (_tmp, root) = tree();
+        let words = typed(&root, "a.txt", true, false, false);
+        assert_eq!(
+            crate::disk_usage::os_reason(&words.failures[0].error),
+            "Not a directory"
+        );
+        // A directory typed as one goes, with `-r`, like any other.
+        let gone = typed(&root, "dir", true, true, false);
+        assert!(gone.failures.is_empty() && !root.join("dir").exists());
+        assert_eq!(gone.removed, 6);
+    }
+
+    /// cr-uv1-1: a link typed as a directory — `link/` — is not removed,
+    /// and what it points to is not touched: `Is a directory` without
+    /// `-r`, as `rm` says of a link to one; `Not a directory` with it, as
+    /// `rm` says too — after emptying the directory the link points to,
+    /// which this never does. A link to a file, or to nothing, is
+    /// `Not a directory` either way.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_typed_as_a_directory_is_never_gone_through() {
+        use std::io::ErrorKind::{IsADirectory, NotADirectory};
+        for (link, recursive, force, kind) in [
+            ("to-dir", false, false, Some(IsADirectory)),
+            ("to-dir", false, true, Some(IsADirectory)),
+            ("to-dir", true, false, Some(NotADirectory)),
+            ("to-dir", true, true, None),
+            ("to-file", false, false, Some(NotADirectory)),
+            ("to-file", true, false, Some(NotADirectory)),
+            ("to-nothing", true, false, Some(NotADirectory)),
+            ("to-nothing", true, true, None),
+        ] {
+            let (_tmp, root) = tree();
+            std::os::unix::fs::symlink("dir", root.join("to-dir")).unwrap();
+            std::os::unix::fs::symlink("a.txt", root.join("to-file")).unwrap();
+            std::os::unix::fs::symlink("nowhere", root.join("to-nothing")).unwrap();
+            let removal = typed(&root, link, true, recursive, force);
+            let found: Vec<_> = removal.failures.iter().map(|f| f.error.kind()).collect();
+            let expected: Vec<_> = kind.into_iter().collect();
+            assert_eq!(
+                found, expected,
+                "{link}/ recursive {recursive} force {force}"
+            );
+            assert_eq!(removal.removed, 0, "{link}/");
+            assert!(
+                root.join(link).symlink_metadata().is_ok(),
+                "{link}: the link stands"
+            );
+            assert!(
+                root.join("dir/x.txt").exists()
+                    && root.join("dir/sub/deep/z.txt").exists()
+                    && root.join("a.txt").exists(),
+                "{link}/: nothing it points to is touched"
+            );
+        }
     }
 
     fn reasons(removal: &Removal) -> Vec<(String, std::io::ErrorKind)> {
@@ -1065,6 +1217,7 @@ mod rm_tests {
             for force in [false, true] {
                 let removal = remove_as_rm(
                     &target,
+                    false,
                     Some(&root),
                     RmOptions {
                         recursive: true,
@@ -1115,6 +1268,7 @@ mod rm_tests {
         let abort = AtomicBool::new(true);
         let error = remove_as_rm(
             &root.join("dir"),
+            false,
             Some(&root),
             RmOptions {
                 recursive: true,

@@ -13,9 +13,7 @@ use std::process::ExitCode;
 use crate::cli::DuArgs;
 use blit_core::admin::du::{self, DuEvent, EntryPath, UsageOptions};
 use blit_core::disk_usage::{blocks_1k, human_size};
-use blit_core::endpoints::{
-    module_and_rel_path, parse_endpoint_or_local, rel_path_to_string, Endpoint,
-};
+use blit_core::endpoints::{module_and_typed_path, parse_endpoint_or_local, Endpoint};
 use eyre::{bail, Result};
 
 pub async fn run_du(args: DuArgs) -> Result<ExitCode> {
@@ -29,8 +27,9 @@ pub async fn run_du(args: DuArgs) -> Result<ExitCode> {
         Endpoint::Remote(remote) => remote,
     };
     let options = usage_options(&args)?;
-    let (module, rel_path) = module_and_rel_path(&remote)?;
-    let start_path = rel_path_to_string(&rel_path);
+    // The path as typed (cr-uv1-1): `du link/` is the directory the link
+    // points to, and that is said by the separator.
+    let (module, start_path) = module_and_typed_path(&remote)?;
     let operand = args.target.as_str();
     let size = |bytes: u64| {
         if args.human_readable {

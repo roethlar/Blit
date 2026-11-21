@@ -268,6 +268,8 @@ fn find_equals_the_system_find() {
         "sub.txt",
         "a.dat\\",
         "[a",
+        // A name that ends in a space (cr-uv1-1).
+        "sp ",
     ];
     for root in [system_root.as_path(), ctx.module_dir.as_path()] {
         for name in names {
@@ -361,6 +363,17 @@ fn find_equals_the_system_find() {
         "t/broken",
         "t/a.dat",
         "t/missing",
+        // cr-uv1-1, the operand as typed: a `.` after a link names the
+        // directory it points to, as a separator does; a `.` on the way
+        // says nothing; a space at the end is part of the name; a file
+        // or a broken link typed as a directory is none.
+        "t/link/.",
+        "t/sub/.",
+        "t/./sub",
+        "t/sp ",
+        "t/a.dat/",
+        "t/broken/",
+        "t/missing/",
     ];
     let mut compared = 0;
     for (start, expression) in starts.iter().flat_map(|start| {
@@ -444,7 +457,7 @@ fn find_equals_the_system_find() {
         fs::set_permissions(root.join("t/locked"), fs::Permissions::from_mode(0o755)).unwrap();
     }
     if !is_root {
-        assert!(compared > 80, "{compared} expressions were compared");
+        assert!(compared > 100, "{compared} expressions were compared");
     }
 }
 

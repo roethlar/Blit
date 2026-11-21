@@ -372,7 +372,10 @@ message RmRequest {
   // or removes anything (AC-11).
   uint32 contract_version = 1;
   string module = 2;
-  // One per operand, relative to the module; never the module's root.
+  // One per operand: its path below the module EXACTLY AS TYPED (contract
+  // 16) — a separator after it, a final `.`, a space at either end. The
+  // daemon reads what the writing says: `x/` is removed only if it is a
+  // directory, `x/.` and `x/..` are refused, as is the module's root.
   repeated string paths = 3;
   // `-r`. Unset, a directory is refused with "Is a directory" and nothing
   // in it is touched. A daemon that ignored this field would delete a
@@ -432,10 +435,13 @@ message FindPathsRequest {
   // anything (AC-11).
   uint32 contract_version = 1;
   string module = 2;
-  // The path below the module to start from; empty is the module itself.
+  // The path below the module to start from, as typed (contract 16);
+  // empty is the module itself. Typed with a separator after it, or with
+  // `.` as its last name, a start that is a link to a directory names
+  // that directory, and is entered.
   string start_path = 3;
-  // The start was typed with a separator after it: a start that is a link
-  // to a directory names that directory, and is entered.
+  // The start was typed with a separator after it. Kept beside the path,
+  // which now says so itself.
   bool follow_start = 4;
   // `-name` and `-iname`, against an entry's base name.
   repeated FindName names = 5;
@@ -500,7 +506,9 @@ message FindFailure {
 message DuRequest {
   uint32 contract_version = 1;
   string module = 2;
-  // The path below the module to measure; empty is the module itself.
+  // The path below the module to measure, as typed (contract 16); empty
+  // is the module itself. `x/` and `x/.` name what a link `x` points to,
+  // and are `Not a directory` for anything that is none.
   string start_path = 3;
   // `-a`: a row for every file as well as every directory.
   bool all_files = 4;
@@ -540,8 +548,9 @@ message DuFailure {
 message DfRequest {
   uint32 contract_version = 1;
   string module = 2;
-  // The path below the module whose filesystem is wanted; empty is the
-  // module itself. A path on another mount reports that mount.
+  // The path below the module whose filesystem is wanted, as typed
+  // (contract 16); empty is the module itself. A path on another mount
+  // reports that mount.
   string path = 3;
 }
 

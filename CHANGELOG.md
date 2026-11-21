@@ -21,7 +21,7 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `files_from_unnamed`; `client::connect_with_timeout` and
 `connect_transfer_client` return a `BlitClient<client::BlitChannel>`
 (the channel behind `client::BoundedResponses`). The wire
-protocol is contract 15: a peer on any other contract version (every 0.1.x
+protocol is contract 16: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
 
@@ -118,7 +118,7 @@ part, and a job you can list, read, re-run and retry.
   be written the transfer still completes and the report says the log is
   incomplete.
 - A dry run or `--null` run is logged as what it planned, not as copies.
-- Wire protocol (contract 15): the job ID rides the session-open and
+- Wire protocol (contract 16): the job ID rides the session-open and
   delegated-pull requests; `GetJobLog` returns a daemon's log by ID; the
   finished-job record carries the failed-file count. In a filtered mirror,
   `ManifestPruned` tells the destination which source paths were excluded,
@@ -281,6 +281,19 @@ asks before it deletes.
   `--json` gives `entries_removed`, `failures` and
   `failures_truncated`. On Linux the messages, the exit status and what
   is left on disk equal the system `rm`'s for the same tree and paths.
+- **A path is taken exactly as typed**, by `rm`, `du`, `df` and `find`
+  alike: a `/` after it, a `.` as its last name, a space at either end.
+  `rm` refuses a path ending in `.` or `..` in `rm`'s words (`refusing to
+  remove '.' or '..' directory: skipping 'PATH'`), `-rf` or not, and goes
+  on to the next — `blit rm -rf HOST:/m/work/.` used to delete `work`. A
+  path with a `/` after it is removed only if it is a directory: a file is
+  `Not a directory` and stays, which `-f` passes over — `blit rm
+  HOST:/m/doc/` used to unlink the file. `report ` with a space after it
+  is that file and not `report`. `du link/` and `find link/.` measure and
+  search the directory a link points to, and say `Not a directory` of a
+  file typed so. One place is deliberately not `rm`: `rm -r link/`, on a
+  link to a directory, says `Not a directory` as `rm` does and removes
+  nothing, where `rm` first empties the directory the link points to.
 - **It still asks first**, once for the whole command and before anything
   is sent, naming the paths: `Remove 'a' and 'b'? [y/N]`. `-y` skips the
   question, and so does `-f`, which means "never ask" in `rm` itself — so

@@ -10,9 +10,7 @@ use std::process::ExitCode;
 use crate::cli::DfArgs;
 use blit_core::admin::df::{self, FilesystemSpace};
 use blit_core::disk_usage::{blocks_1k, human_size, use_percent};
-use blit_core::endpoints::{
-    module_and_rel_path, parse_endpoint_or_local, rel_path_to_string, Endpoint,
-};
+use blit_core::endpoints::{module_and_typed_path, parse_endpoint_or_local, Endpoint};
 use eyre::{bail, Result};
 
 pub async fn run_df(args: DfArgs) -> Result<ExitCode> {
@@ -25,8 +23,9 @@ pub async fn run_df(args: DfArgs) -> Result<ExitCode> {
         }
         Endpoint::Remote(remote) => remote,
     };
-    let (module, rel_path) = module_and_rel_path(&remote)?;
-    let space = match df::query(&remote, module, rel_path_to_string(&rel_path)).await {
+    // The path as typed (cr-uv1-1).
+    let (module, path) = module_and_typed_path(&remote)?;
+    let space = match df::query(&remote, module, path).await {
         Ok(space) => space,
         // `df: PATH: No such file or directory`, and exit 1.
         Err(error) => {

@@ -189,6 +189,9 @@ fn rm_equals_the_system_rm() {
         write(root, "t/locked/sub/deep.txt");
         write(root, "t/open/a.txt");
         fs::set_permissions(root.join("t/locked"), fs::Permissions::from_mode(0o555)).unwrap();
+        // Two names that differ by a space at the end (cr-uv1-1).
+        write(root, "t/report");
+        write(root, "t/report ");
         // A directory that cannot even be searched, and an entry in it.
         write(root, "t/sealed/entry");
         fs::set_permissions(root.join("t/sealed"), fs::Permissions::from_mode(0o000)).unwrap();
@@ -232,6 +235,22 @@ fn rm_equals_the_system_rm() {
         // it; what it points to is not entered.
         (&[], &["t/link"]),
         (&["-r"], &["t/link", "t/dir"]),
+        // cr-uv1-1, the operand as typed. A last name of `.` or `..` is
+        // refused, `-rf` or not, and the next operand goes.
+        (&["-r", "-f"], &["t/dir/.", "t/empty"]),
+        (&["-r"], &["t/dir/..", "t/./empty/", "t/dir//"]),
+        (&["-r", "-f"], &["t/dir/./", "t/dir//.", "t/empty/.."]),
+        // A separator after it: a directory, or nothing — `-f` passes
+        // over a file typed so, and leaves it.
+        (&[], &["t/file.txt/", "t/other.txt"]),
+        (&["-f"], &["t/file.txt/", "t/missing/"]),
+        (&["-r"], &["t/file.txt/", "t/dir/", "t/missing/"]),
+        // A space at either end is part of a name.
+        (&[], &["t/report "]),
+        (&[], &[" t/report", "t/ report", "t/report"]),
+        // A link typed as a directory, without `-r`.
+        (&[], &["t/link/"]),
+        (&["-f"], &["t/link/", "t/file.txt"]),
         (&["-r"], &["t"]),
     ];
     if is_root {
@@ -422,6 +441,130 @@ fn mirror_and_move_fail_when_nobody_can_answer() {
                 }
             }
         }
+    }
+}
+
+/// cr-uv1-1, the one place `blit rm` is deliberately NOT `rm`: a link
+/// typed as a directory, with `-r`. `rm -r link/` empties the directory
+/// the link points to and then says `Not a directory`; `rm -rf link/` does
+/// the same and says nothing. `blit rm` says the same words and exits with
+/// the same status, and removes NOTHING — it never removes through a link.
+#[cfg(unix)]
+#[test]
+fn rm_never_removes_through_a_link_typed_as_a_directory() {
+    let ctx = TestContext::new();
+    tree(&ctx.module_dir);
+    write(&ctx.module_dir, "t/target/kept.txt");
+    write(&ctx.module_dir, "t/target/inner/deep.txt");
+    std::os::unix::fs::symlink("target", ctx.module_dir.join("t/link")).unwrap();
+    let link = remote(&ctx, "t/link/");
+    let whole = || {
+        ctx.module_dir.join("t/target/kept.txt").exists()
+            && ctx.module_dir.join("t/target/inner/deep.txt").exists()
+            && ctx.module_dir.join("t/link").symlink_metadata().is_ok()
+    };
+
+    let ran = blit(&ctx, &["rm", "-y", "-r", &link], None);
+    assert_eq!(
+        (ran.code, ran.stdout.as_str(), ran.stderr.as_str()),
+        (
+            Some(1),
+            "",
+            format!("blit rm: cannot remove '{link}': Not a directory\n").as_str()
+        ),
+        "{}",
+        ran.all()
+    );
+    assert!(whole(), "nothing was removed through the link");
+
+    let ran = blit(&ctx, &["rm", "-rf", &link], None);
+    assert_eq!(
+        (ran.code, ran.stdout.as_str(), ran.stderr.as_str()),
+        (Some(0), "", ""),
+        "{}",
+        ran.all()
+    );
+    assert!(whole(), "nor with -f");
+}
+
+/// cr-uv1-1, the reviewer's three commands, on every OS (the system's
+/// own `rm` is the reference on Linux, above). `rm -rf work/.` deleted
+/// `work`; `rm doc/` unlinked a file; of two names differing by a space at
+/// the end, the wrong one went.
+#[test]
+fn rm_removes_what_was_typed_and_nothing_tidier() {
+    let ctx = TestContext::new();
+    write(&ctx.module_dir, "work/a.txt");
+    write(&ctx.module_dir, "work/sub/b.txt");
+    write(&ctx.module_dir, "doc");
+    write(&ctx.module_dir, "also");
+
+    let dot = remote(&ctx, "work/.");
+    let ran = blit(&ctx, &["rm", "-rf", &dot, &remote(&ctx, "also")], None);
+    assert_eq!(ran.code, Some(1), "{}", ran.all());
+    assert_eq!(
+        ran.stderr,
+        format!("blit rm: refusing to remove '.' or '..' directory: skipping '{dot}'\n"),
+        "{}",
+        ran.all()
+    );
+    assert!(ctx.module_dir.join("work/sub/b.txt").exists());
+    assert!(
+        !ctx.module_dir.join("also").exists(),
+        "the next operand went"
+    );
+
+    // Nothing but such operands: nothing to ask about, nothing sent.
+    let ran = blit(&ctx, &["rm", "-r", &remote(&ctx, "work/..")], None);
+    assert_eq!(ran.code, Some(1), "{}", ran.all());
+    assert!(
+        ran.stderr.contains("skipping") && !ran.stdout.contains("Remove"),
+        "{}",
+        ran.all()
+    );
+    assert!(ctx.module_dir.join("work/a.txt").exists());
+
+    let slash = remote(&ctx, "doc/");
+    let ran = blit(&ctx, &["rm", "-y", &slash], None);
+    assert_eq!(ran.code, Some(1), "{}", ran.all());
+    assert_eq!(
+        ran.stderr,
+        format!("blit rm: cannot remove '{slash}': Not a directory\n")
+    );
+    assert!(ctx.module_dir.join("doc").exists());
+    let ran = blit(&ctx, &["rm", "-f", &slash], None);
+    assert_eq!(
+        (ran.code, ran.stderr.as_str()),
+        (Some(0), ""),
+        "{}",
+        ran.all()
+    );
+    assert!(ctx.module_dir.join("doc").exists(), "-f passes over it");
+
+    // The question names what was typed, to the letter.
+    let ran = blit(&ctx, &["rm", &slash], Some("n\n"));
+    assert!(
+        ran.stdout.contains(&format!("Remove '{slash}'?")),
+        "{}",
+        ran.all()
+    );
+
+    // A name ending in a space cannot be made on every filesystem.
+    #[cfg(unix)]
+    {
+        write(&ctx.module_dir, "report");
+        write(&ctx.module_dir, "report ");
+        let ran = blit(&ctx, &["rm", "-y", &remote(&ctx, "report ")], None);
+        assert_eq!(
+            (ran.code, ran.stderr.as_str()),
+            (Some(0), ""),
+            "{}",
+            ran.all()
+        );
+        assert!(
+            ctx.module_dir.join("report").exists() && !ctx.module_dir.join("report ").exists(),
+            "the name with the space, and only it"
+        );
     }
 }
 

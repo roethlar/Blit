@@ -18,9 +18,7 @@ use std::process::ExitCode;
 
 use crate::cli::FindArgs;
 use blit_core::admin::find::{self, FindEvent, FindQuery, Kind, NameTest};
-use blit_core::endpoints::{
-    module_and_rel_path, parse_endpoint_or_local, rel_path_to_string, Endpoint,
-};
+use blit_core::endpoints::{module_and_typed_path, parse_endpoint_or_local, Endpoint};
 use blit_core::find_name::NamePattern;
 use eyre::{bail, Result};
 
@@ -125,11 +123,12 @@ pub async fn run_find(args: FindArgs) -> Result<ExitCode> {
         }
         Endpoint::Remote(remote) => remote,
     };
-    let (module, rel_path) = module_and_rel_path(&remote)?;
+    // The path as typed (cr-uv1-1).
+    let (module, start_path) = module_and_typed_path(&remote)?;
     let operand = args.target.as_str();
     let query = FindQuery {
         module,
-        start_path: rel_path_to_string(&rel_path),
+        start_path,
         // `find dir/` names the directory a link called `dir` points to.
         follow_start: operand.ends_with('/') || (cfg!(windows) && operand.ends_with('\\')),
         names: expression.names,

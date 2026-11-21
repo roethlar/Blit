@@ -197,6 +197,8 @@ fn du_equals_the_system_du() {
     let t = tree(&ctx);
     fs::hard_link(t.join("a/deep/big.bin"), t.join("b/hard-link-to-big")).unwrap();
     std::os::unix::fs::symlink("../a/deep", t.join("b/link-to-dir")).unwrap();
+    // A name that ends in a space (cr-uv1-1).
+    file(&t.join("sp "), 3000);
     let odd = t
         .join("b")
         .join(std::ffi::OsStr::from_bytes(b"not-\xff-text.bin"));
@@ -240,6 +242,18 @@ fn du_equals_the_system_du() {
         (&["-a"], "t/b"),
         (&[], "t/a/five-k.bin"),
         (&["-s"], "t/b/link-to-dir"),
+        // cr-uv1-1, the operand as typed: a separator or a `.` after a
+        // link names the directory it points to (`-s` of the link alone
+        // is the link, 0); a `.` on the way says nothing.
+        (&["-s"], "t/b/link-to-dir/"),
+        (&["-s"], "t/b/link-to-dir/."),
+        (&["-a"], "t/b/link-to-dir/"),
+        (&[], "t/a/."),
+        (&["-a"], "t/./a"),
+        (&["-s"], "t/sp "),
+        // Typed as a directory, and none: `cannot access`, exit 1.
+        (&["-s"], "t/a/five-k.bin/"),
+        (&[], "t/missing/"),
     ] {
         let operand = remote(&ctx, local);
         let mut args = vec!["du"];
@@ -260,6 +274,16 @@ fn du_equals_the_system_du() {
             "{options:?} {local}: bytes"
         );
         assert_eq!(ours.code, code, "du {options:?} {local}: exit status");
+        // What it says of an operand it cannot measure, in `du`'s words.
+        assert_eq!(
+            String::from_utf8_lossy(&as_local(ours.stderr.as_bytes(), &operand, local)).replacen(
+                "blit du: ",
+                "du: ",
+                1
+            ),
+            String::from_utf8_lossy(&their_err),
+            "du {options:?} {local}: what it says"
+        );
     }
     assert!(has_odd, "this filesystem stores a name that is not UTF-8");
     let all = blit(&ctx, &["du", "-a", &remote(&ctx, "t/b")]);
@@ -498,6 +522,35 @@ fn df_equals_the_system_df() {
             );
         }
     }
+    // cr-uv1-1, the operand as typed: a file typed as a directory, and a
+    // path that is not there, in `df`'s words and with its status.
+    for below in ["t/a/five-k.bin/", "t/missing", "t/a/deep/missing/"] {
+        let operand = remote(&ctx, below);
+        let ran = blit(&ctx, &["df", &operand]);
+        let theirs = Command::new("df")
+            .arg(below)
+            .current_dir(&ctx.module_dir)
+            .env("LC_ALL", "C.UTF-8")
+            .output()
+            .expect("the system df");
+        assert_eq!(ran.code, theirs.status.code(), "df {below}\n{}", ran.stderr);
+        assert_eq!(
+            ran.stderr
+                .replacen("blit df: ", "df: ", 1)
+                .replace(&operand, below),
+            String::from_utf8_lossy(&theirs.stderr),
+            "df {below}"
+        );
+    }
+    // And one typed as a directory that is one answers like the same
+    // path without the separator.
+    let plain = blit(&ctx, &["df", &remote(&ctx, "t/a/deep")]).out();
+    let slashed = blit(&ctx, &["df", &remote(&ctx, "t/a/deep/")]).out();
+    assert_eq!(
+        plain.lines().nth(1).unwrap().split_whitespace().nth(1),
+        slashed.lines().nth(1).unwrap().split_whitespace().nth(1)
+    );
+
     // The module's own filesystem, not the root one, where they differ.
     let (module, root) = (system(&ctx.module_dir), system(Path::new("/")));
     if module[0] == root[0] {

@@ -163,7 +163,14 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// found, in batches, and each entry that could not be read, where `Find`
 /// sent a row of metadata for every entry and dropped what it could not
 /// read in silence.
-pub const CONTRACT_VERSION: u32 = 15;
+/// v16: the path in `Rm`, `Du`, `Df` and `FindPaths` is the operand AS
+/// TYPED (cr-uv1-1) — its last separator, a final `.`, a space at either
+/// end — where it was tidied by the asker first. No message changed; what
+/// one means did, and the daemon acts on it: `work/.` is refused where
+/// `work` was removed, `doc/` is `Not a directory` where the file `doc` was
+/// unlinked. A daemon of contract 15 would tidy the path again and remove
+/// what the asker never named, so the two are refused each other.
+pub const CONTRACT_VERSION: u32 = 16;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames

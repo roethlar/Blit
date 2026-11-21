@@ -1,5 +1,5 @@
 use super::admin::{
-    filesystem_space_for_path, list_completions, read_operands, remove_operands,
+    filesystem_space_for_path, list_completions, read_operands, read_start, remove_operands,
     split_completion_prefix, stream_disk_usage, stream_find,
 };
 use super::util::{
@@ -1144,11 +1144,9 @@ impl Blit for BlitService {
         // AC-11: an asker of this daemon's own contract, or nothing is read.
         blit_core::admin::same_build::check(req.contract_version)?;
         let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
-        let start_rel = if req.start_path.trim().is_empty() {
-            PathBuf::from(".")
-        } else {
-            resolve_relative_path(req.start_path.trim())?
-        };
+        // As typed (cr-uv1-1): nothing trimmed, and a separator after the
+        // path kept for the system to read.
+        let start = read_start(&req.start_path)?;
         let options = blit_core::disk_usage::UsageOptions {
             all_files: req.all_files,
             max_depth: req.max_depth,
@@ -1161,7 +1159,7 @@ impl Blit for BlitService {
         tokio::spawn(async move {
             let err_sender = tx.clone();
             let result = tokio::task::spawn_blocking(move || {
-                stream_disk_usage(module_root, start_rel, options, &tx)
+                stream_disk_usage(module_root, start, options, &tx)
             })
             .await;
 
@@ -1189,14 +1187,15 @@ impl Blit for BlitService {
         // AC-11: an asker of this daemon's own contract, or nothing is read.
         blit_core::admin::same_build::check(req.contract_version)?;
         let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
-        let start_rel = if req.start_path.trim().is_empty() {
-            PathBuf::from(".")
-        } else {
-            resolve_relative_path(req.start_path.trim())?
-        };
+        // As typed (cr-uv1-1): nothing trimmed, and a separator after the
+        // path kept for the system to read.
+        let start = read_start(&req.start_path)?;
         // The start's own name, for the name tests: the last name of the
-        // path asked for, and the module's when the path is the module.
-        let start_name = match start_rel.file_name() {
+        // path asked for AS TYPED — `.` for `dir/.`, as `find` reads it —
+        // and the module's when the path is the module.
+        let typed_last = blit_core::admin::operand::final_name(&req.start_path);
+        let start_name = match start.rel.file_name() {
+            Some(_) if typed_last == "." => b".".to_vec(),
             Some(name) => blit_core::find::name_bytes(name).into_owned(),
             None => module.name.clone().into_bytes(),
         };
@@ -1226,7 +1225,7 @@ impl Blit for BlitService {
         tokio::spawn(async move {
             let err_sender = tx.clone();
             let result = tokio::task::spawn_blocking(move || {
-                stream_find(module_root, start_rel, start_name, options, &tx)
+                stream_find(module_root, start, start_name, options, &tx)
             })
             .await;
 
@@ -1253,10 +1252,11 @@ impl Blit for BlitService {
         let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
         // AC-1: the path asked about, not the module it is in — a path on
         // another mount below the module reports that mount.
-        let path = if req.path.trim().is_empty() {
+        // As typed (cr-uv1-1): `df doc/` of a file is `Not a directory`.
+        let path = if req.path.is_empty() {
             module.path.clone()
         } else {
-            let path = module.path.join(resolve_relative_path(req.path.trim())?);
+            let path = read_start(&req.path)?.below(&module.path);
             blit_core::path_safety::verify_contained(&module.path, &path)
                 .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))?;
             path
