@@ -251,7 +251,9 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
     ) -> Option<Spellings<'a>> {
         Spellings::of_role(noted.read_as, noted.role, windows, whole)
     }
-    let mut unchanged: Vec<usize> = Vec::new();
+    // What asking found of a pattern: `true`, the option reads it
+    // otherwise; `false`, its two readings are proved the same.
+    let mut found: std::collections::HashMap<usize, bool> = std::collections::HashMap::new();
     let mut shown: Option<(usize, Spellings)> = None;
     // A loss first: a pattern the option would NARROW, wherever it stands
     // — borne out by a name if one can be, and said with `may` if not.
@@ -264,6 +266,7 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
         let Some(spellings) = read(noted, windows, &whole) else {
             continue;
         };
+        found.insert(at, true);
         if spellings.narrowed.is_some() && spellings.narrowing_borne_out {
             shown = Some((at, spellings));
             break;
@@ -279,12 +282,15 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
         let mut in_words: Option<(usize, Spellings)> = None;
         for (at, noted) in candidates.iter().enumerate() {
             match read(noted, windows, &whole) {
-                None => unchanged.push(at),
-                Some(spellings) if !spellings.others.is_empty() => {
-                    shown = Some((at, spellings));
-                    break;
+                None => {
+                    found.insert(at, false);
                 }
                 Some(spellings) => {
+                    found.insert(at, true);
+                    if !spellings.others.is_empty() {
+                        shown = Some((at, spellings));
+                        break;
+                    }
                     in_words.get_or_insert((at, spellings));
                 }
             }
@@ -293,29 +299,28 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
     }
     let (shown_at, spellings) = shown?;
     let (pattern, file) = (candidates[shown_at].typed, candidates[shown_at].file);
-    // The patterns that are only counted. One the option reads no
-    // differently is not counted — and only a pattern that spells out its
-    // own alternatives, in braces or a class, can be such a one (`{a,A}`,
-    // `[Jj]`): those are asked about, the first few of them; plain text
-    // and wildcards always read otherwise, and are counted unasked. A long
-    // list is not compiled pattern by pattern for one line.
+    // The patterns that are only counted. One whose two readings are the
+    // same is not counted — and only a pattern that spells out its own
+    // alternatives, in braces or a class, can be such a one (`{a,A}`,
+    // `[Jj]`): those are asked about, the first few of them in the order
+    // typed, WHICHEVER pattern is shown (cr-ecm10-5: only the ones typed
+    // after it were, so the count changed with the order). Plain text and
+    // wildcards always read otherwise, and are counted unasked.
     let mut asked = 0;
     for (at, noted) in candidates.iter().enumerate() {
-        if at <= shown_at || unchanged.contains(&at) || !noted.read_as.contains(['{', '[']) {
+        if found.contains_key(&at) || !noted.read_as.contains(['{', '[']) {
             continue;
         }
         if asked == MOST_PATTERNS_ASKED {
             break;
         }
         asked += 1;
-        if read(noted, windows, &whole).is_none() {
-            unchanged.push(at);
-        }
+        found.insert(at, read(noted, windows, &whole).is_some());
     }
     let noted = candidates
         .iter()
         .enumerate()
-        .filter(|(at, _)| *at != shown_at && !unchanged.contains(at))
+        .filter(|(at, _)| *at != shown_at && found.get(at) != Some(&false))
         .map(|(_, noted)| (noted.typed, noted.file, ()));
     let shown_from = file.map_or(String::new(), |file| format!(" (from {file})"));
     let others: Vec<Option<&str>> = noted.map(|(_, file, _)| file).collect();
@@ -488,6 +493,17 @@ impl<'a> Spellings<'a> {
             _ => trimmed,
         };
         let (lower, upper) = in_both_cases(typed, windows);
+        // cr-ecm10-5: what is CHECKED for a spelling is the whole pattern
+        // in that case — what the text shown stands for — and the names
+        // that pattern itself denotes. The text shown (`.O` for `*.O`) was
+        // checked beside names taken from the pattern and re-cased, which
+        // a spelling holding a class does not denote: `Q[b-~]` was offered
+        // on the strength of `QB`, and is the very glob typed beside it.
+        let (whole_lower, whole_upper) = if typed == pattern {
+            (lower.clone(), upper.clone())
+        } else {
+            in_both_cases(pattern, windows)
+        };
         // cr-ecm8-2: every negated class of the pattern that would take
         // less, and the first of them the filter bears out WHERE IT STANDS.
         // The first such class was credited when any name at all stopped
@@ -520,11 +536,9 @@ impl<'a> Spellings<'a> {
         });
         let mut others = Vec::new();
         if !takes_less_somewhere {
-            for (other, raised) in [(lower, false), (upper, true)] {
+            for (other, whole) in [(lower, whole_lower), (upper, whole_upper)] {
                 let shows = match asked {
-                    Some(asked) => {
-                        asked.matched_only_ignoring_case(pattern, &other, raised, windows)
-                    }
+                    Some(asked) => asked.would_also_match(&whole, windows),
                     None => true,
                 };
                 if other != typed && !others.contains(&other) && shows {
@@ -744,43 +758,34 @@ impl Asked {
             && !named(self.whole.ignoring())
     }
 
-    /// `spelling` — the pattern's letters all lowered, or all `raised` —
-    /// names only what the option would match through this pattern, and
-    /// stands for a name the RUN would treat otherwise with the option
-    /// ([`Self::gained`]).
+    /// `spelling` — the WHOLE pattern with its letters all lowered, or all
+    /// raised — names only what the option would match through this
+    /// pattern, and some name it denotes is one the run would treat
+    /// otherwise with the option ([`Self::gained`]).
     ///
-    /// What it stands for is more than the names read off its own text.
-    /// The text shown has lost its end wildcards (`.O` for `*.O`), and the
-    /// one name read off that — `.O` — may be a name some other pattern
-    /// happens to take (`??`) when the names it is shown for (`x.O`) are
-    /// not. So the names read off the whole PATTERN, put in the
-    /// spelling's case, are asked about as well.
-    fn matched_only_ignoring_case(
-        &self,
-        pattern: &str,
-        spelling: &str,
-        raised: bool,
-        windows: bool,
-    ) -> bool {
-        let Some((filter, names)) = self.text(spelling, windows) else {
+    /// cr-ecm10-5: the names are the ones the spelling itself denotes,
+    /// with each `*` tried as some text and as none.
+    fn would_also_match(&self, spelling: &str, windows: bool) -> bool {
+        let Some(filter) =
+            crate::fs_enum::FileFilter::probing(spelling, self.role == Role::Exclude, false)
+        else {
             return false;
         };
-        let mut shows_a_difference = false;
-        for name in &names {
-            let by_spelling = Self::named(self.role, &filter, name);
-            let ignoring = Self::named(self.role, &self.ignoring_case, name);
-            if (by_spelling.0 && !ignoring.0) || (by_spelling.1 && !ignoring.1) {
+        let mut gained = false;
+        for star in STARS {
+            let Some(names) = samples_with(spelling, windows, None, star) else {
                 return false;
+            };
+            for name in &names {
+                let by_spelling = Self::named(self.role, &filter, name);
+                let ignoring = Self::named(self.role, &self.ignoring_case, name);
+                if (by_spelling.0 && !ignoring.0) || (by_spelling.1 && !ignoring.1) {
+                    return false;
+                }
+                gained = gained || ((by_spelling.0 || by_spelling.1) && self.gained(name));
             }
-            shows_a_difference |= (by_spelling.0 || by_spelling.1) && self.gained(name);
         }
-        shows_a_difference
-            || samples(pattern, windows, None).is_some_and(|names| {
-                names.iter().any(|name| {
-                    let cased: String = name.chars().map(|c| in_case(c, raised)).collect();
-                    self.gained(&cased)
-                })
-            })
+        gained
     }
 
     /// The letters the class that begins at byte `at` of the pattern is
@@ -2688,6 +2693,34 @@ mod tests {
         let doc = "\"*.Doc\" matches .Doc only, and 2 more patterns match only as typed; \
                    capital letters matter (--ignore-case would also match .doc, .DOC).";
         assert_eq!(note(&["a", "A", "*.Doc"]).as_deref(), Some(doc));
+        // cr-ecm10-5: and the count is the same whatever the order — it
+        // was two with `*.Doc` first and none with it last.
+        for order in [
+            ["*.Doc", "a", "A"],
+            ["a", "*.Doc", "A"],
+            ["a", "A", "*.Doc"],
+        ] {
+            assert_eq!(note(&order).as_deref(), Some(doc), "{order:?}");
+        }
+        // A pattern whose two readings are the same is not counted
+        // wherever it stands: only the ones typed AFTER the pattern shown
+        // were asked, so `{b,B}` typed first was counted.
+        let narrowed = "\"[!a].dat\" matches exactly as typed; capital letters matter \
+                        (--ignore-case changes what it matches: [!a] would stop matching A).";
+        for order in [["{b,B}", "[!a].dat"], ["[!a].dat", "{b,B}"]] {
+            assert_eq!(note(&order).as_deref(), Some(narrowed), "{order:?}");
+        }
+        // cr-ecm10-5: a spelling is offered for the names it denotes.
+        // `Q[b-~]` was offered for `q[b-~]` beside the pattern typed
+        // exactly so: what the option adds is `QB`, which that glob does
+        // not denote, and every name it does denote is kept already.
+        assert_eq!(
+            note(&["q[b-~]", "Q[b-~]"]).as_deref(),
+            Some(
+                "\"q[b-~]\" matches exactly as typed, and 1 more pattern matches only as \
+                 typed; capital letters matter (--ignore-case ignores them)."
+            )
+        );
         // cr-ecm10-1: where a class could take less and no name shows it,
         // the warning stays, and says `may`. `A.dat` is kept by the second
         // pattern either way — at the root, which is where it was tried.
@@ -2822,24 +2855,24 @@ mod tests {
                 "\"{pattern}\" shown as {shown}"
             );
         }
-        // A spelling is offered only when the option matches it and the
-        // pattern as typed does not.
+        // A spelling — the whole pattern in another case — is offered only
+        // when it denotes nothing the option does not match, and some name
+        // it denotes is one the run would treat otherwise with the option.
         for (pattern, spelling, offered) in [
-            ("*Cache", "cache", true),
-            ("*Cache", "CACHE", true),
+            ("*Cache", "*cache", true),
+            ("*Cache", "*CACHE", true),
             ("{a,A}", "{a,a}", false),
             ("{a,A}", "{A,A}", false),
+            ("*/Cache", "*/cache", true),
+            // A text that names what the pattern does not, even ignoring
+            // case, is not offered: a level the pattern requires is gone.
             ("*/Cache", "cache", false),
             ("photo[!x].jpg", "PHOTO[!x].JPG", false),
             ("photo[!0-9].jpg", "PHOTO[!0-9].JPG", true),
+            ("q[b-~]", "Q[b-~]", true),
         ] {
             assert_eq!(
-                asked(pattern).matched_only_ignoring_case(
-                    pattern,
-                    spelling,
-                    spelling.chars().any(char::is_uppercase),
-                    false
-                ),
+                asked(pattern).would_also_match(spelling, false),
                 offered,
                 "\"{pattern}\" offering {spelling}"
             );
@@ -2903,12 +2936,17 @@ mod tests {
         assert!(!within("*.Txt", Role::Include, &["*.TXT"], &["*.Txt"]).gained("x.txt"));
         // So with a gain: a spelling another pattern names already is not
         // offered.
-        assert!(asked("a").matched_only_ignoring_case("a", "A", true, false));
-        assert!(!among("a", &["A"]).matched_only_ignoring_case("a", "A", true, false));
-        // The text shown for `*.o` is `.o`, and `.O` is a name `??` takes;
-        // the names it is shown for, `x.O` among them, are not.
-        assert!(among("*.o", &["??"]).matched_only_ignoring_case("*.o", ".O", true, false));
-        assert!(!among("*.o", &["*"]).matched_only_ignoring_case("*.o", ".O", true, false));
+        assert!(asked("a").would_also_match("A", false));
+        assert!(!among("a", &["A"]).would_also_match("A", false));
+        assert!(!among("a", &["./A"]).would_also_match("A", false));
+        // cr-ecm10-5: nor the very glob typed beside it. The name the
+        // option adds, `QB`, is none that `Q[b-~]` denotes.
+        assert!(!among("q[b-~]", &["Q[b-~]"]).would_also_match("Q[b-~]", false));
+        assert!(among("q[b-~]", &["Q[b-~]"]).gained("QB"));
+        // `.O` alone is a name `??` takes; `*.O` denotes `x.O` as well,
+        // which it does not.
+        assert!(among("*.o", &["??"]).would_also_match("*.O", false));
+        assert!(!among("*.o", &["*"]).would_also_match("*.O", false));
         // cr-ecm10-1: whether a pattern's readings are THE SAME is asked of
         // the pattern alone. Beside `A` — or beside `./A`, which keeps `A`
         // at the root and nowhere else — `a` still reads otherwise; there

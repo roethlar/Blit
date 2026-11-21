@@ -816,7 +816,7 @@ fn the_line_keeps_what_is_under_a_folder_apart_from_the_folder() {
     );
 }
 
-/// cr-ecm7-2, cr-ecm7-3, cr-ecm7-4, cr-ecm8-2, cr-ecm9-2, cr-ecm10-2, cr-ecm10-1: commands whose line claimed
+/// cr-ecm7-2, cr-ecm7-3, cr-ecm7-4, cr-ecm8-2, cr-ecm9-2, cr-ecm10-2, cr-ecm10-1, cr-ecm10-5: commands whose line claimed
 /// something the mirror then contradicted — or was absent when it had
 /// something to say — each shown the line it gets now and run both ways.
 ///
@@ -954,6 +954,17 @@ fn the_line_claims_only_what_the_mirror_then_does() {
                    typed; capital letters matter (--ignore-case changes what they match: [!b] \
                    would stop matching B).",
             entries: &[("A.bin", true, true), ("B.txt", true, false)],
+        },
+        // cr-ecm10-5: `Q[b-~]` was offered as a spelling the option would
+        // also match, beside the pattern typed exactly so. What the
+        // option adds is `QB`; no spelling of the pattern denotes it, and
+        // none is offered.
+        Case {
+            excludes: &["q[b-~]", "Q[b-~]"],
+            includes: &[],
+            line: "\"q[b-~]\" matches exactly as typed, and 1 more pattern matches only as \
+                   typed; capital letters matter (--ignore-case ignores them).",
+            entries: &[("QB", false, true), ("Qb", true, true), ("qb", true, true)],
         },
         Case {
             excludes: &["{a,A}", "*.Doc"],
