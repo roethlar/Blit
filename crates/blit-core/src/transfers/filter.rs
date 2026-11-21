@@ -125,13 +125,35 @@ fn split_listed(listed: &std::collections::HashSet<PathBuf>) -> (Vec<&PathBuf>, 
     (names, unnamed)
 }
 
-/// The exclude patterns `inputs` describe: the caller's own resolution
-/// when it gave one (cr-ecm5-3), else resolved here.
-fn resolved_patterns(inputs: &FilterInputs<'_>) -> Vec<String> {
+/// The exclude patterns `inputs` describe — the ones a filter applies, and
+/// apart from them the ones that cannot match anything
+/// ([`ResolvedExcludes::unmatchable`]), which no filter holds: the
+/// caller's own resolution when it gave one (cr-ecm5-3), else resolved
+/// here.
+fn resolved_patterns(inputs: &FilterInputs<'_>) -> (Vec<String>, Vec<String>) {
     match inputs.resolved {
-        Some(resolved) => resolved.patterns.clone(),
-        None => resolve_excludes(inputs.exclude, inputs.source_root).patterns,
+        Some(resolved) => (resolved.patterns.clone(), resolved.unmatchable.clone()),
+        None => {
+            let resolved = resolve_excludes(inputs.exclude, inputs.source_root);
+            (resolved.patterns, resolved.unmatchable)
+        }
     }
+}
+
+/// cr-ecm8-1: an exclude that cannot match anything is in no filter, and
+/// is still held to what every pattern is — text that can be read as a
+/// glob. One that cannot refuses the command, as it did while such a
+/// pattern sat among the others.
+fn refuse_unreadable(unmatchable: Vec<String>, ignore_case: bool) -> Result<()> {
+    if unmatchable.is_empty() {
+        return Ok(());
+    }
+    let mut probe = FileFilter::default();
+    probe.exclude_files = unmatchable;
+    probe.ignore_case = ignore_case;
+    probe
+        .validate_globs()
+        .map_err(|msg| eyre!("invalid filter pattern: {msg}"))
 }
 
 /// Build a `FileFilter` from filter inputs. Used by every command
@@ -146,8 +168,10 @@ pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
     // cr-ecm6-1: in the one form an include has — the form a peer is
     // sent — so that this filter and the peer's read the same pattern.
     filter.include_files = wire_includes(inputs.include, cfg!(windows));
-    filter.exclude_files = resolved_patterns(inputs);
+    let (patterns, unmatchable) = resolved_patterns(inputs);
+    filter.exclude_files = patterns;
     filter.ignore_case = inputs.ignore_case;
+    refuse_unreadable(unmatchable, inputs.ignore_case)?;
     if let Some(s) = inputs.min_size {
         filter.min_size = Some(parse_size(s).with_context(|| format!("--min-size {s}"))?);
     }
@@ -282,11 +306,13 @@ fn case_note_on(
 pub fn validate(inputs: &FilterInputs<'_>) -> Result<()> {
     let mut probe = FileFilter::default();
     probe.include_files = wire_includes(inputs.include, cfg!(windows));
-    probe.exclude_files = resolved_patterns(inputs);
+    let (patterns, unmatchable) = resolved_patterns(inputs);
+    probe.exclude_files = patterns;
     probe.ignore_case = inputs.ignore_case;
     probe
         .validate_globs()
         .map_err(|msg| eyre!("invalid filter pattern: {msg}"))?;
+    refuse_unreadable(unmatchable, inputs.ignore_case)?;
     for (flag, size) in [
         ("--min-size", inputs.min_size),
         ("--max-size", inputs.max_size),
@@ -310,13 +336,16 @@ pub fn validate(inputs: &FilterInputs<'_>) -> Result<()> {
 /// doesn't have to reach back into the client's filesystem.
 pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterSpec> {
     use crate::generated::FilterSpec;
+    let (patterns, unmatchable) = resolved_patterns(inputs);
+    refuse_unreadable(unmatchable, inputs.ignore_case)?;
     let mut spec = FilterSpec {
         // cr-ecm3-3: in the dialect every peer reads alike, as the
         // excludes below already are.
         include: wire_includes(inputs.include, cfg!(windows)),
         // audit-19: relativized HERE, before the spec leaves this host —
         // the peer that applies it never knows this side's source root.
-        exclude: resolved_patterns(inputs),
+        // cr-ecm8-1: and never a pattern that cannot match anything here.
+        exclude: patterns,
         min_size: None,
         max_size: None,
         min_age_secs: None,
@@ -407,12 +436,17 @@ pub struct ResolvedExcludes {
     /// cr-g3fix4-3), so the wire form holds no bare `\` and reads the same
     /// on any peer ([`typed_exclude_dialect`]). In a rewritten pattern a
     /// name read from the disk is escaped, so it matches only itself
-    /// (cr-g3fix2-2). An unmatchable pattern stays exactly as typed.
+    /// (cr-g3fix2-2). An unmatchable pattern is not among them.
     pub patterns: Vec<String>,
     /// The absolute patterns that cannot match anything: outside the
     /// source root, naming the root itself, or any absolute pattern when
-    /// the source is not local. They stay in `patterns`, where they match
-    /// nothing; the caller warns about each one.
+    /// the source is not local. The caller warns about each one, and that
+    /// is all that is done with them: cr-ecm8-1 — they are in NO filter,
+    /// here or at a peer. Kept in `patterns` as typed, one was sent to the
+    /// peer, which reads the text by its own rule: a Windows `\keep`,
+    /// outside the source there, is the glob `keep` to a Linux daemon,
+    /// and a mirror with `--ignore-case` and `--delete-scope all` then
+    /// deleted the destination's `KEEP` though the source had it.
     pub unmatchable: Vec<String>,
     /// cr-g3fix4-1: the absolute patterns that name an entry stored here
     /// under several names (one entry hard-linked under each, none spelled
@@ -421,9 +455,9 @@ pub struct ResolvedExcludes {
     /// which, so all are excluded. The caller notes each one.
     pub expanded: Vec<(String, Vec<String>)>,
     /// cr-ecm4-3: for each exclude as typed, in order, where what it
-    /// became sits in `patterns` — one pattern, or several for an entry in
-    /// `expanded`. What is said about a pattern ([`case_note`]) is said of
-    /// these.
+    /// became sits in `patterns` — one pattern, several for an entry in
+    /// `expanded`, none for one in `unmatchable`. What is said about a
+    /// pattern ([`case_note`]) is said of these.
     pub became: Vec<std::ops::Range<usize>>,
 }
 
@@ -546,10 +580,12 @@ fn resolve_excludes_on(
                 }
                 resolved.patterns.extend(spelled);
             }
-            _ => {
-                resolved.patterns.push(pattern.clone());
-                resolved.unmatchable.push(pattern.clone());
-            }
+            // cr-ecm8-1: reported, and in no filter. It was also kept
+            // among the patterns "as typed, where it matches nothing" —
+            // true of the text on THIS host, where it is an absolute
+            // path, and not of the same text read by another: `\keep`
+            // is a path on Windows and the glob `keep` to a Linux peer.
+            _ => resolved.unmatchable.push(pattern.clone()),
         }
         resolved.became.push(first..resolved.patterns.len());
     }
@@ -2184,8 +2220,9 @@ mod tests {
 
     /// audit-19: an absolute exclude that names nothing under the source
     /// root — outside it, the root itself, or any absolute pattern when the
-    /// source is remote — is reported unmatchable (the CLI warns), and is
-    /// kept as typed, where it matches nothing.
+    /// source is remote — is reported unmatchable (the CLI warns).
+    /// cr-ecm8-1: and it is in no filter and goes to no peer; it was kept
+    /// among the patterns as typed.
     #[test]
     fn an_absolute_exclude_outside_the_source_root_is_unmatchable() {
         let dir = tempfile::tempdir().unwrap();
@@ -2196,7 +2233,12 @@ mod tests {
 
         let resolved = resolve_excludes(&exc, Some(root));
         assert_eq!(resolved.unmatchable, vec![outside.clone(), the_root]);
-        assert_eq!(resolved.patterns, exc, "unmatchable patterns stay as typed");
+        assert_eq!(
+            resolved.patterns,
+            [".java"],
+            "what cannot match is in no filter"
+        );
+        assert_eq!(resolved.became, [0..0, 0..0, 0..1]);
 
         let remote = resolve_excludes(&exc, None);
         assert_eq!(
@@ -2204,9 +2246,11 @@ mod tests {
             vec![outside, format!("{}", root.display())],
             "no local root: every absolute pattern is unmatchable"
         );
+        assert_eq!(remote.patterns, [".java"]);
         let mut i = inputs(&[], &exc);
         i.source_root = Some(root);
-        assert_eq!(build_spec(&i).unwrap().exclude, exc);
+        assert_eq!(build_spec(&i).unwrap().exclude, [".java"]);
+        assert_eq!(build(&i).unwrap().exclude_files, [".java"]);
     }
 
     /// A root reached through a symlink still relativizes a pattern
@@ -3097,7 +3141,8 @@ mod tests {
         let windows = resolve_excludes_on(&mixed, None, true);
         assert_eq!(
             windows.patterns,
-            ["./cache", "cache/", "a/.java", "*.tmp", r"C:\elsewhere\x"]
+            ["./cache", "cache/", "a/.java", "*.tmp"],
+            "and the drive path, which cannot match, is in no filter (cr-ecm8-1)"
         );
         assert_eq!(windows.unmatchable, [r"C:\elsewhere\x"]);
         let unix = resolve_excludes_on(&mixed, None, false);
@@ -4523,8 +4568,8 @@ mod tests {
         let mixed = typed(&[&outside, &inside, &tmp]);
         let resolved = resolve_excludes(&mixed, Some(&root));
         assert_eq!(resolved.unmatchable, std::slice::from_ref(&outside));
-        assert_eq!(resolved.became, [0..1, 1..2, 2..3]);
-        assert_eq!(resolved.patterns[1], "./Data");
+        assert_eq!(resolved.became, [0..0, 0..1, 1..2]);
+        assert_eq!(resolved.patterns[0], "./Data");
 
         // The unmatchable one is passed over; the absolute one is echoed
         // as typed and described as what the matcher is given.
@@ -4588,9 +4633,10 @@ mod tests {
         let mut given = inputs(&[], &typed);
         given.source_root = Some(&root);
 
-        // Without a resolution: resolved on the spot, to nothing.
-        assert_eq!(build(&given).unwrap().exclude_files, typed);
-        assert_eq!(build_spec(&given).unwrap().exclude, typed);
+        // Without a resolution: resolved on the spot, to nothing — and what
+        // can match nothing is in no filter (cr-ecm8-1).
+        assert_eq!(build(&given).unwrap().exclude_files, Vec::<String>::new());
+        assert_eq!(build_spec(&given).unwrap().exclude, Vec::<String>::new());
 
         given.resolved = Some(&shown);
         let filter = build(&given).unwrap();
@@ -4800,5 +4846,88 @@ mod tests {
         assert!(spec.files_from.is_empty() && spec.files_from_raw.is_empty());
         assert_eq!(spec.files_from_unnamed, ["bad\0name.txt"]);
         filter_from_spec(spec).expect("and its retry");
+    }
+
+    /// cr-ecm8-1: an exclude reported as unable to match anything is in no
+    /// filter — not this host's, and not the one a peer is sent. Under the
+    /// Windows path rule `\keep` is a path at the root of a drive: outside
+    /// any source, so unmatchable, and it was kept among the patterns "as
+    /// typed, where it matches nothing". A Linux daemon reads that text by
+    /// its own rule, as the glob `keep`; with `--ignore-case` its source
+    /// walk left `KEEP` out, and a mirror with `--delete-scope all` deleted
+    /// the destination's `KEEP` though the source had it.
+    #[test]
+    fn an_exclude_that_cannot_match_is_in_no_filter() {
+        use crate::remote::transfer::operation_spec::filter_from_spec;
+        // The reviewer's case, under the Windows rule on any host: a
+        // source that is not local, so every absolute exclude is
+        // unmatchable.
+        let typed: Vec<String> = [r"\keep", "*.tmp", r"C:\data\Cache"]
+            .map(String::from)
+            .to_vec();
+        let windows = resolve_excludes_on(&typed, None, true);
+        assert_eq!(windows.unmatchable, [r"\keep", r"C:\data\Cache"]);
+        assert_eq!(windows.patterns, ["*.tmp"]);
+        assert_eq!(windows.became, [0..0, 0..1, 1..1]);
+
+        // What a command builds from that resolution: the filter here and
+        // the spec for the peer hold the one pattern that can match.
+        let mut given = inputs(&[], &typed);
+        given.ignore_case = true;
+        given.resolved = Some(&windows);
+        assert_eq!(build(&given).unwrap().exclude_files, ["*.tmp"]);
+        let spec = build_spec(&given).unwrap();
+        assert_eq!(spec.exclude, ["*.tmp"]);
+        validate(&given).expect("a pattern that cannot match is no refusal");
+        let peer = filter_from_spec(spec).unwrap();
+        let passes = |filter: &FileFilter, rel: &str| {
+            filter.allows_entry(Some(Path::new(rel)), Path::new(rel), 1, None)
+        };
+        for kept in ["keep", "KEEP", "data/Cache"] {
+            assert!(passes(&peer, kept), "{kept} is not excluded at the peer");
+        }
+        assert!(!passes(&peer, "x.TMP"));
+        if !cfg!(windows) {
+            // What went before, read where it arrived: the same text is a
+            // pattern there, and with the case mode it names `KEEP`.
+            let as_it_went = filter_from_spec(crate::generated::FilterSpec {
+                exclude: vec![r"\keep".to_string()],
+                ignore_case: true,
+                ..crate::generated::FilterSpec::default()
+            })
+            .unwrap();
+            assert!(!passes(&as_it_went, "KEEP") && !passes(&as_it_went, "keep"));
+        }
+
+        // Under this host's own rule, with a local source: outside it, and
+        // the source itself.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let here: Vec<String> = vec![
+            "/nowhere/Keep".to_string(),
+            root.display().to_string(),
+            "Keep".to_string(),
+        ];
+        let mut given = inputs(&[], &here);
+        given.source_root = Some(root);
+        assert_eq!(build(&given).unwrap().exclude_files, ["Keep"]);
+        assert_eq!(build_spec(&given).unwrap().exclude, ["Keep"]);
+
+        // In no filter, and still text that must read as a glob: one that
+        // does not refuses the command, as it did among the patterns.
+        let unreadable: Vec<String> = vec!["/nowhere/[z-a]".to_string()];
+        let mut given = inputs(&[], &unreadable);
+        given.source_root = Some(root);
+        for (step, refused) in [
+            ("build", build(&given).map(|_| ())),
+            ("build_spec", build_spec(&given).map(|_| ())),
+            ("validate", validate(&given)),
+        ] {
+            let error = refused.expect_err(step);
+            assert!(
+                format!("{error:#}").contains("invalid filter pattern"),
+                "{step}: {error:#}"
+            );
+        }
     }
 }

@@ -170,6 +170,12 @@ part, and a job you can list, read, re-run and retry.
   select an unrelated file called exactly that for deletion. A line that
   is no relative path of names (`./x`, `../x`, `/abs`) still names
   nothing and is still reported as a file that did not land.
+- An `--exclude` reported as unable to match anything (an absolute path
+  outside the source, or any absolute path when the source is on a
+  daemon) is no longer part of the filter or sent to the daemon. It was
+  sent as typed, and a daemon on another kind of machine could read the
+  same text as a pattern: a Windows `\keep` is the name `keep` to a
+  Linux daemon, which then excluded it.
 - A filter that cannot be used — a pattern that is no glob or cannot be
   compiled, an unreadable size or age, a pattern file that cannot be read —
   is refused before `mirror` asks its question; the question used to come
