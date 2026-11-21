@@ -221,7 +221,9 @@ part, and a job you can list, read, re-run and retry.
   whatever stood there by then. Now a write that fails removes the file
   it made, with `--resume` too, so a retry finds nothing there and
   copies; and where a copy could not be removed, a retry keeps whatever
-  stands at that path and reports it until the file is removed. With
+  stands at that path and reports it until the file is removed — in
+  every later retry of the job too: a retry of a retry forgot where the
+  copy had been left, kept the file as any other, and exited 0. With
   `--resume --ignore-existing`, a file that fails part-way starts again
   from the beginning on a retry.
 - `check` of a single file against a destination of another name

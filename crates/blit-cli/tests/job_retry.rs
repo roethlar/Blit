@@ -499,7 +499,8 @@ fn an_ignore_existing_retry_writes_over_nothing_that_is_there() {
     let said = format!("{}{}", text(&retried.stdout), text(&retried.stderr));
     assert_eq!(retried.status.code(), Some(EXIT_PARTIAL_FAILURE), "{said}");
     assert!(
-        said.contains("own.txt: a file stands where this run left an incomplete copy"),
+        said.contains("own.txt: an incomplete copy was left at the destination by this run")
+            && said.contains("a file stands there: --ignore-existing keeps it"),
         "{said}"
     );
     assert_eq!(
@@ -601,7 +602,7 @@ fn an_ignore_existing_retry_of_a_single_file_knows_where_its_copy_was_left() {
         }
         assert_eq!(retried.status.code(), Some(EXIT_PARTIAL_FAILURE), "{said}");
         assert!(
-            said.contains("a file stands where this run left an incomplete copy"),
+            said.contains("a file stands there: --ignore-existing keeps it"),
             "{said}"
         );
         assert_eq!(fs::read(&dst).unwrap(), b"the whole", "{said}");
@@ -738,4 +739,77 @@ fn an_ignore_existing_run_leaves_no_partial_for_a_retry_to_write_over() {
             );
         }
     }
+}
+
+/// cr-ecm13-4: a retry is a run of its own, and its record carries what
+/// the run before it left. A copy and its first retry both failed on
+/// `big.bin`; the retry's record held no incomplete copy, so a retry of
+/// THAT run sent the path as any other, `--ignore-existing` kept the file
+/// standing there — the incomplete copy — and the command exited 0 with
+/// the destination at zero bytes. Here a retry that finds a file where
+/// the copy was left keeps it and says so in the words every record is
+/// read for; a retry of that retry does the same, and goes on doing so
+/// until nothing stands there — and then the file is copied.
+#[test]
+fn a_retry_of_a_retry_still_knows_where_an_incomplete_copy_was_left() {
+    let ctx = TestContext::new();
+    let src = ctx.workspace.join("src");
+    let dst = ctx.workspace.join("dst");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("big.bin"), b"the whole file").unwrap();
+    fs::create_dir_all(dst.join("big.bin")).unwrap();
+    let first = blit(
+        &ctx,
+        &[
+            "copy",
+            "--ignore-existing",
+            "--retries",
+            "0",
+            &arg(&src),
+            &arg(&dst),
+        ],
+    );
+    assert_eq!(first.status.code(), Some(EXIT_PARTIAL_FAILURE));
+    let job = &jobs(&ctx)[0];
+    let mut run_id = job["run_id"].as_str().unwrap().to_string();
+    let record_file = PathBuf::from(job["record_file"].as_str().unwrap());
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_file).unwrap()).unwrap();
+    // As a run whose write left its own incomplete copy, empty.
+    record["left_in_place"] = serde_json::json!(["big.bin"]);
+    fs::write(&record_file, serde_json::to_vec(&record).unwrap()).unwrap();
+    fs::remove_dir_all(dst.join("big.bin")).unwrap();
+    fs::write(dst.join("big.bin"), b"").unwrap();
+
+    // The retry, the retry of the retry, and the retry of that.
+    for attempt in 1..=3 {
+        let retried = blit(&ctx, &["jobs", "retry", &run_id]);
+        let said = format!("{}{}", text(&retried.stdout), text(&retried.stderr));
+        assert_eq!(
+            retried.status.code(),
+            Some(EXIT_PARTIAL_FAILURE),
+            "retry {attempt} of {run_id}: {said}"
+        );
+        assert_eq!(
+            fs::read(dst.join("big.bin")).unwrap(),
+            b"",
+            "retry {attempt}: {said}"
+        );
+        let newest = &jobs(&ctx)[0];
+        assert_eq!(newest["parent"], run_id.as_str(), "{newest}");
+        let its_record: serde_json::Value =
+            serde_json::from_slice(&fs::read(newest["record_file"].as_str().unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(
+            its_record["left_in_place"],
+            serde_json::json!(["big.bin"]),
+            "retry {attempt} records where the copy was left: {its_record}"
+        );
+        run_id = newest["run_id"].as_str().unwrap().to_string();
+    }
+
+    fs::remove_file(dst.join("big.bin")).unwrap();
+    let retried = blit(&ctx, &["jobs", "retry", &run_id]);
+    assert!(retried.status.success(), "{}", text(&retried.stderr));
+    assert_eq!(fs::read(dst.join("big.bin")).unwrap(), b"the whole file");
 }

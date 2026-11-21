@@ -2097,9 +2097,17 @@ pub const INCOMPLETE_LEFT_IN_PLACE: &str = "an incomplete copy was left at the d
 /// option keeps a file that is there, and nothing a retry can look at
 /// tells the two apart for certain — a mark on the copy (cr-ecm12-2) was
 /// carried to another file with its modification time.
-pub const A_FILE_WHERE_A_COPY_WAS_LEFT: &str = "a file stands where this run left an \
-     incomplete copy, and --ignore-existing keeps it: remove it and retry, or run without \
-     --ignore-existing";
+///
+/// cr-ecm13-4: said in the words of [`INCOMPLETE_LEFT_IN_PLACE`], which is
+/// how every record of a failure is read for "this run left its own copy
+/// here" — the session's exact sets, a job's record, its log. A retry is a
+/// run of its own with a record of its own, and that record forgot the
+/// path was one of these: the retry after it sent the path as any other,
+/// `--ignore-existing` kept the file as any other, and the failure was
+/// cleared with the incomplete copy still in place.
+pub const A_FILE_WHERE_A_COPY_WAS_LEFT: &str = "an incomplete copy was left at the destination \
+     by this run, and a file stands there: --ignore-existing keeps it — remove it and retry, or \
+     run without --ignore-existing";
 
 /// What a write that fails after touching its in-place target does with
 /// it (D-2026-09-29-2: "nothing that looks finished is left behind").
@@ -6867,6 +6875,27 @@ mod cr_win_1_tests {
             .unwrap();
         assert_eq!(there.files_failed_total, 1, "{there:?}");
         assert_eq!(std::fs::metadata(dst.join("old.bin")).unwrap().len(), 11);
+    }
+
+    /// cr-ecm13-4: a path kept where a copy was left is recorded as one
+    /// where a copy was left — by the words every record is read for, and
+    /// for a name that is not text by its own bytes.
+    #[test]
+    fn a_file_kept_where_a_copy_was_left_is_recorded_as_such() {
+        assert!(A_FILE_WHERE_A_COPY_WAS_LEFT.contains(INCOMPLETE_LEFT_IN_PLACE));
+        let mut outcome = SinkOutcome::default();
+        outcome.record_named_failure("kept.bin", None, A_FILE_WHERE_A_COPY_WAS_LEFT);
+        outcome.record_named_failure(
+            "raw\u{fffd}.bin",
+            Some(b"raw\xff.bin".to_vec()),
+            A_FILE_WHERE_A_COPY_WAS_LEFT,
+        );
+        outcome.record_failure("other.bin", "source: cannot open");
+        assert_eq!(outcome.wire_left_in_place().0, ["kept.bin"]);
+        assert_eq!(
+            outcome.wire_left_in_place_raw().0,
+            [b"raw\xff.bin".to_vec()]
+        );
     }
 
     /// A resume completion whose tail fails keeps the partial for the next
