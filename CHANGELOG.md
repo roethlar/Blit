@@ -270,7 +270,12 @@ asks before it deletes.
   the path as typed. A removal goes on past an entry it cannot remove and
   leaves the directories above it standing, as `rm -r` does — it used to
   stop at the first. A symbolic link is removed as a link and never
-  followed. `--json` gives `entries_removed`, `failures` and
+  followed. A recursive removal holds each directory open and removes
+  what is in it by name, from the module's root down: a directory swapped
+  for a link while it runs is removed as the link, and cannot turn the
+  removal elsewhere. (On Windows the tree goes by the standard library's
+  own anchored removal, which stops at the first entry it cannot remove.)
+  `--json` gives `entries_removed`, `failures` and
   `failures_truncated`. On Linux the messages, the exit status and what
   is left on disk equal the system `rm`'s for the same tree and paths.
 - **It still asks first**, once for the whole command and before anything
