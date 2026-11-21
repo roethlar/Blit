@@ -151,9 +151,11 @@ part, and a job you can list, read, re-run and retry.
   says it `may`. An example — a spelling, a letter — is shown only when
   one name, put to the run's whole filter in both modes, is treated
   differently; otherwise the line states the rule and no more (`"a"
-  matches exactly as typed; capital letters matter (--ignore-case ignores
-  them).`, for `--exclude a --exclude A`). Only a pattern that reads the
-  same both ways, such as `{a,A}`, is left out of it. Under `--delete-scope
+  matches exactly as typed, and 1 more pattern matches only as typed;
+  capital letters matter (--ignore-case ignores them).`, for `--exclude a
+  --exclude A`). Only a pattern that reads the same both ways, such as
+  `{a,A}`, is left out of it. The line's cost does not grow with the
+  number of patterns. Under `--delete-scope
   all`, where a filter chooses what is copied and protects nothing at the
   destination, the question says that instead.
 - `?` and a bracket class match one byte in both modes. A class holding a
