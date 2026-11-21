@@ -158,7 +158,9 @@ part, and a job you can list, read, re-run and retry.
   nothing is said of what the pattern matches "only" (`"*a" matches
   exactly as typed; capital letters matter (--ignore-case would also
   match xA).`, beside `--exclude '[Aa]'`, which leaves `A` out either
-  way). A pattern that reads the same both ways, such as
+  way). The same where the spelling reads as a name the pattern has as
+  typed: for `--include '1*a*2'` the line shows `1xAx2`, not `1*A*2`,
+  which reads as `1aA2` — a file that is copied either way. A pattern that reads the same both ways, such as
   `{a,A}`, is never the one shown; the count beside it is of every other
   pattern with a letter in it, whatever their order. Nothing concrete is
   said of `--ignore-case` unless the command could run with it: where

@@ -820,6 +820,8 @@ const MOST_PATTERNS_ASKED: usize = 16;
 /// and as `--ignore-case` would read it.
 struct Asked {
     role: Role,
+    /// The pattern's own text, as typed (cr-ecm15-2).
+    typed: String,
     as_typed: crate::fs_enum::FileFilter,
     ignoring_case: crate::fs_enum::FileFilter,
     /// The run's complete filter (cr-ecm9-2, cr-ecm10-2): what the option
@@ -850,6 +852,7 @@ impl Asked {
         };
         Some(Self {
             role,
+            typed: pattern.to_string(),
             as_typed: probing(false)?,
             ignoring_case: probing(true)?,
             whole: std::rc::Rc::clone(whole),
@@ -1005,14 +1008,59 @@ impl Asked {
         // beside `--exclude '?1?'` on the strength of `AxB`, and `A1B`,
         // which it reads as too, is left out by both runs. There the name
         // that was tried is what is printed.
+        //
+        // cr-ecm15-2: and even the run's whole filter has one pattern
+        // that can treat such a name the same — ITSELF, as typed. `1*A*2`
+        // was printed for a sole `--include '1*a*2'`: it reads as `1aA2`,
+        // which the pattern has as typed (its `a`, and the `A` in a `*`).
+        // The text stands for a sole pattern only where no name it reads
+        // as is one of those ([`Self::has_as_typed`]); otherwise the name
+        // that was checked, `1xAx2`, is what is printed.
         let sole = self.whole.excludes.len() + self.whole.includes.len() == 1;
-        let whole_text = (sole || only_text_and_alternatives(shown, windows))
-            && names[..own].iter().all(changes);
+        let whole_text = names[..own].iter().all(changes)
+            && (only_text_and_alternatives(shown, windows)
+                || (sole && !self.has_as_typed(shown, windows)));
         names
             .into_iter()
             .enumerate()
             .find(|(_, name)| changes(name))
             .map(|(at, name)| (name, at < own && whole_text))
+    }
+
+    /// cr-ecm15-2: whether some name `shown` — a spelling of this pattern
+    /// in another case — reads as is a name the pattern has AS TYPED, and
+    /// so one the option changes nothing for.
+    ///
+    /// Only a `*` can make one: every other part of the two texts stands
+    /// at a fixed place, where their letters differ. A `*` holds any text
+    /// — the pattern's own letters as typed among it — and a `*` of the
+    /// pattern as typed holds the spelling's. So the names tried are the
+    /// ones `shown` reads as with each `*` holding the pattern's whole
+    /// text as typed, less what is no letter of a name: with that in
+    /// every `*`, the pattern as typed finds each of its letters in
+    /// order wherever it may look for them. (`1*A*2`, each `*` holding
+    /// `1a2`: `11a2A1a22`, which `1*a*2` has. `*.TXT`: `.txt.TXT`, which
+    /// `*.txt` has not — its letters must END the name.)
+    fn has_as_typed(&self, shown: &str, windows: bool) -> bool {
+        if !shown.contains('*') {
+            return false;
+        }
+        let letters: String = self
+            .typed
+            .chars()
+            .filter(|c| {
+                !matches!(
+                    c,
+                    '*' | '?' | '[' | ']' | '{' | '}' | ',' | '/' | '\\' | '!'
+                )
+            })
+            .collect();
+        samples_with(shown, windows, None, &letters).is_some_and(|names| {
+            names.iter().any(|name| {
+                let typed = Self::named(self.role, &self.as_typed, name);
+                typed.0 || typed.1
+            })
+        })
     }
 
     /// The letters the class that begins at byte `at` of the pattern is
@@ -2254,6 +2302,54 @@ mod tests {
         );
     }
 
+    /// cr-ecm15-2: a spelling is printed for what `--ignore-case` would
+    /// also match only where no name it reads as is one the pattern has
+    /// AS TYPED. `1*A*2` was printed for a sole `--include '1*a*2'`, and
+    /// it reads as `1aA2` — which that pattern has as typed, its `a` and
+    /// then the `A` in a `*`. The name that was checked, `1xAx2`, is one
+    /// the option changes, and is what is printed. A pattern whose
+    /// letters begin or end the name, or stand a fixed way from either,
+    /// has no such name, and its spelling is printed as before.
+    #[test]
+    fn a_spelling_that_reads_as_what_the_pattern_has_as_typed_is_not_printed() {
+        let others = |pattern: &str| {
+            Spellings::of(pattern, false)
+                .map(|spellings| spellings.others)
+                .unwrap_or_default()
+        };
+        // The reviewer's.
+        assert_eq!(others("1*a*2"), ["1xAx2"]);
+        // Letters of two cases as typed: either spelling reads as a name
+        // the pattern has (`1abaB2`, `1ABaB2`).
+        assert_eq!(others("1*aB*2"), ["1xabx2", "1xABx2"]);
+        // Two runs of letters, each between wildcards.
+        assert_eq!(others("*a*b*"), ["AxB"]);
+        // Letters that begin the name, end it, or do both: no name is had
+        // both ways, and the spelling stands.
+        assert_eq!(others("IMG_*.jpg"), ["img_*.jpg", "IMG_*.JPG"]);
+        assert_eq!(others("a*b"), ["A*B"]);
+        assert_eq!(others("x*{a,b}*y"), ["X*{A,B}*Y"]);
+        assert_eq!(others("dir/*a*"), ["DIR/*A"]);
+        // No `*` to hold the other case: every letter stands where it is.
+        assert_eq!(others("?a?"), ["?A?"]);
+
+        // And what is printed is true of the run: the name shown is taken
+        // with the option and not without, and the name the spelling
+        // read as is taken either way.
+        let run = |ignore_case: bool| {
+            crate::fs_enum::FileFilter::probing("1*a*2", false, ignore_case).expect("a pattern")
+        };
+        for (name, as_typed, with_the_option) in [("1xAx2", false, true), ("1aA2", true, true)] {
+            let taken =
+                |filter: &crate::fs_enum::FileFilter| Asked::named(Role::Include, filter, name).0;
+            assert_eq!(
+                (taken(&run(false)), taken(&run(true))),
+                (as_typed, with_the_option),
+                "{name}"
+            );
+        }
+    }
+
     /// Every other spelling the note shows is one `--ignore-case` really
     /// matches, and the note never shows one it does not: each letter is
     /// changed only for the single letter the option pairs it with.
@@ -2297,11 +2393,14 @@ mod tests {
             ("Cache/*", false, "Cache/*", &["cache/*", "CACHE/*"]),
             ("*/Cache/*", false, "*/Cache/*", &["*/cache/*", "*/CACHE/*"]),
             ("**/*/Cache", false, "*/Cache", &["*/cache", "*/CACHE"]),
+            // cr-ecm15-2: `cache*/**` reads as `cacheCache/x`, which the
+            // pattern has as typed — so the names that were checked are
+            // what is shown beside it.
             (
                 "**/*Cache*/**",
                 false,
                 "Cache*/**",
-                &["cache*/**", "CACHE*/**"],
+                &["cachex/x", "CACHEx/x"],
             ),
             ("Cache/**", false, "Cache/**", &["cache/**", "CACHE/**"]),
             (r"Cache\**", true, r"Cache\**", &[r"cache\**", r"CACHE\**"]),
