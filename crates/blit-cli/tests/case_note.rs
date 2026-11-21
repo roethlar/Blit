@@ -811,6 +811,9 @@ fn the_line_keeps_what_is_under_a_folder_apart_from_the_folder() {
 ///   match `cache`; with the option the destination's own `cache` was
 ///   deleted. The second `/` is the pattern's own, and with it the pattern
 ///   names no entry at all: the line now offers no spelling.
+/// - `Keep` and `[!a].dat`: the line gave `Keep`'s spellings and counted
+///   the second pattern; as typed the mirror kept `A.dat`, with the option
+///   it deleted it. The pattern the option narrows is the one shown.
 /// - `{a,A}` and `*.Doc`: the line chose `{a,A}` and offered `{a,a}` and
 ///   `{A,A}`, both matched already; what changes is that `x.doc` is kept.
 #[test]
@@ -828,6 +831,17 @@ fn the_line_claims_only_what_the_mirror_then_does() {
             line: "\"**//Cache\" matches exactly as typed; capital letters matter \
                    (--ignore-case reads it otherwise).",
             entries: &[("cache", false, false), ("Cache", false, false)],
+        },
+        Case {
+            excludes: &["Keep", "[!a].dat"],
+            line: "\"[!a].dat\" matches exactly as typed, and 1 more pattern matches only as \
+                   typed; capital letters matter (--ignore-case changes what they match: [!a] \
+                   would stop matching A).",
+            entries: &[
+                ("A.dat", true, false),
+                ("b.dat", true, true),
+                ("keep", false, true),
+            ],
         },
         Case {
             excludes: &["{a,A}", "*.Doc"],

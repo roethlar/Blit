@@ -119,12 +119,17 @@ pub(crate) struct Noted<'a> {
 ///
 /// `"photo[!x].jpg" matches exactly as typed; capital letters matter (--ignore-case changes what it matches: [!x] would stop matching X).`
 ///
-/// cr-ecm7-4: every claim the line makes is CHECKED against the filter
-/// before it is made ([`Spellings::of_role`]), and the pattern it is made
-/// about is the first there is something to say of:
-/// - the first pattern with a spelling that really is matched only with
-///   the option, or with a class the option narrows — for `{a,A}` the
-///   line offered `{a,a}` and `{A,A}`, both matched already;
+/// cr-ecm7-2, cr-ecm7-3, cr-ecm7-4: every claim the line makes is CHECKED
+/// against the filter before it is made ([`Spellings::of_role`]), and the
+/// pattern it is made about is chosen for what the operator most needs
+/// told:
+/// - a pattern `--ignore-case` would NARROW comes first, wherever it
+///   stands among the patterns — with `Keep` and `[!a].dat` the line used
+///   to give `Keep`'s other spellings and merely count the second, the one
+///   that stops protecting `A.dat`;
+/// - else the first pattern with a spelling that really is matched only
+///   with the option — for `{a,A}` the line offered `{a,a}` and `{A,A}`,
+///   both matched already;
 /// - a pattern whose reading the option does not change at all is neither
 ///   shown nor counted.
 pub(crate) fn case_note_of(patterns: &[Noted], windows: bool) -> Option<String> {
@@ -137,12 +142,23 @@ pub(crate) fn case_note_of(patterns: &[Noted], windows: bool) -> Option<String> 
         .collect();
     let mut unchanged: Vec<usize> = Vec::new();
     let mut shown: Option<(usize, Spellings)> = None;
+    for (at, noted) in candidates.iter().enumerate() {
+        if has_narrowed_class(noted.read_as, windows) {
+            match Spellings::of_role(noted.read_as, noted.role, windows) {
+                Some(spellings) if spellings.narrowed.is_some() => {
+                    shown = Some((at, spellings));
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
     if shown.is_none() {
         let mut in_words: Option<(usize, Spellings)> = None;
         for (at, noted) in candidates.iter().enumerate() {
             match Spellings::of_role(noted.read_as, noted.role, windows) {
                 None => unchanged.push(at),
-                Some(spellings) if !spellings.others.is_empty() || spellings.narrowed.is_some() => {
+                Some(spellings) if !spellings.others.is_empty() => {
                     shown = Some((at, spellings));
                     break;
                 }
@@ -391,6 +407,26 @@ impl<'a> Spellings<'a> {
             narrowed,
         })
     }
+}
+
+/// Whether `pattern` holds a negated class `--ignore-case` would make
+/// take less — by its text alone ([`narrowed_class`]); cheap enough to ask
+/// of every pattern.
+fn has_narrowed_class(pattern: &str, windows: bool) -> bool {
+    let mut rest = pattern;
+    while let Some(c) = rest.chars().next() {
+        let len = match c {
+            '[' => match bracket_class_len(rest) {
+                Some(len) if narrowed_class(&rest[..len]).is_some() => return true,
+                Some(len) => len,
+                None => 1,
+            },
+            '\\' if !windows => 1 + rest[1..].chars().next().map_or(0, char::len_utf8),
+            c => c.len_utf8(),
+        };
+        rest = &rest[len..];
+    }
+    false
 }
 
 /// How many of a run's counted patterns are asked about (the ones holding
@@ -2129,6 +2165,25 @@ mod tests {
                 )),
             );
         }
+        // cr-ecm7-3: a pattern the option NARROWS is the one shown,
+        // wherever it stands. The line gave `Keep`'s other spellings and
+        // only counted the pattern that stops protecting `A.dat`.
+        assert_eq!(
+            note(&["Keep", "[!a].dat"]).as_deref(),
+            Some(
+                "\"[!a].dat\" matches exactly as typed, and 1 more pattern matches only as \
+                 typed; capital letters matter (--ignore-case changes what they match: [!a] \
+                 would stop matching A)."
+            )
+        );
+        assert_eq!(
+            note(&["Keep", "*.tmp", "{x,[!a]}.dat"]).as_deref(),
+            Some(
+                "\"{x,[!a]}.dat\" matches exactly as typed, and 2 more patterns match only as \
+                 typed; capital letters matter (--ignore-case changes what they match: [!a] \
+                 would stop matching A)."
+            )
+        );
         // cr-ecm7-4: a pattern the option reads no differently is neither
         // shown nor counted. For `{a,A}` the line offered `{a,a}` and
         // `{A,A}`, both matched already; what changes is `*.Doc`.
