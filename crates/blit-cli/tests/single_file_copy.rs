@@ -319,3 +319,68 @@ fn a_single_file_source_is_one_name_to_copy_and_to_check() {
     assert_eq!(code, Some(2), "the name it lists was not found\n{said}");
     assert!(said.contains("other.txt: source: missing"), "{said}");
 }
+
+/// cr-ecm10-4: a file copied under another name is still the one entry
+/// the source's name stands for. A listed copy `Report.txt` → `Saved.bin`
+/// exits 0; `check --checksum` with the same list reported "Missing on
+/// destination", exit 1, having looked for `Saved.bin` in a list that
+/// names `Report.txt`. With no list it found one match. `check` now asks
+/// about both files under the source's name: what a copy with those
+/// options writes, a check with them passes.
+#[test]
+fn a_file_copied_under_another_name_checks_under_the_sources() {
+    let run = |verb: &str, options: &[&str], src: &std::path::Path, dst: &std::path::Path| {
+        let mut cmd = cli_command();
+        cmd.arg(verb)
+            .args(options)
+            .arg(src)
+            .arg(dst)
+            .stdin(std::process::Stdio::null());
+        let output = run_with_timeout(cmd, Duration::from_secs(30));
+        (
+            output.status.code(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let (src, dst) = (tmp.path().join("Report.txt"), tmp.path().join("Saved.bin"));
+    fs::write(&src, "what the report says").unwrap();
+    let list = tmp.path().join("list.txt");
+    fs::write(&list, "Report.txt\n").unwrap();
+    let listed = ["--files-from", list.to_str().unwrap()];
+
+    let (code, said) = run("copy", &listed, &src, &dst);
+    assert_eq!(code, Some(0), "{said}");
+    assert_eq!(fs::read_to_string(&dst).unwrap(), "what the report says");
+
+    for options in [&["--checksum"][..], &["--checksum", listed[0], listed[1]]] {
+        let (code, said) = run("check", options, &src, &dst);
+        assert_eq!(code, Some(0), "check {options:?}\n{said}");
+        assert!(
+            said.contains("1 files match") && !said.contains("Missing"),
+            "check {options:?}\n{said}"
+        );
+    }
+    // And a difference is a difference, not a missing file.
+    fs::write(&dst, "what it said before!").unwrap();
+    let (code, said) = run("check", &["--checksum", listed[0], listed[1]], &src, &dst);
+    assert_eq!(code, Some(1), "{said}");
+    assert!(
+        said.contains("1 difference(s) found") && !said.contains("Missing"),
+        "{said}"
+    );
+    // A pattern is read against the source's name on both sides too: one
+    // that names the destination's own name names nothing.
+    let (code, said) = run("check", &["--checksum", "--exclude", "*.bin"], &src, &dst);
+    assert_eq!(code, Some(1), "{said}");
+    assert!(
+        said.contains("Differing (1)") && !said.contains("Missing"),
+        "the two are compared, and differ\n{said}"
+    );
+    let (code, said) = run("check", &["--checksum", "--exclude", "*.txt"], &src, &dst);
+    assert_eq!(code, Some(0), "left out, as a copy leaves it out\n{said}");
+}

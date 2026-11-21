@@ -95,6 +95,9 @@ pub struct FileEnumerator {
     follow_symlinks: bool,
     include_symlinks: bool,
     excluded_subtree: Option<PathBuf>,
+    /// The name a root that is ONE FILE is filtered under, when it is not
+    /// that file's own ([`Self::answering_to`]).
+    root_file_name: Option<std::ffi::OsString>,
 }
 
 impl FileEnumerator {
@@ -104,7 +107,20 @@ impl FileEnumerator {
             follow_symlinks: false,
             include_symlinks: false,
             excluded_subtree: None,
+            root_file_name: None,
         }
+    }
+
+    /// A root that is one file is filtered under `name` and not under its
+    /// own (cr-ecm10-4). A copy of `Report.txt` to `Saved.bin` is one
+    /// entry, which a list and every pattern know as `Report.txt`: the
+    /// destination file is that same entry, whatever it is called on
+    /// disk, and has to be asked about by that name or `check` looks for
+    /// `Saved.bin` in a list that names `Report.txt`. `None`: its own
+    /// name. A root that is a directory is not affected.
+    pub fn answering_to(mut self, name: Option<std::ffi::OsString>) -> Self {
+        self.root_file_name = name;
+        self
     }
 
     /// Exclude a relative subtree (such as a nested destination directory)
@@ -265,8 +281,19 @@ impl FileEnumerator {
                     // names it never matched: `check` compared nothing —
                     // or everything — where `copy` did the opposite. The
                     // empty relative path is still what is emitted.
-                    let named = path.file_name().map(Path::new).unwrap_or(&rel);
-                    if filter.allows_entry(Some(named), path, size, mtime) {
+                    //
+                    // cr-ecm10-4: or under the name it is told to answer
+                    // to — a destination file compared with a source file
+                    // of another name is the same one entry.
+                    // By that name for a list AND for a pattern, which
+                    // reads an entry's name off the path it is given.
+                    let renamed = self
+                        .root_file_name
+                        .as_deref()
+                        .map(|name| path.with_file_name(name));
+                    let asked = renamed.as_deref().unwrap_or(path);
+                    let named = asked.file_name().map(Path::new).unwrap_or(&rel);
+                    if filter.allows_entry(Some(named), asked, size, mtime) {
                         visit(EnumeratedEntry {
                             absolute_path: path.to_path_buf(),
                             // Empty relative path so src_root.join(rel) === src_root

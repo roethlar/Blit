@@ -68,7 +68,19 @@ pub fn compare_trees(
     let src_entries = enumerator
         .enumerate_local(src_root)
         .with_context(|| format!("enumerate source {}", src_root.display()))?;
+    // cr-ecm10-4: a source that is ONE FILE is one entry, named by the
+    // source's name whatever the destination file is called — as the
+    // copy that made the destination named it. Each side was asked about
+    // under its own name, so `check` of `Report.txt` against `Saved.bin`
+    // with `Report.txt` listed found the source's file and no
+    // destination: "Missing on destination", after a copy that had
+    // succeeded.
+    let source_name = src_root
+        .is_file()
+        .then(|| src_root.file_name().map(std::ffi::OsString::from))
+        .flatten();
     let dst_entries = enumerator
+        .answering_to(source_name)
         .enumerate_local(dst_root)
         .with_context(|| format!("enumerate destination {}", dst_root.display()))?;
 
@@ -331,5 +343,70 @@ mod equivalence_tests {
         // but the print/exit logic ignores it under one_way.
         assert!(one_way.differing.is_empty());
         assert!(one_way.missing_on_dest.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// cr-ecm10-4: two single files are one entry, known by the SOURCE's
+    /// name. With that name in a list, or in a pattern, a destination of
+    /// another name is compared like one of the same name — it used to be
+    /// reported missing, being looked for under its own.
+    #[test]
+    fn a_single_file_is_compared_under_the_sources_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, same, other) = (
+            tmp.path().join("Report.txt"),
+            tmp.path().join("Saved.bin"),
+            tmp.path().join("Other.bin"),
+        );
+        fs::write(&src, b"the same bytes").unwrap();
+        fs::write(&same, b"the same bytes").unwrap();
+        fs::write(&other, b"other bytes!!!").unwrap();
+        let listing = |name: &str| {
+            let mut filter = FileFilter::default();
+            filter.files_from = Some([PathBuf::from(name)].into());
+            filter
+        };
+        let excluding = |pattern: &str| {
+            let mut filter = FileFilter::default();
+            filter.exclude_files = vec![pattern.to_string()];
+            filter
+        };
+        let compared = |dst: &Path, filter: FileFilter| {
+            let result = compare_trees(&src, dst, true, false, filter).unwrap();
+            (
+                result.matching,
+                result.differing.len(),
+                result.missing_on_dest.len(),
+                result.missing_on_src.len(),
+            )
+        };
+        // Listed by the source's name: compared, whatever the destination
+        // is called.
+        assert_eq!(compared(&same, listing("Report.txt")), (1, 0, 0, 0));
+        assert_eq!(compared(&other, listing("Report.txt")), (0, 1, 0, 0));
+        // Listed by the destination's name: the source is not that entry,
+        // and nothing is compared — as a copy with that list copies nothing.
+        assert_eq!(compared(&same, listing("Saved.bin")), (0, 0, 0, 0));
+        // A pattern naming the source leaves the entry out on both sides;
+        // one naming the destination's own name names nothing.
+        assert_eq!(compared(&same, excluding("Report.txt")), (0, 0, 0, 0));
+        assert_eq!(compared(&other, excluding("*.txt")), (0, 0, 0, 0));
+        assert_eq!(compared(&same, excluding("Saved.bin")), (1, 0, 0, 0));
+        assert_eq!(compared(&other, excluding("*.bin")), (0, 1, 0, 0));
+        // No filter: as before.
+        assert_eq!(compared(&same, FileFilter::default()), (1, 0, 0, 0));
+        // A source that is a tree is not affected: each entry by its path.
+        let (tree_a, tree_b) = (tmp.path().join("a"), tmp.path().join("b"));
+        for tree in [&tree_a, &tree_b] {
+            fs::create_dir_all(tree).unwrap();
+            fs::write(tree.join("Report.txt"), b"x").unwrap();
+        }
+        let result = compare_trees(&tree_a, &tree_b, true, false, listing("Report.txt")).unwrap();
+        assert_eq!((result.matching, result.missing_on_dest.len()), (1, 0));
     }
 }
