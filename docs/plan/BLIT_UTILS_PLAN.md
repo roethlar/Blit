@@ -11,6 +11,12 @@
 > standalone binary. See [`docs/cli/blit.1.md`](../cli/blit.1.md)
 > for the live command surface.
 >
+> **What `rm`, `find`, `du`, `df` and `ls` are meant to do is no longer
+> here.** It is [`UTILITY_VERBS_LOCAL_PARITY.md`](UTILITY_VERBS_LOCAL_PARITY.md)
+> (D-2026-11-20-2): each behaves like the Unix command it is named after,
+> run on the daemon's own disk. The matrix below was their design; it is
+> not their specification.
+>
 > This document is retained because the **command matrix and UX
 > principles below are the design rationale** for those
 > subcommands. Read it as design intent, but treat any reference to

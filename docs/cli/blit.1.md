@@ -1,6 +1,6 @@
 # BLIT(1) blit Manual
 % Blit v2 Team
-% 2025-11-21
+% 2026-11-21
 
 ## NAME
 blit – local and hybrid-transport file transfer CLI
@@ -83,62 +83,8 @@ path, then push it.
   `server:9031`) routes to `list-modules`; a target with a module
   or path (`server:/module/`) routes to `ls`.
 - `list-modules` lists modules exported by a daemon.
-- `ls` lists a path on a daemon as the Unix `ls` does, on the daemon's
-  own disk in one request (or a path on this machine, written as a path:
-  `./dir`): names one per line, sorted as `ls` sorts them (`A`, `a`,
-  `b`), those beginning with `.` hidden unless `-a`, which also shows
-  `.` and `..`. A path that is no directory is one line, the path as
-  typed. `-l` prints, after a `total` line, the letter of what each
-  entry is (`-` a file, `d` a directory, `l` a symbolic link), its size,
-  when it was last written and its name, a link with ` -> ` and where it
-  points; `-h` with it prints sizes in powers of 1024. There are no
-  permission, link-count, owner or group columns: a listing does not
-  carry them. A symbolic link to a directory is listed into, unless `-l`
-  is given; with a `/` after it, it is the directory either way. Exit
-  status 2 when the path could not be listed, 1 when an entry could not
-  be read. Any other option of `ls` is refused by name.
-- `du` reports disk usage for a remote path as the Unix `du` does, counted
-  on the daemon's own disk in one request: one line per directory,
-  deepest first and the path given last, `SIZE<TAB>PATH` in 1K blocks of
-  allocated space. A hard-linked file is counted once; a symbolic link is
-  not followed. Exit status 1 when something could not be read.
-- `df` reports the filesystem that holds a remote path as `df -k` does:
-  size, used and available space in 1K blocks, with the path as typed in
-  the first column.
-- `rm` removes paths on a remote daemon as the Unix `rm` does, on the
-  daemon's own disk in one request per daemon: a directory needs `-r`
-  (`-R`, `--recursive`), a path that is not there is an error unless `-f`,
-  the other paths are still processed, and the exit status is 0 only when
-  every path is gone. Nothing is printed on success; each entry that could
-  not be removed is reported as `rm` reports it. A symbolic link is
-  removed and never followed; a wildcard is not expanded. Unlike `rm`, it
-  asks once before anything is removed, as `mirror` and `move` do: `-y`
-  skips the question, and so does `-f`. When no answer can be read the
-  command does nothing and exits 1 (so do `mirror` and `move`). A whole
-  module, and a read-only module, are refused.
-- `find` searches below a remote path as the Unix `find` does, walked on
-  the daemon's own disk in one request: one path per line, each beginning
-  with the path as typed, for every entry all the tests given hold for
-  (the path itself included). `-name` and `-iname` match an entry's own
-  name with `*`, `?`, `[...]` and `\` as `find` does; `-type` takes `f`,
-  `d` or `l`; `-maxdepth N` enters nothing more than N levels below the
-  path. `-size [+|-]N[c|k|M|G]` holds an entry's size, in units rounded
-  up, against N — 512-byte blocks with no letter, bytes with `c`, then
-  kibi-, mebi- and gibibytes — and `-mtime [+|-]N` the whole days since
-  it was last written, by the daemon's clock; `+N` is more than N, `-N`
-  less. A symbolic link is listed and never followed. Exit status 1 when
-  something could not be read. Any other test, action or operator of
-  `find` is refused by name.
-  `-delete`, which must be the last word, removes every entry the tests
-  hold for instead of printing it: what is in a directory before the
-  directory, a directory only when that leaves it empty, going on past
-  what it cannot remove and reporting it (`blit find: cannot delete
-  ‘PATH’: Directory not empty`, exit status 1). It asks once before
-  anything is removed; `-y` skips the question, and with no answer to be
-  had nothing is removed and the exit status is 1. Nothing is removed
-  through a symbolic link, a read-only module refuses it, and a module
-  itself is never removed. The same expression without `-delete` lists
-  what it would try to remove.
+- `ls`, `du`, `df`, `rm` and `find` do on a daemon what the Unix
+  commands of those names do on a local disk. See UTILITY COMMANDS.
 - `completions shell <SHELL>` writes a clap-generated shell-completion
   script to stdout (bash/zsh/fish/powershell/elvish). Source it from
   your shell's rc file or completion directory.
@@ -170,6 +116,163 @@ path, then push it.
   and how the run went).
 - `jobs watch <host> <job-id>` follows a daemon's job to its end;
   `jobs cancel <host> <job-id>` stops it.
+
+## UTILITY COMMANDS
+`ls`, `du`, `df`, `rm` and `find` do on a daemon what the Unix commands of
+those names do on a local disk. The daemon does the work, on its own disk,
+in one request, so a tree on a network share is listed, measured, searched
+or removed without a network filesystem's cost for every file.
+
+Each takes the options listed under it and means by them what its namesake
+means; what it prints and its exit status are its namesake's. Any other
+option, test or operator is refused by name before anything is asked of
+the daemon. The reference is GNU coreutils and findutils under `C.UTF-8`,
+on every platform; where a command differs from its namesake, its section
+says so.
+
+For all five:
+
+- The path is `HOST:/MODULE/PATH`, or `HOST://PATH` for a daemon's default
+  root. It is read as typed: a `/` after it names the directory — what a
+  symbolic link there points to — as it does to the Unix commands.
+- A symbolic link met below the path is an entry of its own and is never
+  followed.
+- A name that is not valid UTF-8 is printed, matched and removed as the
+  bytes it is, and what these commands print is a path they take.
+- What could not be read is reported on standard error in the namesake's
+  words, and the rest of the answer is still given.
+- The CLI and the daemon must be the same blit release: a daemon of
+  another protocol contract refuses the request.
+- `--json` prints one JSON document in place of the lines; a name that is
+  not valid UTF-8 has its bytes beside its text (`raw`).
+- `-h` is the namesake's `-h` where it has one (`ls`, `du`, `df`). Help is
+  `--help`.
+
+### ls
+`blit ls [-a] [-l] [-h] [--json] <TARGET>`
+
+Names, one per line and nothing else, sorted as `ls` sorts them (`A`, `a`,
+`b`); names that begin with `.` are hidden. A path that is no directory is
+one line: the path as typed. A symbolic link to a directory is listed
+into, unless `-l` is given; with a `/` after it, it is the directory
+either way.
+
+- `-a`, `--all` — show names that begin with `.`, and `.` and `..`.
+- `-l` — the long form: a `total` line (the entries' allocated space in 1K
+  blocks), then for each entry the letter of what it is (`-` a file, `d` a
+  directory, `l` a symbolic link, `p`, `s`, `c`, `b` as in `ls`), its
+  size, when it was last written (`Nov 20 10:43`; `Jan  2  2025` for a
+  time more than half a year past or still to come; this machine's time
+  zone) and its name — a link with ` -> ` and where it points.
+- `-h`, `--human-readable` — with `-l`, sizes in powers of 1024.
+
+Exit status: 0; 1 when an entry could not be read; 2 when the path itself
+could not be listed.
+
+Unlike `ls`: one path to a command; one name to a line always, with no
+columns and no quoting on a terminal; `-l` has no permission, link-count,
+owner or group columns — a listing does not carry them; a module's `..` is
+the module; a path that is a symbolic link out of its module is refused.
+`TARGET` may be a path on this machine, written as a path (`./dir`); a
+bare word is a host, whose modules are listed (`blit list` is the same
+command).
+
+### du
+`blit du [-a] [-s] [-d <N>] [-h] [--json] <REMOTE>`
+
+One line for each directory, an entry after everything below it and the
+path given last: `SIZE<TAB>PATH`, each path beginning with the path as
+typed, sizes in 1K blocks of allocated space. A file with several hard
+links is counted once.
+
+- `-a`, `--all` — a line for every file as well.
+- `-s`, `--summarize` — the total for the path given, alone.
+- `-d <N>`, `--max-depth=<N>` — lines only for entries at most N levels
+  below the path given; the totals count everything.
+- `-h`, `--human-readable` — sizes in powers of 1024 (`4.0K`, `12M`).
+
+Exit status: 0; 1 when something could not be read.
+
+Unlike `du`: one path to a command; a daemon on Windows counts a file's
+length, where Unix counts the blocks allocated to it.
+
+### df
+`blit df [-h] [-k] [--json] <REMOTE>`
+
+The filesystem that holds the path, as `df -k` prints it: the header
+`Filesystem 1K-blocks Used Available Use%`, then one line with the path
+as typed in the first column. A path on another mount than its module
+reports that mount.
+
+- `-h`, `--human-readable` — sizes in powers of 1024.
+- `-k` — sizes in 1K blocks (the default).
+
+Unlike `df`: one path to a command; the first column is the path asked
+about, not a device's name, and there is no `Mounted on` column.
+
+### rm
+`blit rm [-r] [-f] [-y] [--json] <REMOTE>...`
+
+Removes each path, one request to each daemon named. Nothing is printed
+when everything went; each entry that could not be removed is reported as
+`rm` reports it, the other paths are still processed, and the exit status
+is 0 only when every path is gone. A symbolic link is removed as the link.
+A wildcard in a path is not expanded: it is a name.
+
+- `-r`, `-R`, `--recursive` — remove directories and what is in them. A
+  directory without it is refused (`Is a directory`).
+- `-f`, `--force` — a path that is not there is no error; never ask.
+- `-y`, `--yes` — do not ask.
+
+Unlike `rm`: **it asks once, before anything is removed**, as `mirror` and
+`move` do, naming the paths; `-y` or `-f` skips the question. Answering no
+removes nothing and exits 0; when no answer can be read (a script that
+passed neither option) nothing is removed and the exit status is 1. A
+module itself, and anything in a read-only module, is refused. A path that
+is a symbolic link typed with a `/` after it (`link/`) is not removed
+through: `rm` empties the directory the link points to, `blit rm` says
+`Not a directory` and removes nothing.
+
+### find
+`blit find [--json] [-y] <REMOTE> [-name <PATTERN>] [-iname <PATTERN>] [-type f|d|l] [-maxdepth <N>] [-size [+|-]<N>[c|k|M|G]] [-mtime [+|-]<N>] [-delete]`
+
+One path to a line, each beginning with the path as typed, for every
+entry all the tests given hold for — the path itself included, a
+directory before what is in it.
+
+- `-name <PATTERN>` — the entry's own name fits the pattern: `*`, `?`,
+  `[...]` (ranges, `!` or `^` to negate, `[:alpha:]`-style classes) and
+  `\` for the next character as itself. A leading `.` is matched like any
+  character. Quote the pattern from the shell.
+- `-iname <PATTERN>` — the same, ignoring case as `find` does.
+- `-type f|d|l` — a regular file, a directory, a symbolic link.
+- `-maxdepth <N>` — enter nothing more than N levels below the path.
+- `-size [+|-]<N>[c|k|M|G]` — the entry's size, in units rounded UP,
+  against N: 512-byte blocks with no letter, bytes with `c`, then kibi-,
+  mebi- and gibibytes. `+N` is more than N, `-N` less.
+- `-mtime [+|-]<N>` — whole 24-hour periods since the entry was last
+  written, any part of one dropped, by the daemon's clock.
+- `-delete` — REMOVE every entry the tests hold for, and print nothing
+  but what could not be removed: what is in a directory before the
+  directory, a directory only when that leaves it empty (`cannot delete
+  ‘PATH’: Directory not empty`, exit status 1), going on past what will
+  not go. It must be the last word: in `find` a test written after it
+  does not limit it, so anything after it is refused. The same expression
+  without `-delete` lists what it would try to remove.
+- `-y`, `--yes` — do not ask before `-delete`.
+
+Exit status: 0; 1 when something could not be read or removed.
+
+Unlike `find`: one path to a command; no operators (`-o`, `!`,
+parentheses) and no other test or action — every test given must hold.
+`-delete` **asks once before anything is removed**, with the same rule as
+`rm` for no answer; it is refused in a read-only module and never removes
+a module itself; and it removes nothing by a path that goes through a
+symbolic link — `find link/ -delete` empties the directory the link
+points to, and `find alias/entry -delete` removes through `alias`, where
+`blit find` says so and removes nothing. Such a path is still listed.
+Stopping the command stops the removal on the daemon; what had gone by
+then is gone.
 
 ## OPTIONS
 ### Transfer Options
@@ -210,37 +313,8 @@ path, then push it.
 - `--wait <SECONDS>` (scan)  
   Duration to wait for mDNS responses (default: 2).
 
-- `-a`, `--all` (du):
-  Print a line for every file, not only for directories.
-
-- `-s`, `--summarize` (du):
-  Print only the total for the path given.
-
-- `-d <N>`, `--max-depth=<N>` (du):
-  Print lines only for entries at most N levels below the path given.
-  The total still counts everything.
-
-- `-h`, `--human-readable` (du, df):
-  Print sizes in powers of 1024 (`4.0K`, `12M`, `1.5G`). Help for these
-  two commands is `--help`.
-
-- `-k` (df):
-  Print sizes in 1K blocks (the default).
-
-- `--json` (du, df):
-  Output results as JSON.
-
-- `--yes` (rm)  
-  Skip confirmation prompt.
-
-- `--pattern <GLOB>` (find)  
-  Glob pattern to match (e.g., "*.txt").
-
-- `--case-insensitive` (find)  
-  Enable case-insensitive pattern matching.
-
-- `--limit <N>` (find)  
-  Limit number of results.
+- The options of `ls`, `du`, `df`, `rm` and `find` are listed with each
+  command under UTILITY COMMANDS.
 
 ## DIAGNOSTICS
 `blit diagnostics perf` inspects and manages the local performance history.

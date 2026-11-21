@@ -32,5 +32,5 @@ Admitted as the reviewer put it.
 - What was removed before the asker left is removed: stopping a `-delete` stops it, and undoes nothing.
 - The check is made between entries. One removal already begun is finished, and up to 1,024 entries of one directory may be read (not removed) after the asker has gone.
 - The daemon learns that the asker has gone when the connection's end reaches it. A machine that vanishes without closing its connection is noticed only when the transport's own timeouts say so; nothing here shortens that.
-- `du` and `ls` are not changed here: `du` sends a row for every directory and `ls` reads one directory, so both learn from a send that fails; `rm` has its own check (`called_off`, cr-uv1-5).
+- `du` and `ls` are not changed here: `du` sends a row for every directory and `ls` reads one directory, so both learn from a send that fails; `rm` has its own check (`called_off`, cr-uv2-3).
 - Not driven end to end with a real Ctrl-C: when the removal stops relative to the signal is a race no test here could hold still.
