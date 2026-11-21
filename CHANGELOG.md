@@ -153,7 +153,12 @@ part, and a job you can list, read, re-run and retry.
   differently; otherwise the line states the rule and no more (`"a"
   matches exactly as typed, and 1 more pattern matches only as typed;
   capital letters matter (--ignore-case ignores them).`, for `--exclude a
-  --exclude A`). A pattern that reads the same both ways, such as
+  --exclude A`). The example printed is the name that was checked: where
+  the pattern's own spelling is not that name, the name is printed and
+  nothing is said of what the pattern matches "only" (`"*a" matches
+  exactly as typed; capital letters matter (--ignore-case would also
+  match xA).`, beside `--exclude '[Aa]'`, which leaves `A` out either
+  way). A pattern that reads the same both ways, such as
   `{a,A}`, is never the one shown; the count beside it is of every other
   pattern with a letter in it, whatever their order. The line's cost does
   not grow with the number of patterns. Under `--delete-scope

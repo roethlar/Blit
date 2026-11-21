@@ -955,6 +955,17 @@ fn the_line_claims_only_what_the_mirror_then_does() {
                    would stop matching B).",
             entries: &[("A.bin", true, true), ("B.txt", true, false)],
         },
+        // cr-ecm11-3: the line said `--ignore-case would also match A`.
+        // Both mirrors keep `A`, which `[Aa]` leaves out either way; the
+        // file the option's mirror deletes is `xA`, and that is the name
+        // the line now prints — the one it checked.
+        Case {
+            excludes: &["[Aa]"],
+            includes: &["*a"],
+            line: "\"*a\" matches exactly as typed; capital letters matter (--ignore-case \
+                   would also match xA).",
+            entries: &[("xA", true, false), ("A", true, true), ("a", true, true)],
+        },
         // cr-ecm10-5: `Q[b-~]` was offered as a spelling the option would
         // also match, beside the pattern typed exactly so. What the
         // option adds is `QB`; no spelling of the pattern denotes it, and

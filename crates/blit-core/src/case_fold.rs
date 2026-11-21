@@ -397,6 +397,15 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
             "\"{pattern}\"{shown_from} matches exactly as typed{more}; capital letters matter \
              (--ignore-case ignores them)."
         )
+    } else if !spellings.others_are_spellings {
+        // cr-ecm11-3: a name the run would treat otherwise, which is not
+        // the text the pattern would be shown as: nothing is said of what
+        // the pattern matches "only".
+        format!(
+            "\"{pattern}\"{shown_from} matches exactly as typed{more}; capital letters matter \
+             (--ignore-case would also match {}).",
+            spellings.others.join(", ")
+        )
     } else {
         format!(
             "\"{pattern}\"{shown_from} matches {} only{more}; capital letters matter \
@@ -437,6 +446,12 @@ struct Spellings<'a> {
     /// letters are the ones borne out. Otherwise they are the ones the
     /// class would lose by its text, and the line says `may`.
     narrowing_borne_out: bool,
+    /// cr-ecm11-3: `others` are spellings of the text shown as `typed`,
+    /// each the very name that showed the change (or a pattern, when a
+    /// wildcard is left in it). Where one is instead ANOTHER name the
+    /// spelling denotes, the line does not say what the pattern "matches
+    /// only": the two halves would not be about the same thing.
+    others_are_spellings: bool,
 }
 
 impl<'a> Spellings<'a> {
@@ -527,6 +542,7 @@ impl<'a> Spellings<'a> {
             others: Vec::new(),
             narrowed: None,
             narrowing_borne_out: false,
+            others_are_spellings: true,
         }
     }
 
@@ -584,14 +600,36 @@ impl<'a> Spellings<'a> {
                 .map(|(_, class, lost)| (class, lost))
         });
         let mut others = Vec::new();
+        let mut others_are_spellings = true;
         if !takes_less_somewhere {
             for (other, whole) in [(lower, whole_lower), (upper, whole_upper)] {
-                let shows = match asked {
-                    Some(asked) => asked.would_also_match(&whole, windows),
-                    None => true,
-                };
-                if other != typed && !others.contains(&other) && shows {
-                    others.push(other);
+                if other == typed {
+                    continue;
+                }
+                // cr-ecm11-3: what is printed is what was checked. The
+                // spelling stands when it is itself the name the run would
+                // treat otherwise (`cache`), or is a pattern some name of
+                // which is (`IMG_*.JPG`). Where it reads as one name and
+                // the name that showed the change is another, THAT name
+                // is printed: beside `--exclude '[Aa]'`, `--include '*a'`
+                // was said to gain `A`, which both runs leave out — the
+                // name checked, and the file the option took, was `xA`.
+                let shown =
+                    match asked {
+                        None => Some(other),
+                        Some(asked) => asked.would_also_match(&whole, &other, windows).map(
+                            |(name, its_own)| {
+                                if its_own || !reads_as_one_name(&other) {
+                                    other
+                                } else {
+                                    others_are_spellings = false;
+                                    name
+                                }
+                            },
+                        ),
+                    };
+                if let Some(shown) = shown.filter(|shown| !others.contains(shown)) {
+                    others.push(shown);
                 }
             }
         }
@@ -614,8 +652,15 @@ impl<'a> Spellings<'a> {
             others,
             narrowed,
             narrowing_borne_out,
+            others_are_spellings,
         })
     }
+}
+
+/// Whether `text` — a pattern without the wildcards at its ends — reads
+/// as the name of one entry: nothing in it that stands for other text.
+fn reads_as_one_name(text: &str) -> bool {
+    !text.contains(['*', '?', '[', '{', '\\'])
 }
 
 /// `text` with its letters all lower, and all upper: each letter changed
@@ -830,31 +875,48 @@ impl Asked {
     /// `spelling` — the WHOLE pattern with its letters all lowered, or all
     /// raised — names only what the option would match through this
     /// pattern, and some name it denotes is one the run would treat
-    /// otherwise with the option ([`Self::gained`]).
+    /// otherwise with the option ([`Self::gained`]): that NAME, or `None`.
     ///
     /// cr-ecm10-5: the names are the ones the spelling itself denotes,
     /// with each `*` tried as some text and as none.
-    fn would_also_match(&self, spelling: &str, windows: bool) -> bool {
-        let Some(filter) =
-            crate::fs_enum::FileFilter::probing(spelling, self.role == Role::Exclude, false)
-        else {
-            return false;
-        };
-        let mut gained = false;
-        for star in STARS {
-            let Some(names) = samples_with(spelling, windows, None, star) else {
-                return false;
-            };
-            for name in &names {
+    ///
+    /// cr-ecm11-3: and the name is given back, to be printed. It was
+    /// reduced to "there is one", and the text printed was the spelling —
+    /// which, read as a name, can be one the run treats the same either
+    /// way. The first tried is what `shown`, the spelling as the line
+    /// would print it, reads as; then the spelling with nothing for a
+    /// `*`; then with some text.
+    fn would_also_match(
+        &self,
+        spelling: &str,
+        shown: &str,
+        windows: bool,
+    ) -> Option<(String, bool)> {
+        let filter =
+            crate::fs_enum::FileFilter::probing(spelling, self.role == Role::Exclude, false)?;
+        let mut names = samples_with(shown, windows, None, "x").unwrap_or_default();
+        // Those are the text's OWN names (`cache` for `./cache`): found
+        // among them, the name is the text shown.
+        let own = names.len();
+        for star in ["", "x"] {
+            let denoted = samples_with(spelling, windows, None, star)?;
+            for name in &denoted {
                 let by_spelling = Self::named(self.role, &filter, name);
                 let ignoring = Self::named(self.role, &self.ignoring_case, name);
                 if (by_spelling.0 && !ignoring.0) || (by_spelling.1 && !ignoring.1) {
-                    return false;
+                    return None;
                 }
-                gained = gained || ((by_spelling.0 || by_spelling.1) && self.gained(name));
             }
+            names.extend(denoted);
         }
-        gained
+        names
+            .into_iter()
+            .enumerate()
+            .find(|(_, name)| {
+                let by_spelling = Self::named(self.role, &filter, name);
+                (by_spelling.0 || by_spelling.1) && self.gained(name)
+            })
+            .map(|(at, name)| (name, at < own))
     }
 
     /// The letters the class that begins at byte `at` of the pattern is
@@ -2083,12 +2145,15 @@ mod tests {
                 "thumbs.db, THUMBS.DB"
             )
         );
+        // cr-ecm11-3: the name printed is the one that was checked. `.O`
+        // is a name `??` takes either way; what the option adds through
+        // `*.o` is `x.O`, and the line says that — and so does not say
+        // what the pattern matches "only".
         assert_eq!(
-            note(&["*.o", "*.tmp", "??", "Build"]),
-            line(
-                "\"*.o\" matches .o",
-                ", and 2 more patterns match only as typed",
-                ".O"
+            note(&["*.o", "*.tmp", "??", "Build"]).as_deref(),
+            Some(
+                "\"*.o\" matches exactly as typed, and 2 more patterns match only as typed; \
+                 capital letters matter (--ignore-case would also match x.O)."
             )
         );
     }
@@ -2898,6 +2963,16 @@ mod tests {
                  would stop matching B)."
             )
         );
+        // cr-ecm11-3: what is printed is the name that was checked. The
+        // line said `--ignore-case would also match A`; both runs leave
+        // `A` out, by `[Aa]`, and the file the option takes in is `xA`.
+        assert_eq!(
+            both(&["[Aa]"], &["*a"]).as_deref(),
+            Some(
+                "\"*a\" matches exactly as typed; capital letters matter (--ignore-case would \
+                 also match xA)."
+            )
+        );
         // An include the option widens is offered what it would let in —
         // unless an exclude, read the same way, takes it out again.
         assert_eq!(
@@ -3113,11 +3188,44 @@ mod tests {
             ("q[b-~]", "Q[b-~]", true),
         ] {
             assert_eq!(
-                asked(pattern).would_also_match(spelling, false),
+                asked(pattern)
+                    .would_also_match(spelling, without_end_wildcards(spelling, false), false)
+                    .is_some(),
                 offered,
                 "\"{pattern}\" offering {spelling}"
             );
         }
+        // cr-ecm11-3: and what is given back is the NAME that showed it —
+        // the text the line would print, when that is such a name.
+        let offered = |asked: &Asked, spelling: &str| {
+            asked
+                .would_also_match(spelling, without_end_wildcards(spelling, false), false)
+                .map(|(name, _)| name)
+        };
+        // The text shown stands for its own name, whatever anchors it;
+        // another name the spelling denotes is not the text shown.
+        assert_eq!(
+            asked("./Cache").would_also_match("./cache", "./cache", false),
+            Some(("cache".to_string(), true))
+        );
+        assert_eq!(
+            within("*a", Role::Include, &["[Aa]"], &["*a"]).would_also_match("*A", "A", false),
+            Some(("xA".to_string(), false))
+        );
+        assert_eq!(
+            offered(&asked("*Cache"), "*cache").as_deref(),
+            Some("cache")
+        );
+        assert_eq!(
+            offered(&asked("*Cache"), "*CACHE").as_deref(),
+            Some("CACHE")
+        );
+        assert_eq!(offered(&asked("*.Txt"), "*.TXT").as_deref(), Some(".TXT"));
+        // The reviewer's: `A` is left out by `[Aa]` either way, and is
+        // not the name; `xA` is the one the option lets in.
+        let beside = within("*a", Role::Include, &["[Aa]"], &["*a"]);
+        assert!(!beside.gained("A") && beside.gained("xA"));
+        assert_eq!(offered(&beside, "*A").as_deref(), Some("xA"));
         // A class is said to stop matching a letter only when it does —
         // the class that stands at that place in the pattern, by a name
         // read through the alternative that holds it (cr-ecm8-2).
@@ -3177,17 +3285,20 @@ mod tests {
         assert!(!within("*.Txt", Role::Include, &["*.TXT"], &["*.Txt"]).gained("x.txt"));
         // So with a gain: a spelling another pattern names already is not
         // offered.
-        assert!(asked("a").would_also_match("A", false));
-        assert!(!among("a", &["A"]).would_also_match("A", false));
-        assert!(!among("a", &["./A"]).would_also_match("A", false));
+        assert_eq!(offered(&asked("a"), "A").as_deref(), Some("A"));
+        assert_eq!(offered(&among("a", &["A"]), "A"), None);
+        assert_eq!(offered(&among("a", &["./A"]), "A"), None);
         // cr-ecm10-5: nor the very glob typed beside it. The name the
         // option adds, `QB`, is none that `Q[b-~]` denotes.
-        assert!(!among("q[b-~]", &["Q[b-~]"]).would_also_match("Q[b-~]", false));
+        assert_eq!(offered(&among("q[b-~]", &["Q[b-~]"]), "Q[b-~]"), None);
         assert!(among("q[b-~]", &["Q[b-~]"]).gained("QB"));
         // `.O` alone is a name `??` takes; `*.O` denotes `x.O` as well,
         // which it does not.
-        assert!(among("*.o", &["??"]).would_also_match("*.O", false));
-        assert!(!among("*.o", &["*"]).would_also_match("*.O", false));
+        assert_eq!(
+            offered(&among("*.o", &["??"]), "*.O").as_deref(),
+            Some("x.O")
+        );
+        assert_eq!(offered(&among("*.o", &["*"]), "*.O"), None);
         // cr-ecm10-1: whether a pattern's readings are THE SAME is asked of
         // the pattern alone. Beside `A` — or beside `./A`, which keeps `A`
         // at the root and nowhere else — `a` still reads otherwise; there
