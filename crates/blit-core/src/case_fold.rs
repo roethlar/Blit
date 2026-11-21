@@ -235,6 +235,11 @@ pub(crate) struct Noted<'a> {
 ///   name tried was one the third pattern keeps, the line spoke of `Keep`,
 ///   and the option gave up `Ay.txt`;
 /// - anything else is the plain rule.
+///
+/// cr-ecm10-6: and the whole is bounded. [`MOST_PATTERNS_ASKED`] patterns
+/// are asked about for what to show, however many the command holds —
+/// with 1,000 excludes each covered by another pattern, every one was
+/// asked about in turn, and the line cost 443 ms.
 pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> Option<String> {
     let whole = Complete::of(whole);
     // By the text alone, and cheaply, for every pattern: the ones the
@@ -261,7 +266,8 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
     let narrowing = candidates
         .iter()
         .enumerate()
-        .filter(|(_, noted)| has_narrowed_class(noted.read_as, windows));
+        .filter(|(_, noted)| has_narrowed_class(noted.read_as, windows))
+        .take(MOST_PATTERNS_ASKED);
     for (at, noted) in narrowing {
         let Some(spellings) = read(noted, windows, &whole) else {
             continue;
@@ -280,7 +286,7 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
     // else the first the option reads otherwise, in words.
     if shown.is_none() {
         let mut in_words: Option<(usize, Spellings)> = None;
-        for (at, noted) in candidates.iter().enumerate() {
+        for (at, noted) in candidates.iter().enumerate().take(MOST_PATTERNS_ASKED) {
             match read(noted, windows, &whole) {
                 None => {
                     found.insert(at, false);
@@ -297,6 +303,16 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
         }
         shown = shown.or(in_words);
     }
+    // Past what is asked about, nothing is known of a pattern but that it
+    // holds a letter: the plain rule, about the first of them.
+    if shown.is_none() {
+        shown = candidates
+            .iter()
+            .enumerate()
+            .skip(MOST_PATTERNS_ASKED)
+            .map(|(at, noted)| (at, Spellings::in_words(noted.read_as)))
+            .next();
+    }
     let (shown_at, spellings) = shown?;
     let (pattern, file) = (candidates[shown_at].typed, candidates[shown_at].file);
     // The patterns that are only counted. One whose two readings are the
@@ -306,12 +322,12 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
     // typed, WHICHEVER pattern is shown (cr-ecm10-5: only the ones typed
     // after it were, so the count changed with the order). Plain text and
     // wildcards always read otherwise, and are counted unasked.
-    let mut asked = 0;
+    let mut asked = found.len();
     for (at, noted) in candidates.iter().enumerate() {
         if found.contains_key(&at) || !noted.read_as.contains(['{', '[']) {
             continue;
         }
-        if asked == MOST_PATTERNS_ASKED {
+        if asked >= 2 * MOST_PATTERNS_ASKED {
             break;
         }
         asked += 1;
@@ -481,6 +497,17 @@ impl<'a> Spellings<'a> {
         Self::with(pattern, windows, None)
     }
 
+    /// A pattern nothing was asked about: shown whole, and nothing said of
+    /// it but the rule.
+    fn in_words(pattern: &'a str) -> Self {
+        Self {
+            typed: pattern,
+            others: Vec::new(),
+            narrowed: None,
+            narrowing_borne_out: false,
+        }
+    }
+
     fn with(pattern: &'a str, windows: bool, asked: Option<&Asked>) -> Option<Self> {
         if widen_case(pattern, windows) == pattern {
             return None;
@@ -547,7 +574,11 @@ impl<'a> Spellings<'a> {
             }
         }
         if let Some(asked) = asked {
-            if others.is_empty() && narrowed.is_none() {
+            // cr-ecm10-6: only a pattern that spells out alternatives can
+            // read the same both ways, or differ where neither spelling
+            // reaches — and comparing costs up to a thousand spellings.
+            // Plain text is not put through it for an example nobody typed.
+            if others.is_empty() && narrowed.is_none() && pattern.contains('{') {
                 match asked.compared(pattern, windows) {
                     Compared::Same => return None,
                     // Names the run would treat otherwise with the option.
@@ -663,6 +694,13 @@ type Named = (bool, bool);
 /// `[!a]*.txt`, a name another pattern kept, and never `A.txt`.
 const STARS: [&str; 2] = ["x", ""];
 
+// How many questions have been put to a filter on this thread: the
+// line's cost, counted where it is spent (cr-ecm10-6).
+#[cfg(test)]
+thread_local! {
+    static QUESTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl Asked {
     fn about(pattern: &str, role: Role, whole: &std::rc::Rc<Complete>) -> Option<Self> {
         let probing = |ignore_case| {
@@ -681,6 +719,8 @@ impl Asked {
     /// holding one pattern, that is what the pattern matches; asked of
     /// the complete filter, it is what the run does.
     fn named(role: Role, filter: &crate::fs_enum::FileFilter, name: &str) -> Named {
+        #[cfg(test)]
+        QUESTIONS.with(|asked| asked.set(asked.get() + 1));
         let path = std::path::Path::new(name);
         match role {
             Role::Exclude => (
@@ -2808,6 +2848,58 @@ mod tests {
             Some(
                 "\"*.Txt\" matches exactly as typed; capital letters matter (--ignore-case \
                  ignores them)."
+            )
+        );
+    }
+
+    /// cr-ecm10-6: the line costs the same however many patterns the
+    /// command holds. With 1,000 excludes whose every spelling another
+    /// pattern covers, each was asked about in turn — and a plain name
+    /// was put to the filters in every case of its letters, a thousand
+    /// spellings — so one line took 443 ms where the whole command had
+    /// taken 31. A fixed number of patterns are asked about, only one that
+    /// spells out alternatives is compared spelling by spelling, and past
+    /// that the line is the plain rule. Counted in questions put to a
+    /// filter.
+    #[test]
+    fn the_line_asks_a_bounded_number_of_questions() {
+        /// A few hundred are asked for the patterns looked at; a thousand
+        /// patterns asked about, or sixteen compared in full, are tens of
+        /// thousands.
+        const MOST_QUESTIONS: usize = 2000;
+        let mut patterns: Vec<String> = (0..1000).map(|n| format!("archive{n:03}.tmp")).collect();
+        patterns.push("*.[Tt][Mm][Pp]".to_string());
+        let typed: Vec<(&str, Option<&str>)> =
+            patterns.iter().map(|p| (p.as_str(), None)).collect();
+        QUESTIONS.with(|asked| asked.set(0));
+        let line = case_note(&typed, cfg!(windows));
+        let asked = QUESTIONS.with(|asked| asked.get());
+        assert!(
+            asked <= MOST_QUESTIONS,
+            "{asked} questions were put to a filter for one line"
+        );
+        eprintln!("{asked} questions with the covering glob");
+        // Nothing the first of them could show is borne out, and the last
+        // reads the same both ways: the rule, and a count of the rest.
+        assert_eq!(
+            line.as_deref(),
+            Some(
+                "\"archive000.tmp\" matches exactly as typed, and 999 more patterns match only \
+                 as typed; capital letters matter (--ignore-case ignores them)."
+            )
+        );
+        // And with nothing to cover them, the first is shown as ever.
+        QUESTIONS.with(|asked| asked.set(0));
+        let line = case_note(&typed[..1000], cfg!(windows));
+        let asked = QUESTIONS.with(|asked| asked.get());
+        assert!(asked <= MOST_QUESTIONS, "{asked} questions");
+        eprintln!("{asked} questions without it");
+        assert_eq!(
+            line.as_deref(),
+            Some(
+                "\"archive000.tmp\" matches archive000.tmp only, and 999 more patterns match \
+                 only as typed; capital letters matter (--ignore-case would also match \
+                 ARCHIVE000.TMP)."
             )
         );
     }
