@@ -1043,3 +1043,112 @@ fn an_ignore_existing_retry_follows_no_link_left_where_its_copy_was() {
         b"from the source"
     );
 }
+
+/// cr-ecm14-4: a record from before a run noted where it wrote
+/// (`destination_nested`) is not replayed by reading its two words again
+/// where their answer turns on what stood at the destination THEN. The
+/// reviewer's case: `copy src backup`; the retry wrote `backup/src/…` for
+/// a run that had written `backup/…`, and exited 0. Such a retry is
+/// refused, saying why, with nothing written. Where the words alone
+/// decide — a `/` after the source, or after the destination — an old
+/// record is retried as ever.
+#[test]
+fn a_record_that_did_not_note_where_it_wrote_is_not_guessed_at() {
+    for (source_slash, destination_slash, told_by_the_words) in [
+        (false, false, false),
+        (true, true, true),
+        (false, true, true),
+        (true, false, true),
+    ] {
+        let what = format!("source/ {source_slash}, destination/ {destination_slash}");
+        let ctx = TestContext::new();
+        let src = ctx.workspace.join("src");
+        let backup = ctx.workspace.join("backup");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("landed.txt"), b"alpha").unwrap();
+        fs::write(src.join("blocked.txt"), b"lands on retry").unwrap();
+        // `backup` is there, so a source that is not its contents goes
+        // under it by its name; a folder is in the way of one file.
+        let root = if source_slash {
+            backup.clone()
+        } else {
+            backup.join("src")
+        };
+        fs::create_dir_all(root.join("blocked.txt")).unwrap();
+        let spelled = |path: &Path, slash: bool| {
+            format!("{}{}", path.display(), if slash { "/" } else { "" })
+        };
+        let typed = [
+            spelled(&src, source_slash),
+            spelled(&backup, destination_slash),
+        ];
+        let first = blit(&ctx, &["copy", "--retries", "0", &typed[0], &typed[1]]);
+        assert_eq!(
+            first.status.code(),
+            Some(EXIT_PARTIAL_FAILURE),
+            "{what}: {}",
+            text(&first.stderr)
+        );
+        assert_eq!(
+            fs::read(root.join("landed.txt")).unwrap(),
+            b"alpha",
+            "{what}"
+        );
+        let job = &jobs(&ctx)[0];
+        let run_id = job["run_id"].as_str().unwrap().to_string();
+        let record_file = PathBuf::from(job["record_file"].as_str().unwrap());
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&record_file).unwrap()).unwrap();
+        // As an earlier build wrote it: with no word on where it wrote.
+        assert!(
+            record
+                .as_object_mut()
+                .unwrap()
+                .remove("destination_nested")
+                .is_some(),
+            "{what}: {record}"
+        );
+        fs::write(&record_file, serde_json::to_vec(&record).unwrap()).unwrap();
+        fs::remove_dir_all(root.join("blocked.txt")).unwrap();
+        let before = listed(&backup);
+
+        let retried = blit(&ctx, &["jobs", "retry", &run_id]);
+        let said = format!("{}{}", text(&retried.stdout), text(&retried.stderr));
+        if told_by_the_words {
+            assert!(retried.status.success(), "{what}: {said}");
+            assert_eq!(
+                fs::read(root.join("blocked.txt")).unwrap(),
+                b"lands on retry",
+                "{what}: {said}"
+            );
+        } else {
+            assert!(!retried.status.success(), "{what}: {said}");
+            assert!(
+                said.contains("did not note where it wrote") && said.contains("nothing is retried"),
+                "{what}: {said}"
+            );
+            assert_eq!(
+                listed(&backup),
+                before,
+                "{what}: nothing was written\n{said}"
+            );
+        }
+    }
+}
+
+/// Every entry below `root`, sorted.
+fn listed(root: &Path) -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            out.push(path.strip_prefix(root).unwrap().display().to_string());
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                walk(&path, root, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}

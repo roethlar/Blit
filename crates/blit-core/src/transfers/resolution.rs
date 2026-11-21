@@ -160,6 +160,22 @@ pub fn destination_nests(raw_source: &str, raw_dest: &str, dst: &Endpoint) -> bo
     !source_is_contents(raw_source) && dest_is_container(raw_dest, dst)
 }
 
+/// Whether [`destination_nests`] ASKS THE DISK for these two arguments
+/// (cr-ecm14-4): a source that is not its contents, to a destination on
+/// this machine typed without a separator after it. Only then can the
+/// answer change between two runs of the same words — and a run that did
+/// not keep its answer cannot be given it back.
+pub fn nesting_asks_the_disk(raw_source: &str, raw_dest: &str, dst: &Endpoint) -> bool {
+    if source_is_contents(raw_source) {
+        return false;
+    }
+    let typed = raw_dest.trim_end_matches([' ', '\t']);
+    let as_a_container = typed.ends_with('/')
+        || typed.ends_with("/.")
+        || (cfg!(windows) && (typed.ends_with('\\') || typed.ends_with("\\.")));
+    !as_a_container && matches!(dst, Endpoint::Local(_))
+}
+
 /// [`resolve_destination`] with that question already answered
 /// (cr-ecm13-2): a retry of a run writes where the run wrote, and the
 /// run's own answer is what says where — asked again after the first run
@@ -341,6 +357,57 @@ mod tests {
     use tempfile::tempdir;
 
     // rsync-compat: "copy contents" detection matches flist.c:send_file_list
+    /// cr-ecm14-4: where the nesting answer turns on what stands at the
+    /// destination, and only there. Shown both ways: for the spellings
+    /// said to ask the disk, the answer differs with and without a
+    /// directory there; for the others it is one answer either way.
+    #[test]
+    fn nesting_asks_the_disk_only_where_its_answer_can_change() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let there = tmp.path().join("backup");
+        let at = there.display().to_string();
+        let local = || Endpoint::Local(there.clone());
+        let cases = [
+            ("src", at.clone(), true),
+            ("/a/b/src", at.clone(), true),
+            ("f.txt", at.clone(), true),
+            ("src/", at.clone(), false),
+            ("src/.", at.clone(), false),
+            (".", at.clone(), false),
+            ("src", format!("{at}/"), false),
+            ("src", format!("{at}/."), false),
+            ("src", format!("{at}/  "), false),
+            ("src/", format!("{at}/"), false),
+        ];
+        for (source, dest, asks) in &cases {
+            assert_eq!(
+                nesting_asks_the_disk(source, dest, &local()),
+                *asks,
+                "{source} -> {dest}"
+            );
+            let absent = destination_nests(source, dest, &local());
+            std::fs::create_dir(&there).unwrap();
+            let present = destination_nests(source, dest, &local());
+            std::fs::remove_dir(&there).unwrap();
+            assert_eq!(absent != present, *asks, "{source} -> {dest}");
+        }
+        // A destination on a daemon is read by its spelling alone.
+        let remote = match crate::endpoints::parse_transfer_endpoint("host:/module/backup") {
+            Ok(Endpoint::Remote(remote)) => Endpoint::Remote(remote),
+            other => panic!("a remote endpoint: {other:?}"),
+        };
+        assert!(!nesting_asks_the_disk(
+            "src",
+            "host:/module/backup",
+            &remote
+        ));
+        assert!(!nesting_asks_the_disk(
+            "src",
+            "host:/module/backup/",
+            &remote
+        ));
+    }
+
     #[test]
     fn source_is_contents_trailing_slash() {
         assert!(source_is_contents("src/"));

@@ -282,6 +282,33 @@ pub(crate) async fn job_to_retry(target: &str) -> Result<Option<JobToRun>> {
     // with no `backup` there made it and wrote into it; read again, the
     // same words put the files that failed under `backup/src/`.
     args.destination_nested = record.destination_nested;
+    // cr-ecm14-4: a record from before that answer was kept. Where the
+    // answer turned on what stood at the destination THEN, nothing gives
+    // it back now — read again, the same words wrote the files that
+    // failed under `backup/src/` for a run that had made `backup`. The
+    // retry says so and writes nothing; where the two words alone decide,
+    // they decide now as they did.
+    if record.destination_nested.is_none() {
+        let destination = blit_core::endpoints::parse_transfer_endpoint(&args.destination)?;
+        if blit_core::transfers::resolution::nesting_asks_the_disk(
+            &args.source,
+            &args.destination,
+            &destination,
+        ) {
+            eyre::bail!(
+                "job {} was recorded by an earlier build of blit, which did not note where it \
+                 wrote. `{}` to `{}`, with no `/` after either, writes into `{}` when nothing \
+                 is there and under it, by the source's name, when a directory is — and which \
+                 it was then cannot be told now, so nothing is retried. Run the transfer again \
+                 with the destination spelled out: a `/` after it to copy under it, a `/` \
+                 after the source to copy its contents",
+                record.run_id,
+                args.source,
+                args.destination,
+                args.destination
+            );
+        }
+    }
     let verb = if spec.verb == "move" {
         "move"
     } else {
