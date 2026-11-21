@@ -1,0 +1,32 @@
+The goal is to make `du`, `df`, `rm`, and read-only `find` behave like their GNU counterparts while the daemon does the filesystem work locally. I would use one version-checked request per daemon and module, preserve the operand exactly as typed, and let the daemon walk, filter, count, or delete. The CLI should own confirmation, output, and exit status. [Utility verbs plan](/home/michael/dev/gitea_repos/blit_v2/docs/plan/UTILITY_VERBS_LOCAL_PARITY.md:7)
+
+**Verdict — `acceptable_with_changes`.** The change gets that division of work right. Direct filesystem queries, hard-link accounting, batched `find` results, and explicit recursive removal for `move` are worth keeping. The recorded 200,000-file benchmark also shows the benefit: a full `find` fell from 307 ms to 62 ms. The most urgent corrections concern which files `rm` can delete and what it tells the operator afterward. [Benchmark results](/home/michael/dev/gitea_repos/blit_v2/docs/bench/uv3-find-2026-11-21/result.txt:6)
+
+### Required changes
+
+1. **High — Preserve destructive operands exactly.** On Linux, `blit rm -rf HOST:/m/work/.` deleted `work` and its contents. `blit rm -y HOST:/m/doc/` unlinked a regular file. GNU `rm` refused both. With both `report` and `report ` present, asking Blit to remove the trailing-space name deleted `report` and returned 0. Preserve whitespace, the final component, and trailing separators through validation and the RPC. The same correction matters for reads: `du -s` on a directory link ending in `/` reported 4 KiB where GNU reported 64 KiB. [Endpoint parsing](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/endpoint.rs:31) · [Removal operand construction](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/src/rm.rs:52) · [Disk-usage operand construction](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/src/du.rs:32)
+
+2. **High — Anchor recursive deletion to the directory being enumerated.** From source inspection, the walker reopens a child by pathname, obtains its deletion handle separately, and falls back to pathname removal if that handle is unavailable. A concurrent directory replacement can therefore direct deletion outside the module. Descend from the verified parent without following links, enumerate and remove through the same held directory, and report an entry failure when that guarantee cannot be established. [Recursive descent](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/deletion.rs:446) · [Removal fallback](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/deletion.rs:461)
+
+3. **High — Keep removal failures attached to their operands.** I supplied `first`, `blocked/entry`, and `last`, with `blocked` unreadable. Blit deleted `first`, reported all three as failures, and left `last` in place. GNU removed both accessible files. A containment-check error currently discards the accumulated reply. Record that refusal against its operand, retain earlier successes, and process the remaining operands. [Daemon operand loop](/home/michael/dev/gitea_repos/blit_v2/crates/blit-daemon/src/service/admin.rs:66) · [CLI error reporting](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/src/rm.rs:120)
+
+4. **Medium — Make printed paths reusable.** Starting at `HOST://`, both `find` and `du` printed `HOST:/child`, changing the default-root address into named-module syntax. A non-UTF-8 name printed by `find` was also rejected when passed to `rm` or supplied as a literal `-name` pattern. Preserve the endpoint prefix when appending children and carry OS-string arguments and raw path bytes through the request. [Path rendering](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/src/du.rs:144) · [CLI argument types](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/src/cli.rs:770) · [Removal request](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/proto/blit.proto:376)
+
+5. **Medium — Stream removal failures in batches bounded by encoded size.** With 1,001 unremovable files, GNU named all 1,001. Blit returned 1,000 names and a truncation flag. Its cap also restarts for each operand, while all operands share one reply that can exceed the transport limit after deletion has occurred. Send indexed failures as they happen and finish with the removal count. [Failure cap](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/deletion.rs:327) · [Reply accumulation](/home/michael/dev/gitea_repos/blit_v2/crates/blit-daemon/src/service/admin.rs:69)
+
+6. **Medium — Check the actual `df` operand on Windows.** The Windows branch uses `path.is_dir()` to choose between the operand and its parent. A missing leaf under an existing directory therefore returns the parent’s statistics and success. Use a fallible metadata lookup first and preserve the OS error kind. The existing cross-platform test already expects `NotFound` for this case. [Windows filesystem query](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/disk_usage.rs:339) · [Missing-path test](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/disk_usage.rs:758)
+
+7. **Medium — Match the advertised `C.UTF-8` character classes.** In direct comparisons, GNU `find` matched an EM SPACE with `[[:blank:]]`; Blit missed it. Blit matched a NO-BREAK SPACE with `[[:space:]]`; GNU excluded it. Use the reference locale’s class definitions across platforms and include these cases in the comparison tests. [Character classification](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/find_name.rs:95)
+
+### Verification
+
+Linux formatting and strict workspace Clippy passed. The workspace suite had **1,769 passed, 0 failed, 2 ignored**. For the independent guard, I disabled `du`’s hard-link deduplication and observed three rows where the test expected one. Restoring the pinned source made the same test pass. I verified the restored Git blob and removed the disposable export.
+
+Windows cross-Clippy passed. Windows execution was unavailable because the MinGW `dlltool` was missing. macOS cross-Clippy stopped in BLAKE3’s C build for lack of compatible target headers. The Windows `df` finding is based on source inspection.
+
+```text
+base: b55efff7be20a019091d547fc555f826e478b496
+head: 49350572d4cedb38d03401f50626a9557a13a5d0
+capability_ok: true
+guard_confirmed: true
+```
