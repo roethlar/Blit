@@ -26,6 +26,7 @@ pub mod manifest;
 pub mod mdns;
 pub mod mirror_planner;
 pub mod model;
+pub mod moved;
 pub mod path_posix;
 pub mod path_safety;
 pub mod perf_history;

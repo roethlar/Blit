@@ -1131,6 +1131,7 @@ mod tests {
             contained.record_failure(format!("dir/f{index}.bin"), format!("synthetic {index}"));
         }
         let session_summary = TransferSummary {
+            source_ticket: Vec::new(),
             files_transferred: 2,
             bytes_transferred: 20,
             entries_deleted: 0,

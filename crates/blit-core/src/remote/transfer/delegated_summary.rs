@@ -65,6 +65,8 @@ pub fn delegated_summary_from_session(
         left_in_place_raw: summary.left_in_place_raw.clone(),
         removed_incomplete: summary.removed_incomplete.clone(),
         removed_incomplete_truncated: summary.removed_incomplete_truncated,
+        // cr-uv3-1: the source daemon's ticket, for the CLI to present.
+        source_ticket: summary.source_ticket.clone(),
     }
 }
 
@@ -94,6 +96,7 @@ mod tests {
     /// the list is its already-capped wire form.
     fn session_summary(contained: &SinkOutcome) -> TransferSummary {
         TransferSummary {
+            source_ticket: Vec::new(),
             files_transferred: 7,
             bytes_transferred: 4096,
             entries_deleted: 2,

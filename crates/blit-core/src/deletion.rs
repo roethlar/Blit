@@ -276,6 +276,32 @@ pub struct Removal {
     pub failures: Vec<RemovalFailure>,
 }
 
+/// What an entry that is no directory is, as a removal for a move is told
+/// of it before it removes it (cr-uv3-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Met {
+    pub kind: MetKind,
+    pub size: u64,
+    /// Its modification time as a transfer's manifest writes one
+    /// (`wire_metadata::mtime_seconds`).
+    pub mtime_seconds: i64,
+}
+
+/// What kind of entry [`Met`] is: the entry itself, a link being a link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetKind {
+    File,
+    Link,
+    Other,
+}
+
+/// Asked of each entry that is no directory before it is removed, with
+/// its path below the operand (empty for the operand itself): `Some` is
+/// why it STAYS — it is left where it is and reported with that reason —
+/// and `None` lets it go (cr-uv3-1). Directories are not asked about:
+/// one goes when what was removed below it leaves it empty.
+pub type Keep<'a> = &'a dyn Fn(&Path, &Met) -> Option<std::io::Error>;
+
 /// How [`remove_as_rm`] treats one operand: `rm`'s own two options.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RmOptions {
@@ -405,6 +431,30 @@ pub fn remove_as_rm_reporting(
     called_off: Option<&dyn Fn() -> bool>,
     failed: &mut dyn FnMut(RemovalFailure) -> Result<(), Stopped>,
 ) -> Result<u64, DeletionError> {
+    remove_what_may_go(
+        target,
+        as_directory,
+        canonical_root,
+        options,
+        called_off,
+        None,
+        failed,
+    )
+}
+
+/// [`remove_as_rm_reporting`], asking `keep` of each entry that is no
+/// directory before it goes (cr-uv3-1). What `keep` holds back is told to
+/// `failed` like any entry that could not be removed, and the directories
+/// above it stay with it.
+pub fn remove_what_may_go(
+    target: &Path,
+    as_directory: bool,
+    canonical_root: Option<&Path>,
+    options: RmOptions,
+    called_off: Option<&dyn Fn() -> bool>,
+    keep: Option<Keep<'_>>,
+    failed: &mut dyn FnMut(RemovalFailure) -> Result<(), Stopped>,
+) -> Result<u64, DeletionError> {
     let mut report = Report {
         removed: 0,
         failed,
@@ -416,6 +466,7 @@ pub fn remove_as_rm_reporting(
         canonical_root,
         options,
         called_off,
+        keep,
         &mut report,
     )?;
     if report.unheard {
@@ -453,6 +504,7 @@ fn remove_operand(
     canonical_root: Option<&Path>,
     options: RmOptions,
     called_off: Option<&dyn Fn() -> bool>,
+    keep: Option<Keep<'_>>,
     removal: &mut Report<'_>,
 ) -> Result<(), DeletionError> {
     use anchored::ByName as _;
@@ -525,6 +577,10 @@ fn remove_operand(
             if !absent(&error) {
                 removal.fail(PathBuf::new(), error);
             }
+            return Ok(());
+        }
+        if let Some(error) = stays(keep, &above, &name, Path::new("")) {
+            removal.fail(PathBuf::new(), error);
             return Ok(());
         }
         match above.remove(&name, false) {
@@ -664,6 +720,11 @@ fn remove_operand(
                 continue;
             }
         }
+        if let Some(error) = stays(keep, &frame.dir, &name, &relative_path) {
+            frame.kept = true;
+            removal.fail(relative_path, error);
+            continue;
+        }
         match frame.dir.remove(&name, false) {
             Ok(()) => removal.removed += 1,
             Err(error) => {
@@ -675,6 +736,23 @@ fn remove_operand(
     Ok(())
 }
 
+/// Why the entry called `name` in `within` stays, if `keep` holds it back
+/// (cr-uv3-1): asked of the entry itself, by its name in the directory
+/// that is held. An entry that cannot be looked at stays too.
+#[cfg(unix)]
+fn stays(
+    keep: Option<Keep<'_>>,
+    within: &dyn anchored::ByName,
+    name: &std::ffi::CStr,
+    relative_path: &Path,
+) -> Option<std::io::Error> {
+    let keep = keep?;
+    match within.met(name) {
+        Ok(met) => keep(relative_path, &met),
+        Err(error) => Some(error),
+    }
+}
+
 #[cfg(not(unix))]
 fn remove_operand(
     target: &Path,
@@ -682,6 +760,7 @@ fn remove_operand(
     canonical_root: Option<&Path>,
     options: RmOptions,
     called_off: Option<&dyn Fn() -> bool>,
+    keep: Option<Keep<'_>>,
     removal: &mut Report<'_>,
 ) -> Result<(), DeletionError> {
     if called_off.is_some_and(|called_off| called_off()) {
@@ -719,6 +798,10 @@ fn remove_operand(
             }
             return Ok(());
         }
+        if let Some(error) = keep.and_then(|keep| keep(Path::new(""), &met_by_path(&metadata))) {
+            removal.fail(PathBuf::new(), error);
+            return Ok(());
+        }
         #[cfg(windows)]
         crate::win_fs::clear_readonly_recursive(target);
         match std::fs::remove_file(target) {
@@ -730,6 +813,9 @@ fn remove_operand(
     if !options.recursive {
         removal.fail(PathBuf::new(), is_a_directory());
         return Ok(());
+    }
+    if let Some(keep) = keep {
+        return remove_tree_asking(target, keep, called_off, removal);
     }
     // A recursive removal clears read-only attributes through the tree
     // first, as the purge it replaces did.
@@ -752,6 +838,107 @@ fn remove_operand(
         Err(error) => {
             removal.removed += before.saturating_sub(entries(target));
             removal.fail(PathBuf::new(), error);
+        }
+    }
+    Ok(())
+}
+
+/// [`Met`] from what a path's own metadata says (the entry itself).
+#[cfg(not(unix))]
+fn met_by_path(metadata: &std::fs::Metadata) -> Met {
+    let kind = if metadata.file_type().is_file() {
+        MetKind::File
+    } else if metadata.file_type().is_symlink() {
+        MetKind::Link
+    } else {
+        MetKind::Other
+    };
+    Met {
+        kind,
+        size: metadata.len(),
+        mtime_seconds: crate::wire_metadata::mtime_seconds(metadata).unwrap_or(0),
+    }
+}
+
+/// A tree removed entry by entry, each one that is no directory asked
+/// about first (cr-uv3-1), where there is no removal held to a directory's
+/// handle. Entries are reached by their paths; what lets one go is that an
+/// account holds this path at this size and time, and a path led
+/// elsewhere finds no such file.
+#[cfg(not(unix))]
+fn remove_tree_asking(
+    target: &Path,
+    keep: Keep<'_>,
+    called_off: Option<&dyn Fn() -> bool>,
+    removal: &mut Report<'_>,
+) -> Result<(), DeletionError> {
+    // The directories that hold something that stayed: they stay too,
+    // and are not reported again.
+    let mut holding: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for entry in walkdir::WalkDir::new(target)
+        .follow_links(false)
+        .contents_first(true)
+    {
+        if removal.unheard || called_off.is_some_and(|called_off| called_off()) {
+            return Err(DeletionError::Cancelled {
+                operation: RM_OPERATION,
+            });
+        }
+        let stayed = |holding: &mut std::collections::HashSet<PathBuf>, path: &Path| {
+            for above in path.ancestors().skip(1) {
+                if !above.starts_with(target) || !holding.insert(above.to_path_buf()) {
+                    break;
+                }
+            }
+        };
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                let path = error.path().unwrap_or(target).to_path_buf();
+                stayed(&mut holding, &path);
+                let relative_path = path
+                    .strip_prefix(target)
+                    .unwrap_or(Path::new(""))
+                    .to_path_buf();
+                removal.fail(relative_path, std::io::Error::other(error));
+                continue;
+            }
+        };
+        let path = entry.path();
+        let relative_path = path
+            .strip_prefix(target)
+            .unwrap_or(Path::new(""))
+            .to_path_buf();
+        if entry.file_type().is_dir() {
+            if holding.contains(path) {
+                continue;
+            }
+            match std::fs::remove_dir(path) {
+                Ok(()) => removal.removed += 1,
+                Err(error) => {
+                    stayed(&mut holding, path);
+                    removal.fail(relative_path, error);
+                }
+            }
+            continue;
+        }
+        let stays = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => keep(&relative_path, &met_by_path(&metadata)),
+            Err(error) => Some(error),
+        };
+        if let Some(error) = stays {
+            stayed(&mut holding, path);
+            removal.fail(relative_path, error);
+            continue;
+        }
+        #[cfg(windows)]
+        crate::win_fs::clear_readonly_recursive(path);
+        match std::fs::remove_file(path) {
+            Ok(()) => removal.removed += 1,
+            Err(error) => {
+                stayed(&mut holding, path);
+                removal.fail(relative_path, error);
+            }
         }
     }
     Ok(())
@@ -855,6 +1042,47 @@ mod anchored {
             // SAFETY: the call succeeded, so the record is filled in.
             let mode = unsafe { found.assume_init() }.st_mode;
             Ok(mode & libc::S_IFMT == libc::S_IFDIR)
+        }
+
+        /// What the entry called `name` here is — the entry itself, a
+        /// link being a link — with its size and its modification time
+        /// (cr-uv3-1): what a move's account knows a file by.
+        fn met(&self, name: &CStr) -> io::Result<super::Met> {
+            let mut found = std::mem::MaybeUninit::<stat>::uninit();
+            // SAFETY: as in `is_directory`.
+            let answered = unsafe {
+                fstatat(
+                    self.descriptor(),
+                    name.as_ptr(),
+                    found.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if answered != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: the call succeeded, so the record is filled in.
+            let found = unsafe { found.assume_init() };
+            let kind = match found.st_mode & libc::S_IFMT {
+                libc::S_IFREG => super::MetKind::File,
+                libc::S_IFLNK => super::MetKind::Link,
+                _ => super::MetKind::Other,
+            };
+            // A time before 1970 is counted toward zero, as
+            // `wire_metadata::mtime_seconds` counts it.
+            #[allow(clippy::useless_conversion)]
+            let (seconds, nanoseconds) =
+                (i64::from(found.st_mtime), i64::from(found.st_mtime_nsec));
+            let mtime_seconds = if seconds < 0 && nanoseconds > 0 {
+                seconds + 1
+            } else {
+                seconds
+            };
+            Ok(super::Met {
+                kind,
+                size: u64::try_from(found.st_size).unwrap_or(0),
+                mtime_seconds,
+            })
         }
 
         /// Whether the entry called `name` here is a directory once a link

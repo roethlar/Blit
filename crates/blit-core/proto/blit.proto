@@ -306,6 +306,13 @@ message ManifestComplete {
   // `scan_failures_dropped` counts entries that did not fit.
   repeated FileFailure scan_failures = 2;
   uint64 scan_failures_dropped = 3;
+  // Contract 24 (cr-uv3-1): on a session opened with
+  // `source_removed_after`, by the end that is read from when it is the
+  // RESPONDER — the ticket for its account of every file it put on this
+  // manifest. The initiator presents it when it asks for the source to be
+  // removed (`RmRequest.sent_tickets`), and only what an account holds is
+  // removed. Empty on any other session.
+  bytes sent_ticket = 4;
 }
 
 // Contract 8 (cr-g3fix6-2): entries the SOURCE's walk pruned because an
@@ -390,6 +397,17 @@ message RmRequest {
   // disk holds need not be text, and what `find` prints for it has to be
   // an operand `rm` takes.
   repeated bytes raw_paths = 6;
+  // Contract 24 (cr-uv3-1): the removal that ends a MOVE. The tickets of
+  // the sessions that copied what is to be removed
+  // (`ManifestComplete.sent_ticket`). With any, an entry that is no
+  // directory is removed only if it is a regular file one of those
+  // sessions sent, at the size and modification time it was sent with; a
+  // directory is removed when that leaves it empty; and every other entry
+  // — a link, a file that came or changed after the source was read — is
+  // left and reported as a failure. A ticket the daemon does not hold
+  // refuses the request before anything is removed. A plain `rm` sends
+  // none.
+  repeated bytes sent_tickets = 7;
 }
 
 // One entry that could not be removed.
@@ -989,6 +1007,9 @@ message DelegatedPullSummary {
   // Contract 7 (cr-jl4fix2-1): see TransferSummary.left_in_place_raw,
   // re-encoded verbatim.
   repeated bytes left_in_place_raw = 15;
+  // Contract 24 (cr-uv3-1): see TransferSummary.source_ticket, re-encoded
+  // verbatim.
+  bytes source_ticket = 16;
 }
 
 message DelegatedPullError {
@@ -1483,6 +1504,9 @@ message TransferSummary {
   // names that collapse to one text never share the status. Bounded like
   // `left_in_place`; `left_in_place_truncated` covers both lists.
   repeated bytes left_in_place_raw = 14;
+  // Contract 24 (cr-uv3-1): the source's ticket for what it sent
+  // (`ManifestComplete.sent_ticket`), as the destination received it.
+  bytes source_ticket = 15;
 }
 
 // Structured refusal/abort — an end says why before closing.

@@ -1242,6 +1242,7 @@ fn a_daemon_refuses_rm_from_another_contract() {
     let ctx = TestContext::new();
     tree(&ctx.module_dir);
     let request = |contract_version: u32, path: &str| RmRequest {
+        sent_tickets: Vec::new(),
         contract_version,
         module: "test".into(),
         paths: vec![path.to_string()],
@@ -1395,6 +1396,55 @@ fn rm_reports_every_entry_it_cannot_remove() {
     let report: serde_json::Value = serde_json::from_str(&json.stdout).expect("JSON");
     assert_eq!(report["failures"].as_array().map(Vec::len), Some(1001));
     assert_eq!(report["entries_removed"], 0);
+}
+
+/// cr-uv3-1: a removal that names the sessions which copied — a move's —
+/// is refused whole when the daemon does not hold the account of one of
+/// them: there is then nothing to say what may be removed. A daemon
+/// restarted since the transfer is such a daemon.
+#[test]
+fn a_removal_for_a_move_is_refused_without_the_account_of_what_was_sent() {
+    use blit_core::generated::blit_client::BlitClient;
+    use blit_core::generated::RmRequest;
+    use blit_core::transfer_session::CONTRACT_VERSION;
+
+    let ctx = TestContext::new();
+    tree(&ctx.module_dir);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let mut client = BlitClient::connect(format!("http://127.0.0.1:{}", ctx.daemon_port))
+            .await
+            .expect("connect");
+        for ticket in [vec![7u8; 16], vec![7u8; 3], Vec::new()] {
+            let status = client
+                .rm(RmRequest {
+                    // An empty ticket beside a real one is still a ticket
+                    // nothing answers to.
+                    sent_tickets: vec![vec![9u8; 16], ticket],
+                    contract_version: CONTRACT_VERSION,
+                    module: "test".into(),
+                    paths: vec!["t".to_string()],
+                    raw_paths: Vec::new(),
+                    recursive: true,
+                    force: true,
+                })
+                .await
+                .expect_err("no account of what was sent");
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+            assert!(
+                status
+                    .message()
+                    .contains("no longer holds the account of what that transfer sent"),
+                "{}",
+                status.message()
+            );
+            assert!(
+                ctx.module_dir.join("t/dir/inner.txt").exists()
+                    && ctx.module_dir.join("t/file.txt").exists(),
+                "nothing removed"
+            );
+        }
+    });
 }
 
 /// AC-11, `move`'s source removal: a `move` from a daemon reports the

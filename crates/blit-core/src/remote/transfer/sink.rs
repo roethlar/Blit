@@ -5547,6 +5547,7 @@ mod tests {
     /// the sender-bounded list.
     fn wire_summary(outcome: &SinkOutcome) -> crate::generated::TransferSummary {
         crate::generated::TransferSummary {
+            source_ticket: Vec::new(),
             files_transferred: 3,
             bytes_transferred: 4096,
             entries_deleted: 0,

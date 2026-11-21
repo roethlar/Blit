@@ -66,6 +66,9 @@ pub async fn remove<F>(
     module: String,
     paths: Vec<EntryPath>,
     options: RmOptions,
+    // cr-uv3-1: the tickets of the sessions that copied what is to be
+    // removed — a move's removal. None for `rm`.
+    sent_tickets: Vec<Vec<u8>>,
     mut on_failure: F,
 ) -> std::result::Result<u64, RmError>
 where
@@ -92,6 +95,7 @@ where
             paths: paths.into_iter().map(|path| path.text).collect(),
             recursive: options.recursive,
             force: options.force,
+            sent_tickets,
         })
         .await
         .map_err(|status| {
@@ -167,7 +171,25 @@ fn refused_before_acting(code: tonic::Code) -> bool {
 /// tidied `single.txt/` to `single.txt` and copied the file, this asked
 /// for `single.txt/`, a directory that is not there and under `-f` no
 /// failure, and the move ended well with nothing removed.
-pub async fn delete_remote_path(remote: &RemoteEndpoint) -> Result<u64> {
+///
+/// And what is removed is what the move's sessions SENT (cr-uv3-1):
+/// `sent_tickets` are theirs, one a session. It was whatever stood at the
+/// source by then — a link, which no transfer carries, and a file that
+/// arrived after the source had been read, went with the files that were
+/// copied. The daemon now removes a file only if one of those sessions
+/// sent it as it still is, and a directory when that leaves it empty;
+/// every other entry stays, is named here, and the source is not reported
+/// removed. With no ticket nothing is asked for at all.
+pub async fn delete_remote_path(
+    remote: &RemoteEndpoint,
+    sent_tickets: Vec<Vec<u8>>,
+) -> Result<u64> {
+    if sent_tickets.is_empty() || sent_tickets.iter().any(Vec::is_empty) {
+        bail!(
+            "the source was not removed: the daemon gave no account of what it sent, so there \
+             is nothing to say what may be removed"
+        );
+    }
     let (module, source) = crate::remote::transfer::session_client::source_module_path(remote)?;
     let rel_path = source.as_str();
     // The first entry left behind, and how many more: a move names one.
@@ -180,6 +202,7 @@ pub async fn delete_remote_path(remote: &RemoteEndpoint) -> Result<u64> {
             recursive: true,
             force: true,
         },
+        sent_tickets,
         |failure| match first {
             None => first = Some(failure),
             Some(_) => more += 1,
@@ -223,6 +246,37 @@ pub fn extract_module_and_path(remote: &RemoteEndpoint) -> Result<(String, PathB
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cr-uv3-1: with no account of what was sent there is nothing to say
+    /// what may be removed, and nothing is asked for — a daemon is not
+    /// even reached. A removal without one took whatever stood there.
+    #[tokio::test]
+    async fn a_moves_removal_asks_for_nothing_without_a_ticket() {
+        let remote = RemoteEndpoint {
+            // Nothing listens here: reaching for it would be another error.
+            host: "127.0.0.1".into(),
+            port: 1,
+            path: RemotePath::Module {
+                module: "m".into(),
+                rel_path: PathBuf::from("incoming"),
+            },
+        };
+        for tickets in [
+            Vec::new(),
+            vec![Vec::new()],
+            vec![vec![1u8; 16], Vec::new()],
+        ] {
+            let error = delete_remote_path(&remote, tickets)
+                .await
+                .expect_err("nothing to go by");
+            assert!(
+                error
+                    .to_string()
+                    .contains("the daemon gave no account of what it sent"),
+                "{error:#}"
+            );
+        }
+    }
 
     /// cr-uv2-3: a refusal is an answer. A request that got none — the
     /// connection gone, a timeout — may have been acted on.

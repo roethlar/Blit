@@ -21,7 +21,7 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `files_from_unnamed`; `client::connect_with_timeout` and
 `connect_transfer_client` return a `BlitClient<client::BlitChannel>`
 (the channel behind `client::BoundedResponses`). The wire
-protocol is contract 23: a peer on any other contract version (every 0.1.x
+protocol is contract 24: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
 
@@ -118,7 +118,7 @@ part, and a job you can list, read, re-run and retry.
   be written the transfer still completes and the report says the log is
   incomplete.
 - A dry run or `--null` run is logged as what it planned, not as copies.
-- Wire protocol (contract 23): the job ID rides the session-open and
+- Wire protocol (contract 24): the job ID rides the session-open and
   delegated-pull requests; `GetJobLog` returns a daemon's log by ID; the
   finished-job record carries the failed-file count. In a filtered mirror,
   `ManifestPruned` tells the destination which source paths were excluded,
@@ -339,6 +339,19 @@ asks before it deletes.
   copying, as `mv` refuses it — name the directory, or the link without
   the `/`. A `copy` goes through the link as before. And `move
   HOST:/m/dir/.` now removes `dir` once its contents have landed.
+- **A move from a daemon removes what it copied, and nothing else.** The
+  removal that ends it took whatever stood at the source by then: a
+  symbolic link, which no transfer carries, went with the files — `blit
+  move HOST:/m/incoming/. …` exited 0 with the link gone and never
+  copied — and so would a file that arrived after the source had been
+  read. The daemon now keeps an account of what each of the move's
+  sessions sent and removes that: each file, if it is still as it was
+  sent, and each directory this leaves empty. Anything else stays
+  where it is and is named (`cannot remove 'incoming/link': it is a
+  symbolic link, which a move does not carry`), and the move exits 1.
+  A daemon restarted between the copy and the removal refuses the
+  removal, and the source stays whole. A move whose source is on this
+  machine is unchanged.
 - **Every entry that could not be removed is named**, as the daemon meets
   it — a tree with a million of them prints a million lines, as `rm`
   does. If a daemon's answer stops before it says it is done, what it

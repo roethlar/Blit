@@ -171,6 +171,20 @@ impl BlitService {
             recursive: req.recursive,
             force: req.force,
         };
+        // cr-uv3-1: a move's removal names the sessions that copied. Their
+        // accounts are found before anything is touched: without every
+        // one of them there is nothing to say what may be removed.
+        let sent = if req.sent_tickets.is_empty() {
+            None
+        } else {
+            Some(blit_core::moved::held(&req.sent_tickets).ok_or_else(|| {
+                Status::failed_precondition(
+                    "this daemon no longer holds the account of what that transfer sent (it has \
+                     been restarted since, or the transfer is more than a day old); nothing was \
+                     removed",
+                )
+            })?)
+        };
         // The answer goes as it is made (cr-uv1-5): each entry that could
         // not be removed, then that the removal is done.
         let (tx, rx) = mpsc::channel::<Result<RmReply, Status>>(64);
@@ -179,7 +193,14 @@ impl BlitService {
         tokio::spawn(async move {
             let err_sender = tx.clone();
             let result = tokio::task::spawn_blocking(move || {
-                stream_removal(module_path, canonical_root, operands, options, &tx)
+                stream_removal(
+                    module_path,
+                    canonical_root,
+                    operands,
+                    options,
+                    sent.as_deref(),
+                    &tx,
+                )
             })
             .await;
             let ok = matches!(result, Ok(Ok(())));

@@ -1242,12 +1242,16 @@ async fn run_move_inner(
                 lifecycle_trace,
             )
             .await?;
+            // cr-uv3-1: each session's ticket for what the daemon sent in
+            // it; the removal below presents them all.
+            let sent_tickets = std::sync::Mutex::new(vec![state.summary.source_ticket.clone()]);
             let retry = retry::run_retry_passes(
                 args,
                 retry::PassFailures::from_summary(&state.summary),
                 |pass_args| {
                     let remote = remote.clone();
                     let dst = dst_path.clone();
+                    let sent_tickets = &sent_tickets;
                     async move {
                         let pass = remote::run_remote_pull_transfer_deferred(
                             &pass_args,
@@ -1259,6 +1263,10 @@ async fn run_move_inner(
                             lifecycle_trace,
                         )
                         .await?;
+                        sent_tickets
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(pass.summary.source_ticket.clone());
                         Ok(retry::PassResult {
                             files_transferred: pass.summary.files_transferred,
                             bytes_transferred: pass.summary.bytes_transferred,
@@ -1289,8 +1297,13 @@ async fn run_move_inner(
                 &failures::failures_from_wire(&state.summary.failures),
             )?;
 
-            // Delete remote source: the path the session read (cr-uv2-1).
-            delete_remote_path(&remote).await?;
+            // Delete remote source: the path the session read (cr-uv2-1),
+            // and of what stands there only what the sessions sent
+            // (cr-uv3-1).
+            let sent_tickets = sent_tickets
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            delete_remote_path(&remote, sent_tickets).await?;
             note_source_removed(args, &format_remote_endpoint(&remote));
             render_result(lifecycle_trace, || {
                 remote::print_deferred_pull_result(args, &state);
@@ -1406,12 +1419,16 @@ async fn run_move_inner(
                 lifecycle_trace,
             )
             .await?;
+            // cr-uv3-1: as from a daemon to this machine — the source
+            // daemon's ticket comes back through the one that pulled.
+            let sent_tickets = std::sync::Mutex::new(vec![state.summary.source_ticket.clone()]);
             let retry = retry::run_retry_passes(
                 args,
                 retry::PassFailures::from_delegated(&state),
                 |pass_args| {
                     let src = src.clone();
                     let dst = dst.clone();
+                    let sent_tickets = &sent_tickets;
                     async move {
                         let pass = remote_remote_direct::run_remote_to_remote_direct_deferred(
                             &pass_args,
@@ -1423,6 +1440,10 @@ async fn run_move_inner(
                             lifecycle_trace,
                         )
                         .await?;
+                        sent_tickets
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(pass.summary.source_ticket.clone());
                         Ok(retry::PassResult {
                             files_transferred: pass.summary.files_transferred,
                             bytes_transferred: pass.summary.bytes_transferred,
@@ -1457,8 +1478,13 @@ async fn run_move_inner(
                 &state.contained_failures(),
             )?;
 
-            // Delete remote source: the path the session read (cr-uv2-1).
-            delete_remote_path(&src).await?;
+            // Delete remote source: the path the session read (cr-uv2-1),
+            // and of what stands there only what the sessions sent
+            // (cr-uv3-1).
+            let sent_tickets = sent_tickets
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            delete_remote_path(&src, sent_tickets).await?;
             note_source_removed(args, &format_remote_endpoint(&src));
             render_result(lifecycle_trace, || {
                 remote_remote_direct::print_deferred_delegated_result(args, &state);

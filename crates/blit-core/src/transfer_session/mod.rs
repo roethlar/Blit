@@ -208,7 +208,12 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// is, and keeps the option on. It ran with the option off, and replaced
 /// whatever stood at those paths by then. A peer of contract 22 would
 /// skip every one of them as a file to keep and report it copied.
-pub const CONTRACT_VERSION: u32 = 23;
+/// v24: `ManifestComplete.sent_ticket`, `RmRequest.sent_tickets`
+/// (cr-uv3-1) — the removal that ends a move from a daemon presents the
+/// tickets of the sessions that copied, and takes only what they sent. It
+/// was a recursive removal of whatever stood at the source by then. A
+/// peer of contract 23 would issue no ticket, or remove without one.
+pub const CONTRACT_VERSION: u32 = 24;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames
@@ -2239,10 +2244,30 @@ async fn source_send_half(
                 .await?;
         }
         manifest_sent.store(true, Ordering::Release);
+        // cr-uv3-1: the initiator will ask this end to remove the source.
+        // What it may then remove is what this manifest holds, and this
+        // end keeps the account of it — the removal used to take whatever
+        // stood at the source by then.
+        let sent_ticket = if negotiated.open.source_removed_after
+            && negotiated.open.initiator_role() == TransferRole::Destination
+        {
+            let mut account = crate::moved::Account::default();
+            for (text, header) in sent.lock().expect("sent-manifest lock poisoned").iter() {
+                let path = match header.raw_relative_path.as_deref() {
+                    Some(raw) if !raw.is_empty() => raw,
+                    _ => text.as_bytes(),
+                };
+                account.record(path, header.size, header.mtime_seconds);
+            }
+            crate::moved::keep(account)
+        } else {
+            Vec::new()
+        };
         tx.send(frame(Frame::ManifestComplete(ManifestComplete {
             scan_complete,
             scan_failures,
             scan_failures_dropped,
+            sent_ticket,
         })))
         .await?;
         if let Some(trace) = &phase_trace {
@@ -4561,6 +4586,9 @@ async fn destination_session_inner(
     // is kept here — `files_written` / `bytes_written` above stay the
     // counters each lane folds into.
     let mut contained_failures = crate::remote::transfer::SinkOutcome::default();
+    // cr-uv3-1: the source's ticket for what it sent, handed on in the
+    // summary to whoever will ask for the source to be removed.
+    let mut source_ticket: Vec<u8> = Vec::new();
     // Review cr-jl4fix2-1: the exact bytes of each granted entry whose name
     // is not UTF-8, by its text — one per text, as a second entry of a text
     // is refused at intake — to name the failures by at the end.
@@ -4754,6 +4782,7 @@ async fn destination_session_inner(
                 if manifest_complete {
                     return Err(violation("duplicate ManifestComplete".into()));
                 }
+                source_ticket.clone_from(&complete.sent_ticket);
                 // cr-ssc6-1: a scoped (retry) scan names every requested
                 // path it could not put on the manifest; each is this
                 // session's contained failure, recorded before the diff so
@@ -5588,6 +5617,7 @@ async fn destination_session_inner(
                     left_in_place_raw,
                     removed_incomplete,
                     removed_incomplete_truncated,
+                    source_ticket: std::mem::take(&mut source_ticket),
                 };
                 // ph-1c: this end is the scorer and its score is now
                 // final — signal terminal state before the send, whose

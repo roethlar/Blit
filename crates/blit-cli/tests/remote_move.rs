@@ -493,3 +493,81 @@ fn a_move_through_a_link_typed_as_a_directory_is_refused_before_copying() {
     assert_eq!(code, Some(0), "{said}");
     assert!(local.join("inner.txt").exists() && !real.exists(), "{said}");
 }
+
+/// cr-uv3-1: the removal that ends a move takes what the move SENT. It was
+/// a recursive removal of whatever stood at the source: `move incoming/.`,
+/// holding a file and a link to it, exited 0 with the tree gone and the
+/// file alone at the destination — the link, which no transfer carries,
+/// removed with it. The daemon keeps an account of what each session sent
+/// and removes that: the files, and the directories they leave empty. The
+/// link stays where it was, the command says so, and it does not end
+/// well. To this machine and between two daemons.
+#[cfg(unix)]
+#[test]
+fn a_move_removes_what_it_sent_and_leaves_what_it_did_not() {
+    let ctx = TestContext::builder().delegation(true).build();
+    let host = format!("127.0.0.1:{}:/test", ctx.daemon_port);
+    let local = ctx.workspace.join("moved");
+    let there = ctx.module_dir.join("landing");
+    for (typed, to, lands) in [
+        ("incoming/.", format!("{}/", local.display()), &local),
+        ("incoming/", format!("{host}/landing/"), &there),
+    ] {
+        let incoming = ctx.module_dir.join("incoming");
+        fs::create_dir_all(incoming.join("sub/empty")).expect("tree");
+        fs::write(incoming.join("file.txt"), "carried").expect("file");
+        fs::write(incoming.join("sub/inner.txt"), "carried too").expect("file");
+        std::os::unix::fs::symlink("file.txt", incoming.join("link")).expect("link");
+
+        let (code, said) = blit(&ctx, &["move", "-y", &format!("{host}/{typed}"), &to]);
+        let what = format!("move {typed} -> {to}\nexit {code:?}\n{said}");
+        assert_eq!(code, Some(1), "the move is not complete\n{what}");
+        assert!(
+            said.contains("link': it is a symbolic link, which a move does not carry"),
+            "and says what stayed, and why\n{what}"
+        );
+        // What was sent is at the destination, and gone from the source
+        // with the directories it left empty.
+        assert_eq!(
+            fs::read_to_string(lands.join("file.txt")).expect("moved"),
+            "carried",
+            "{what}"
+        );
+        assert_eq!(
+            fs::read_to_string(lands.join("sub/inner.txt")).expect("moved"),
+            "carried too",
+            "{what}"
+        );
+        assert!(
+            !incoming.join("file.txt").exists() && !incoming.join("sub").exists(),
+            "what was sent is gone\n{what}"
+        );
+        // What was not is where it was — and nowhere else.
+        assert!(incoming.join("link").is_symlink(), "the link stays\n{what}");
+        assert!(
+            fs::symlink_metadata(lands.join("link")).is_err(),
+            "no transfer carried it\n{what}"
+        );
+        fs::remove_dir_all(&incoming).expect("for the next");
+    }
+
+    // With nothing in it that a move does not carry, the source goes whole.
+    let incoming = ctx.module_dir.join("incoming");
+    fs::create_dir_all(incoming.join("sub/empty")).expect("tree");
+    fs::write(incoming.join("sub/inner.txt"), "carried").expect("file");
+    let whole = ctx.workspace.join("whole");
+    let (code, said) = blit(
+        &ctx,
+        &[
+            "move",
+            "-y",
+            &format!("{host}/incoming/"),
+            &format!("{}/", whole.display()),
+        ],
+    );
+    assert_eq!(code, Some(0), "{said}");
+    assert!(
+        whole.join("sub/inner.txt").exists() && !incoming.exists(),
+        "{said}"
+    );
+}

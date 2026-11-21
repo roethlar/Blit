@@ -131,6 +131,8 @@ pub async fn run_rm(args: RmArgs) -> Result<ExitCode> {
             first.module.clone(),
             paths,
             options,
+            // `rm` removes what it is given: no ticket.
+            Vec::new(),
             |failure| {
                 let Some(&at) = group.get(failure.operand) else {
                     return;
