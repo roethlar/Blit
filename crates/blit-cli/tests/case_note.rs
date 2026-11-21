@@ -816,7 +816,7 @@ fn the_line_keeps_what_is_under_a_folder_apart_from_the_folder() {
     );
 }
 
-/// cr-ecm7-2, cr-ecm7-3, cr-ecm7-4, cr-ecm8-2: commands whose line claimed
+/// cr-ecm7-2, cr-ecm7-3, cr-ecm7-4, cr-ecm8-2, cr-ecm9-2: commands whose line claimed
 /// something the mirror then contradicted — or was absent when it had
 /// something to say — each shown the line it gets now and run both ways.
 ///
@@ -885,6 +885,30 @@ fn the_line_claims_only_what_the_mirror_then_does() {
                 ("B.2", true, false),
                 ("x.1", true, true),
             ],
+        },
+        // cr-ecm9-2: one real loss is enough, and it is shown first. The
+        // line gave `Keep`'s spellings; `A.txt` stays kept by the
+        // alternative beside the class, and `B.txt` is what the option
+        // stops keeping.
+        Case {
+            excludes: &["Keep", "{[!ab].txt,A.txt}"],
+            line: "\"{[!ab].txt,A.txt}\" matches exactly as typed, and 1 more pattern matches \
+                   only as typed; capital letters matter (--ignore-case changes what they \
+                   match: [!ab] would stop matching B).",
+            entries: &[
+                ("A.txt", true, true),
+                ("B.txt", true, false),
+                ("keep", false, true),
+            ],
+        },
+        // cr-ecm9-2: a gain is judged against the whole filter. For `a`
+        // the line offered `A`, which the pattern beside it keeps already;
+        // what the option changes is `x.doc`.
+        Case {
+            excludes: &["a", "A", "*.Doc"],
+            line: "\"*.Doc\" matches .Doc only; capital letters matter (--ignore-case would \
+                   also match .doc, .DOC).",
+            entries: &[("A", true, true), ("a", true, true), ("x.doc", false, true)],
         },
         Case {
             excludes: &["{a,A}", "*.Doc"],

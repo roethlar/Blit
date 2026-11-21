@@ -79,7 +79,101 @@ pub(crate) fn case_note(patterns: &[(&str, Option<&str>)], windows: bool) -> Opt
             role: Role::Exclude,
         })
         .collect();
-    case_note_of(&noted, windows)
+    let all: Vec<String> = patterns
+        .iter()
+        .map(|&(pattern, _)| pattern.to_string())
+        .collect();
+    case_note_of(
+        &noted,
+        Whole {
+            excludes: &all,
+            includes: &[],
+        },
+        windows,
+    )
+}
+
+/// cr-ecm9-2: the command's patterns as its filter holds them, list by
+/// list — what a claim about ONE pattern is judged against. A name the
+/// option would add through one pattern is no gain when another pattern
+/// names it already (`--exclude a --exclude A`: `A` was offered as an
+/// additional match, and both runs kept it), and a name one pattern stops
+/// matching is no loss when another still names it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Whole<'a> {
+    /// The excludes the filter applies (resolved, in order).
+    pub excludes: &'a [String],
+    /// The includes it applies.
+    pub includes: &'a [String],
+}
+
+/// One list of [`Whole`] as a filter of its own: as typed, and — made only
+/// when a loss has to be checked — as `--ignore-case` would read it. The
+/// lists are the ones the run's filter holds, so the sets compiled for
+/// the run are the ones asked here; nothing is compiled twice.
+struct Listed {
+    patterns: Vec<String>,
+    role: Role,
+    typed: crate::fs_enum::FileFilter,
+    ignoring: std::cell::OnceCell<crate::fs_enum::FileFilter>,
+}
+
+impl Listed {
+    fn of(patterns: &[String], role: Role) -> std::rc::Rc<Self> {
+        std::rc::Rc::new(Self {
+            patterns: patterns.to_vec(),
+            role,
+            typed: Self::filter(patterns, role, false),
+            ignoring: std::cell::OnceCell::new(),
+        })
+    }
+
+    fn filter(patterns: &[String], role: Role, ignore_case: bool) -> crate::fs_enum::FileFilter {
+        let mut filter = crate::fs_enum::FileFilter::default();
+        match role {
+            Role::Exclude => filter.exclude_files = patterns.to_vec(),
+            Role::Include => filter.include_files = patterns.to_vec(),
+        }
+        filter.ignore_case = ignore_case;
+        filter
+    }
+
+    fn ignoring(&self) -> &crate::fs_enum::FileFilter {
+        self.ignoring
+            .get_or_init(|| Self::filter(&self.patterns, self.role, true))
+    }
+}
+
+/// Both lists of a command, each as [`Listed`].
+struct WholeFilters {
+    excludes: std::rc::Rc<Listed>,
+    includes: std::rc::Rc<Listed>,
+}
+
+impl WholeFilters {
+    fn of(whole: Whole) -> Self {
+        Self {
+            excludes: Listed::of(whole.excludes, Role::Exclude),
+            includes: Listed::of(whole.includes, Role::Include),
+        }
+    }
+
+    /// The pattern alone, as an exclude: what a claim about one pattern
+    /// is judged against when it is the whole filter.
+    #[cfg(test)]
+    fn alone(pattern: &str) -> Self {
+        Self::of(Whole {
+            excludes: &[pattern.to_string()],
+            includes: &[],
+        })
+    }
+
+    fn listing(&self, role: Role) -> std::rc::Rc<Listed> {
+        std::rc::Rc::clone(match role {
+            Role::Exclude => &self.excludes,
+            Role::Include => &self.includes,
+        })
+    }
 }
 
 /// What a pattern is in the filter: it leaves entries out, or lets them in.
@@ -132,7 +226,8 @@ pub(crate) struct Noted<'a> {
 ///   both matched already;
 /// - a pattern whose reading the option does not change at all is neither
 ///   shown nor counted.
-pub(crate) fn case_note_of(patterns: &[Noted], windows: bool) -> Option<String> {
+pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> Option<String> {
+    let whole = WholeFilters::of(whole);
     // By the text alone, and cheaply, for every pattern: the ones the
     // option could read otherwise. Only the ones looked at for showing are
     // checked against the filter.
@@ -144,7 +239,7 @@ pub(crate) fn case_note_of(patterns: &[Noted], windows: bool) -> Option<String> 
     let mut shown: Option<(usize, Spellings)> = None;
     for (at, noted) in candidates.iter().enumerate() {
         if has_narrowed_class(noted.read_as, windows) {
-            match Spellings::of_role(noted.read_as, noted.role, windows) {
+            match Spellings::of_role(noted.read_as, noted.role, windows, &whole) {
                 Some(spellings) if spellings.narrowed.is_some() => {
                     shown = Some((at, spellings));
                     break;
@@ -156,7 +251,7 @@ pub(crate) fn case_note_of(patterns: &[Noted], windows: bool) -> Option<String> 
     if shown.is_none() {
         let mut in_words: Option<(usize, Spellings)> = None;
         for (at, noted) in candidates.iter().enumerate() {
-            match Spellings::of_role(noted.read_as, noted.role, windows) {
+            match Spellings::of_role(noted.read_as, noted.role, windows, &whole) {
                 None => unchanged.push(at),
                 Some(spellings) if !spellings.others.is_empty() => {
                     shown = Some((at, spellings));
@@ -186,7 +281,7 @@ pub(crate) fn case_note_of(patterns: &[Noted], windows: bool) -> Option<String> 
             break;
         }
         asked += 1;
-        if Spellings::of_role(noted.read_as, noted.role, windows).is_none() {
+        if Spellings::of_role(noted.read_as, noted.role, windows, &whole).is_none() {
             unchanged.push(at);
         }
     }
@@ -295,7 +390,12 @@ impl<'a> Spellings<'a> {
     /// a name the option does not match (a mirror deleted it).
     #[cfg(test)]
     fn of(pattern: &'a str, windows: bool) -> Option<Self> {
-        Self::of_role(pattern, Role::Exclude, windows)
+        Self::of_role(
+            pattern,
+            Role::Exclude,
+            windows,
+            &WholeFilters::alone(pattern),
+        )
     }
 
     /// [`Self::of`] for a pattern in `role`, with every claim CHECKED
@@ -322,9 +422,9 @@ impl<'a> Spellings<'a> {
     /// names read off each text's own syntax ([`samples`]). Under the
     /// other platform's path rule nothing can be asked of this machine's
     /// filter, and the rules stand unchecked.
-    fn of_role(pattern: &'a str, role: Role, windows: bool) -> Option<Self> {
+    fn of_role(pattern: &'a str, role: Role, windows: bool, whole: &WholeFilters) -> Option<Self> {
         let asked = (windows == cfg!(windows))
-            .then(|| Asked::about(pattern, role))
+            .then(|| Asked::about(pattern, role, whole))
             .flatten();
         Self::with(pattern, windows, asked.as_ref())
     }
@@ -393,18 +493,28 @@ impl<'a> Spellings<'a> {
         // there (cr-ecm4-3). None is offered for a pattern that holds one,
         // whether or not the narrowing itself is borne out.
         let takes_less_somewhere = !candidates.is_empty();
+        // cr-ecm9-2: and the claim is the letters that ARE lost there — one
+        // is enough. It was made only when every letter the class would
+        // lose was lost, so `{[!ab].txt,A.txt}`, whose `A.txt` stays
+        // matched by the alternative beside the class, said nothing of
+        // `B.txt`, which the option stops protecting.
         let narrowed: Option<(&'a str, String)> = match asked {
-            Some(asked) => candidates
+            Some(asked) => candidates.into_iter().find_map(|(at, class, _)| {
+                let lost = asked.lost_here(pattern, at, class, windows);
+                (!lost.is_empty()).then(|| (class, written(&lost)))
+            }),
+            None => candidates
                 .into_iter()
-                .find(|(at, class, _)| asked.stops_matching(pattern, *at, class, windows)),
-            None => candidates.into_iter().next(),
-        }
-        .map(|(_, class, lost)| (class, lost));
+                .next()
+                .map(|(_, class, lost)| (class, lost)),
+        };
         let mut others = Vec::new();
         if !takes_less_somewhere {
-            for other in [lower, upper] {
+            for (other, raised) in [(lower, false), (upper, true)] {
                 let shows = match asked {
-                    Some(asked) => asked.matched_only_ignoring_case(&other, windows),
+                    Some(asked) => {
+                        asked.matched_only_ignoring_case(pattern, &other, raised, windows)
+                    }
                     None => true,
                 };
                 if other != typed && !others.contains(&other) && shows {
@@ -474,6 +584,9 @@ struct Asked {
     role: Role,
     as_typed: crate::fs_enum::FileFilter,
     ignoring_case: crate::fs_enum::FileFilter,
+    /// The whole list this pattern stands in (cr-ecm9-2): what the option
+    /// changes is judged against the filter, not against one pattern.
+    whole: std::rc::Rc<Listed>,
 }
 
 /// What a filter of one pattern says of one name: taken as a file, and
@@ -481,7 +594,7 @@ struct Asked {
 type Named = (bool, bool);
 
 impl Asked {
-    fn about(pattern: &str, role: Role) -> Option<Self> {
+    fn about(pattern: &str, role: Role, whole: &WholeFilters) -> Option<Self> {
         let probing = |ignore_case| {
             crate::fs_enum::FileFilter::probing(pattern, role == Role::Exclude, ignore_case)
         };
@@ -489,6 +602,7 @@ impl Asked {
             role,
             as_typed: probing(false)?,
             ignoring_case: probing(true)?,
+            whole: whole.listing(role),
         })
     }
 
@@ -531,47 +645,78 @@ impl Asked {
         names_something
     }
 
-    /// `spelling` names only what the option would match, and something
-    /// the pattern as typed does not.
-    fn matched_only_ignoring_case(&self, spelling: &str, windows: bool) -> bool {
+    /// `spelling` — the pattern's letters all lowered, or all `raised` —
+    /// names only what the option would match through this pattern, and
+    /// stands for something the FILTER as typed does not name: the whole
+    /// list, since a name another pattern keeps already is no gain.
+    ///
+    /// What it stands for is more than the names read off its own text.
+    /// The text shown has lost its end wildcards (`.O` for `*.O`), and the
+    /// one name read off that — `.O` — may be a name some other pattern
+    /// happens to take (`??`) when the names it is shown for (`x.O`) are
+    /// not. So the names read off the whole PATTERN, put in the
+    /// spelling's case, are asked about as well.
+    fn matched_only_ignoring_case(
+        &self,
+        pattern: &str,
+        spelling: &str,
+        raised: bool,
+        windows: bool,
+    ) -> bool {
         let Some((filter, names)) = self.text(spelling, windows) else {
             return false;
+        };
+        let gained = |name: &str| {
+            let (typed, ignoring) = (
+                Self::named(self.role, &self.whole.typed, name),
+                Self::named(self.role, &self.ignoring_case, name),
+            );
+            (ignoring.0 && !typed.0) || (ignoring.1 && !typed.1)
         };
         let mut shows_a_difference = false;
         for name in &names {
             let by_spelling = Self::named(self.role, &filter, name);
-            let (typed, ignoring) = (
-                Self::named(self.role, &self.as_typed, name),
-                Self::named(self.role, &self.ignoring_case, name),
-            );
+            let ignoring = Self::named(self.role, &self.ignoring_case, name);
             if (by_spelling.0 && !ignoring.0) || (by_spelling.1 && !ignoring.1) {
                 return false;
             }
-            shows_a_difference |= (by_spelling.0 && !typed.0) || (by_spelling.1 && !typed.1);
+            shows_a_difference |= (by_spelling.0 || by_spelling.1) && gained(name);
         }
         shows_a_difference
-    }
-
-    /// The class that begins at byte `at` of the pattern really stops
-    /// matching EVERY letter it is said to lose: for each of them, a name
-    /// with that letter where this class stands — read through the
-    /// alternative that holds the class, and no other — is named as typed
-    /// and not with the option.
-    fn stops_matching(&self, pattern: &str, at: usize, class: &str, windows: bool) -> bool {
-        let Some(letters) = lost_letters(class) else {
-            return false;
-        };
-        letters.iter().all(|&letter| {
-            samples(pattern, windows, Some((at, letter))).is_some_and(|names| {
+            || samples(pattern, windows, None).is_some_and(|names| {
                 names.iter().any(|name| {
-                    let (typed, ignoring) = (
-                        Self::named(self.role, &self.as_typed, name),
-                        Self::named(self.role, &self.ignoring_case, name),
-                    );
-                    (typed.0 && !ignoring.0) || (typed.1 && !ignoring.1)
+                    let cased: String = name.chars().map(|c| in_case(c, raised)).collect();
+                    gained(&cased)
                 })
             })
-        })
+    }
+
+    /// The letters the class that begins at byte `at` of the pattern
+    /// really stops matching: each of those it is said to lose for which a
+    /// name with that letter where this class stands — read through the
+    /// alternative that holds the class, and no other — is named by the
+    /// pattern as typed, is not named by it with the option, and is not
+    /// named by any OTHER pattern with the option either. That last is the
+    /// filter's answer: a name another pattern still keeps is not lost.
+    fn lost_here(&self, pattern: &str, at: usize, class: &str, windows: bool) -> Vec<char> {
+        let Some(letters) = lost_letters(class) else {
+            return Vec::new();
+        };
+        letters
+            .into_iter()
+            .filter(|&letter| {
+                samples(pattern, windows, Some((at, letter))).is_some_and(|names| {
+                    names.iter().any(|name| {
+                        let (typed, ignoring, kept) = (
+                            Self::named(self.role, &self.as_typed, name),
+                            Self::named(self.role, &self.ignoring_case, name),
+                            Self::named(self.role, self.whole.ignoring(), name),
+                        );
+                        (typed.0 && !ignoring.0 && !kept.0) || (typed.1 && !ignoring.1 && !kept.1)
+                    })
+                })
+            })
+            .collect()
     }
 
     /// cr-ecm8-2: both readings of the pattern, asked about EVERY name
@@ -631,24 +776,27 @@ impl Asked {
                         letter
                     })
                     .collect();
+                // cr-ecm9-2: against the whole list as typed. What the
+                // option names through this pattern and the filter names
+                // already is no change.
                 let (typed, ignoring) = (
-                    Self::named(self.role, &self.as_typed, &name),
+                    Self::named(self.role, &self.whole.typed, &name),
                     Self::named(self.role, &self.ignoring_case, &name),
                 );
-                if typed == ignoring {
+                let only_ignoring = (ignoring.0 && !typed.0) || (ignoring.1 && !typed.1);
+                if !only_ignoring {
                     continue;
                 }
                 differs = true;
-                let only_ignoring = (ignoring.0 && !typed.0) || (ignoring.1 && !typed.1);
-                if only_ignoring && gained.len() < MOST_EXAMPLES && !gained.contains(&name) {
+                if gained.len() < MOST_EXAMPLES && !gained.contains(&name) {
                     gained.push(name);
                 }
             }
         }
-        match (differs, gained.is_empty()) {
-            (false, _) => Compared::Same,
-            (true, false) => Compared::Differs(gained),
-            (true, true) => Compared::Unknown,
+        if differs {
+            Compared::Differs(gained)
+        } else {
+            Compared::Same
         }
     }
 }
@@ -932,6 +1080,27 @@ fn lost_runs(class: &str) -> Option<Vec<(char, char)>> {
         }
     }
     (!lost.is_empty()).then_some(lost)
+}
+
+/// Letters as a class would write them, each run of neighbours as one
+/// range: `B-C, X`.
+fn written(letters: &[char]) -> String {
+    let mut runs: Vec<(char, char)> = Vec::new();
+    for &letter in letters {
+        match runs.last_mut() {
+            Some(run) if run.1 as u32 + 1 == letter as u32 => run.1 = letter,
+            _ => runs.push((letter, letter)),
+        }
+    }
+    let written: Vec<String> = runs
+        .into_iter()
+        .map(|(lo, hi)| {
+            let mut range = String::new();
+            push_range(&mut range, lo, hi);
+            range
+        })
+        .collect();
+    written.join(", ")
 }
 
 /// Those letters one by one, for asking the filter about each; `None`
@@ -1713,13 +1882,17 @@ mod tests {
         // AC-5: several patterns, one line — the first that holds a letter,
         // and a count of the others that do.
         assert_eq!(
-            note(&["??", "*.1", "Thumbs.db", "*"]),
+            note(&["??", "*.1", "Thumbs.db", "*.2"]),
             line(
                 "\"Thumbs.db\" matches Thumbs.db",
                 "",
                 "thumbs.db, THUMBS.DB"
             )
         );
+        // cr-ecm9-2: beside a pattern that names everything, the option
+        // adds nothing through this one: the filter keeps `thumbs.db`
+        // already, and no line claims otherwise.
+        assert_eq!(note(&["??", "*.1", "Thumbs.db", "*"]), None);
         assert_eq!(
             note(&["??", "Thumbs.db", "*.1", "*.tmp"]),
             line(
@@ -2108,8 +2281,14 @@ mod tests {
             file: None,
             role: Role::Exclude,
         };
+        let as_held = |pattern: &str| vec![pattern.to_string()];
+        let (data, digits_held) = (as_held("./Data"), as_held("./Data/2024"));
+        let whole = |excludes| Whole {
+            excludes,
+            includes: &[],
+        };
         assert_eq!(
-            case_note_of(&[absolute], false).as_deref(),
+            case_note_of(&[absolute], whole(&data), false).as_deref(),
             Some(
                 "\"/srv/Data\" matches Data only; capital letters matter (--ignore-case would \
                  also match data, DATA)."
@@ -2122,7 +2301,7 @@ mod tests {
             file: Some("skip.txt"),
             role: Role::Exclude,
         };
-        assert_eq!(case_note_of(&[digits], false), None);
+        assert_eq!(case_note_of(&[digits], whole(&digits_held), false), None);
     }
 
     /// cr-ecm6-2: what the line shows is checked against the FILTER, for
@@ -2366,9 +2545,47 @@ mod tests {
                  (--ignore-case changes what it matches: [!b] would stop matching B)."
             )
         );
-        // Where no class's narrowing is borne out in full, none is
-        // claimed, and no spelling is made of a class that would take less.
-        for pattern in ["{[!a].1,A.1}", "{[!a-c].x,A.x}", "x{[!a],A}"] {
+        // cr-ecm9-2: one real loss is enough to show, and it is shown
+        // first. `A.txt` stays kept by the alternative beside the class;
+        // `B.txt` does not — and the line spoke of `Keep`.
+        assert_eq!(
+            note(&["Keep", "{[!ab].txt,A.txt}"]).as_deref(),
+            Some(
+                "\"{[!ab].txt,A.txt}\" matches exactly as typed, and 1 more pattern matches \
+                 only as typed; capital letters matter (--ignore-case changes what they match: \
+                 [!ab] would stop matching B)."
+            )
+        );
+        assert_eq!(
+            note(&["{[!a-c].x,A.x}"]).as_deref(),
+            Some(
+                "\"{[!a-c].x,A.x}\" matches exactly as typed; capital letters matter \
+                 (--ignore-case changes what it matches: [!a-c] would stop matching B-C)."
+            )
+        );
+        // cr-ecm9-2: a gain is judged against the whole filter. `A` was
+        // offered for `a`, and the pattern beside it keeps `A` already:
+        // the option changes nothing these two name.
+        assert_eq!(note(&["a", "A"]), None);
+        assert_eq!(note(&["a", "A", "{b,B}"]), None);
+        assert_eq!(
+            note(&["a", "A", "*.Doc"]).as_deref(),
+            Some(
+                "\"*.Doc\" matches .Doc only; capital letters matter (--ignore-case would also \
+                 match .doc, .DOC)."
+            )
+        );
+        // A loss too: `A.dat` is kept by the second pattern either way.
+        assert_eq!(
+            note(&["[!a].dat", "A.dat"]).as_deref(),
+            Some(
+                "\"A.dat\" matches A.dat only, and 1 more pattern matches only as typed; \
+                 capital letters matter (--ignore-case would also match a.dat, A.DAT)."
+            )
+        );
+        // Where no letter of a class is really lost, no loss is claimed,
+        // and no spelling is made of a class that would take less.
+        for pattern in ["{[!a].1,A.1}", "x{[!a],A}"] {
             assert_eq!(
                 note(&[pattern]),
                 Some(format!(
@@ -2383,7 +2600,19 @@ mod tests {
     /// answers, whatever the text rules produced.
     #[test]
     fn each_claim_is_checked_against_the_filter() {
-        let asked = |pattern: &str| Asked::about(pattern, Role::Exclude).expect("a pattern");
+        let asked = |pattern: &str| {
+            Asked::about(pattern, Role::Exclude, &WholeFilters::alone(pattern)).expect("a pattern")
+        };
+        // The same pattern among others: the list is the filter.
+        let among = |pattern: &str, others: &[&str]| {
+            let mut all = vec![pattern.to_string()];
+            all.extend(others.iter().map(|other| other.to_string()));
+            let whole = WholeFilters::of(Whole {
+                excludes: &all,
+                includes: &[],
+            });
+            Asked::about(pattern, Role::Exclude, &whole).expect("a pattern")
+        };
         // The text shown names nothing the pattern does not.
         for (pattern, shown, faithful) in [
             ("**/Cache", "Cache", true),
@@ -2409,7 +2638,6 @@ mod tests {
         for (pattern, spelling, offered) in [
             ("*Cache", "cache", true),
             ("*Cache", "CACHE", true),
-            ("*Cache", "Cache", false),
             ("{a,A}", "{a,a}", false),
             ("{a,A}", "{A,A}", false),
             ("*/Cache", "cache", false),
@@ -2417,7 +2645,12 @@ mod tests {
             ("photo[!0-9].jpg", "PHOTO[!0-9].JPG", true),
         ] {
             assert_eq!(
-                asked(pattern).matched_only_ignoring_case(spelling, false),
+                asked(pattern).matched_only_ignoring_case(
+                    pattern,
+                    spelling,
+                    spelling.chars().any(char::is_uppercase),
+                    false
+                ),
                 offered,
                 "\"{pattern}\" offering {spelling}"
             );
@@ -2425,20 +2658,50 @@ mod tests {
         // A class is said to stop matching a letter only when it does —
         // the class that stands at that place in the pattern, by a name
         // read through the alternative that holds it (cr-ecm8-2).
-        assert!(asked("[!a].dat").stops_matching("[!a].dat", 0, "[!a]", false));
-        assert!(asked("photo[!x].jpg").stops_matching("photo[!x].jpg", 5, "[!x]", false));
-        assert!(!asked("Keep").stops_matching("Keep", 0, "[!a]", false));
-        assert!(!asked("[!0-9]a").stops_matching("[!0-9]a", 0, "[!0-9]", false));
+        let lost = |pattern: &str, at: usize, class: &str| {
+            asked(pattern).lost_here(pattern, at, class, false)
+        };
+        assert_eq!(lost("[!a].dat", 0, "[!a]"), ['A']);
+        assert_eq!(lost("photo[!x].jpg", 5, "[!x]"), ['X']);
+        assert_eq!(lost("Keep", 0, "[!a]"), Vec::<char>::new());
+        assert_eq!(lost("[!0-9]a", 0, "[!0-9]"), Vec::<char>::new());
         // `A.1` stays matched by the alternative beside `[!a].1`; it is
         // `[!b]` that stops matching, `B.2`.
         let three = "{[!a].1,A.1,[!b].2}";
-        assert!(!asked(three).stops_matching(three, 1, "[!a]", false));
-        assert!(asked(three).stops_matching(three, 12, "[!b]", false));
-        // Every letter the class is said to lose must be lost: of `A-C`,
-        // `A` stays matched here.
-        let ranged = "{[!a-c].x,A.x}";
-        assert!(!asked(ranged).stops_matching(ranged, 1, "[!a-c]", false));
-        assert!(asked("[!a-c].x").stops_matching("[!a-c].x", 0, "[!a-c]", false));
+        assert_eq!(lost(three, 1, "[!a]"), Vec::<char>::new());
+        assert_eq!(lost(three, 12, "[!b]"), ['B']);
+        // cr-ecm9-2: the letters that ARE lost are the claim, however many
+        // the class would lose: of `A-C`, `A` stays matched here, and `B`
+        // and `C` do not.
+        assert_eq!(lost("{[!a-c].x,A.x}", 1, "[!a-c]"), ['B', 'C']);
+        assert_eq!(lost("{[!ab].txt,A.txt}", 1, "[!ab]"), ['B']);
+        assert_eq!(lost("[!a-c].x", 0, "[!a-c]"), ['A', 'B', 'C']);
+        assert_eq!(written(&['A', 'B', 'C', 'X']), "A-C, X");
+        // And against the whole filter: a name another pattern still keeps
+        // with the option is not lost.
+        assert_eq!(
+            among("[!a].dat", &["A.dat"]).lost_here("[!a].dat", 0, "[!a]", false),
+            Vec::<char>::new()
+        );
+        assert_eq!(
+            among("[!a].dat", &["Keep"]).lost_here("[!a].dat", 0, "[!a]", false),
+            ['A']
+        );
+        // So with a gain: a spelling another pattern names already is not
+        // offered, and a pattern that adds nothing to the filter is the
+        // same with the option.
+        assert!(asked("a").matched_only_ignoring_case("a", "A", true, false));
+        assert!(!among("a", &["A"]).matched_only_ignoring_case("a", "A", true, false));
+        // The text shown for `*.o` is `.o`, and `.O` is a name `??` takes;
+        // the names it is shown for, `x.O` among them, are not.
+        assert!(among("*.o", &["??"]).matched_only_ignoring_case("*.o", ".O", true, false));
+        assert!(!among("*.o", &["*"]).matched_only_ignoring_case("*.o", ".O", true, false));
+        assert_eq!(among("a", &["A"]).compared("a", false), Compared::Same);
+        assert_eq!(among("A", &["a"]).compared("A", false), Compared::Same);
+        assert_eq!(
+            among("a", &["b"]).compared("a", false),
+            Compared::Differs(vec!["A".to_string()])
+        );
 
         // A pattern is left out only when it is ESTABLISHED that the
         // option changes nothing it names: both readings asked about every

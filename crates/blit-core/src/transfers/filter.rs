@@ -289,7 +289,21 @@ fn case_note_on(
         file,
         role: Role::Include,
     }));
-    crate::case_fold::case_note_of(&noted, windows)
+    // cr-ecm9-2: with the lists the filter itself holds, so that what is
+    // said of one pattern is judged against all of them.
+    let included: Vec<String> = include
+        .iter()
+        .map(|&(typed, _)| typed.to_string())
+        .collect();
+    let includes = wire_includes(&included, windows);
+    crate::case_fold::case_note_of(
+        &noted,
+        crate::case_fold::Whole {
+            excludes: &resolved.patterns,
+            includes: &includes,
+        },
+        windows,
+    )
 }
 
 /// Everything about a filter that can be refused from the command's own

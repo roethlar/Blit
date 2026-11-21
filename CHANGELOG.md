@@ -146,7 +146,11 @@ part, and a job you can list, read, re-run and retry.
   it names under the source. Where the option would make a pattern match
   LESS — a negated class such as `[!x]`, which then refuses `X` too — the
   line says so instead of showing a spelling: `(--ignore-case changes
-  what it matches: [!x] would stop matching X).` Under `--delete-scope
+  what it matches: [!x] would stop matching X).` A loss is shown before
+  any gain, and what is said of one pattern is checked against all of
+  them: a letter another pattern still matches is not called lost, and a
+  spelling another pattern already matches is not offered (`--exclude a
+  --exclude A` has no line). Under `--delete-scope
   all`, where a filter chooses what is copied and protects nothing at the
   destination, the question says that instead.
 - `?` and a bracket class match one byte in both modes. A class holding a
