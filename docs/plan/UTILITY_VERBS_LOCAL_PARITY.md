@@ -237,7 +237,8 @@ Five of the six are fixed, one per commit, each with guards and mutation proofs,
   - `c99ad483` cr-uv3-3 — a path given to a utility is its components between `/`, each one name (`path_safety::typed_components`); under the Windows rule a component that is not one name there is refused before the filesystem is asked.
   - `d3e6a2ec` cr-uv3-8 — the round trip of a printed name is two tests, the one with a name that is not text asking nothing where the filesystem refuses it; the comparison with the C library is compiled for glibc only (the workspace's tests now compile for musl).
   - `23a14e03` cr-uv3-7 — `--json` gives a name that is not text its bytes: `raw` beside `path` in `du`'s rows and failures and in `rm`'s and `find`'s failures; `find --json` keeps `paths` strings and lists such paths in a new key, `raw_paths`.
-- **Not fixed:** cr-uv3-1 — the removal that ends a remote `move` must take exactly what the session sent, which needs the daemon to keep an account of it; being built. cr-uv3-4 — the Windows removal, blocked with cr-uv2-2 until something can be run on Windows.
+  - `57e8ee24` cr-uv3-1 — the daemon keeps an account of every file a move's session put on its manifest (`blit_core::moved`: path, size, modification time; sixteen bytes a file, in memory, for a day) and gives a ticket for it; the removal presents the tickets of all the move's sessions (`RmRequest.sent_tickets`, **wire contract 24**) and takes a file only if an account holds it as it still is, and a directory when that leaves it empty. A link, a file that came or changed since, stays where it is, is named, and the move exits 1. Gate 1854 passed, on tmpfs and on Btrfs. **A move whose source is on this machine is unchanged** — it still removes the source tree whole.
+- **Not fixed:** cr-uv3-4 — the Windows removal, blocked with cr-uv2-2 until something can be run on Windows.
 
 ## Open questions
 
