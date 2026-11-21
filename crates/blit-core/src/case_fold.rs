@@ -994,7 +994,20 @@ impl Asked {
         // `[Aa]`: `B` is one of its names and is gained, `A` is another
         // and is left out by both runs. Where only some change, the name
         // that was checked is what is printed.
-        let whole_text = names[..own].iter().all(changes);
+        //
+        // cr-ecm14-5: and only when the names tried are all it can be
+        // answered for. That is so for a text of letters and alternatives
+        // — its names are the ones tried — and for any text when this
+        // pattern is the run's WHOLE filter: there is then no other
+        // pattern to treat one of its names otherwise. Beside other
+        // patterns a text that still holds a wildcard or a class reads as
+        // names nobody tried: `A?B` was printed for `--include 'a?b'`
+        // beside `--exclude '?1?'` on the strength of `AxB`, and `A1B`,
+        // which it reads as too, is left out by both runs. There the name
+        // that was tried is what is printed.
+        let sole = self.whole.excludes.len() + self.whole.includes.len() == 1;
+        let whole_text = (sole || only_text_and_alternatives(shown, windows))
+            && names[..own].iter().all(changes);
         names
             .into_iter()
             .enumerate()
@@ -3076,6 +3089,51 @@ mod tests {
             Some(
                 "\"img_*.jpg\" matches img_*.jpg only; capital letters matter (--ignore-case \
                  would also match IMG_*.JPG)."
+            )
+        );
+        // cr-ecm14-5: beside ANOTHER pattern, a text with a wildcard left
+        // in it is not printed on the strength of the names tried — it
+        // reads as names nobody tried. `A?B` was printed for `a?b` beside
+        // `--exclude '?1?'`: `AxB` is let in by the option, and `A1B`,
+        // which `A?B` reads as too, is left out by both runs. The name
+        // tried is what is printed. Alone, the pattern is the whole
+        // filter, and its spelling stands.
+        assert_eq!(
+            both(&["?1?"], &["a?b"]).as_deref(),
+            Some(
+                "\"a?b\" matches exactly as typed; capital letters matter (--ignore-case \
+                 would also match AxB)."
+            )
+        );
+        assert_eq!(
+            both(&[], &["a?b"]).as_deref(),
+            Some(
+                "\"a?b\" matches a?b only; capital letters matter (--ignore-case would also \
+                 match A?B)."
+            )
+        );
+        // A class is a wildcard here, and a star in the middle of a text.
+        assert_eq!(
+            both(&["?1?"], &["a[xy1]b"]).as_deref(),
+            Some(
+                "\"a[xy1]b\" matches exactly as typed; capital letters matter (--ignore-case \
+                 would also match AXB)."
+            )
+        );
+        assert_eq!(
+            both(&["*1*"], &["img_*.jpg"]).as_deref(),
+            Some(
+                "\"img_*.jpg\" matches exactly as typed; capital letters matter (--ignore-case \
+                 would also match IMG_x.JPG)."
+            )
+        );
+        // A text of letters and alternatives is all the names it reads
+        // as, whatever stands beside it.
+        assert_eq!(
+            both(&["?1?"], &["{axb,ayb}"]).as_deref(),
+            Some(
+                "\"{axb,ayb}\" matches {axb,ayb} only; capital letters matter (--ignore-case \
+                 would also match {AXB,AYB})."
             )
         );
         // cr-ecm13-7: and where the text to print reads as SEVERAL names

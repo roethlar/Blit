@@ -975,6 +975,20 @@ fn the_line_claims_only_what_the_mirror_then_does() {
                    would also match B).",
             entries: &[("B", true, false), ("A", true, true), ("b", false, false)],
         },
+        // cr-ecm14-5: and with a wildcard in the include, beside a pattern
+        // that leaves some of its names out — the line said `would also
+        // match A?B`, and `A1B` is one of those: both mirrors keep it.
+        Case {
+            excludes: &["?1?"],
+            includes: &["a?b"],
+            line: "\"a?b\" matches exactly as typed; capital letters matter (--ignore-case \
+                   would also match AxB).",
+            entries: &[
+                ("AxB", true, false),
+                ("A1B", true, true),
+                ("axb", false, false),
+            ],
+        },
         // cr-ecm12-4: and with a class in the include — the line said
         // `would also match [A]`.
         Case {
