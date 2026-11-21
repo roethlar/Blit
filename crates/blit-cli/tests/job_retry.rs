@@ -1054,33 +1054,38 @@ fn an_ignore_existing_retry_follows_no_link_left_where_its_copy_was() {
 /// record is retried as ever.
 #[test]
 fn a_record_that_did_not_note_where_it_wrote_is_not_guessed_at() {
-    for (source_slash, destination_slash, told_by_the_words) in [
-        (false, false, false),
-        (true, true, true),
-        (false, true, true),
-        (true, false, true),
+    // cr-ecm15-3: the last — a source with no name to put under the
+    // destination — is written to one place under either reading, and is
+    // retried; it was refused with the first.
+    for (after_source, destination_slash, into_backup_itself, told_by_the_words) in [
+        ("", false, false, false),
+        ("/", true, true, true),
+        ("", true, false, true),
+        ("/", false, true, true),
+        ("/child/..", false, true, true),
     ] {
-        let what = format!("source/ {source_slash}, destination/ {destination_slash}");
+        let what = format!("source{after_source}, destination/ {destination_slash}");
         let ctx = TestContext::new();
         let src = ctx.workspace.join("src");
         let backup = ctx.workspace.join("backup");
-        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(src.join("child")).unwrap();
         fs::write(src.join("landed.txt"), b"alpha").unwrap();
         fs::write(src.join("blocked.txt"), b"lands on retry").unwrap();
         // `backup` is there, so a source that is not its contents goes
         // under it by its name; a folder is in the way of one file.
-        let root = if source_slash {
+        let root = if into_backup_itself {
             backup.clone()
         } else {
             backup.join("src")
         };
         fs::create_dir_all(root.join("blocked.txt")).unwrap();
-        let spelled = |path: &Path, slash: bool| {
-            format!("{}{}", path.display(), if slash { "/" } else { "" })
-        };
         let typed = [
-            spelled(&src, source_slash),
-            spelled(&backup, destination_slash),
+            format!("{}{after_source}", src.display()),
+            format!(
+                "{}{}",
+                backup.display(),
+                if destination_slash { "/" } else { "" }
+            ),
         ];
         let first = blit(&ctx, &["copy", "--retries", "0", &typed[0], &typed[1]]);
         assert_eq!(

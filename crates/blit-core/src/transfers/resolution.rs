@@ -176,6 +176,20 @@ pub fn nesting_asks_the_disk(raw_source: &str, raw_dest: &str, dst: &Endpoint) -
     !as_a_container && matches!(dst, Endpoint::Local(_))
 }
 
+/// Whether the two answers [`destination_nests`] can give for these
+/// arguments write to DIFFERENT places (cr-ecm15-3): the answer turns on
+/// the disk ([`nesting_asks_the_disk`]), AND the source has a name to put
+/// under the destination. `source/child/..` has none — under either
+/// answer the destination is used as it stands — and neither has a root.
+pub fn nesting_changes_the_destination(
+    raw_source: &str,
+    raw_dest: &str,
+    src: &Endpoint,
+    dst: &Endpoint,
+) -> bool {
+    nesting_asks_the_disk(raw_source, raw_dest, dst) && source_basename(src).is_some()
+}
+
 /// [`resolve_destination`] with that question already answered
 /// (cr-ecm13-2): a retry of a run writes where the run wrote, and the
 /// run's own answer is what says where — asked again after the first run
@@ -390,6 +404,41 @@ mod tests {
             let present = destination_nests(source, dest, &local());
             std::fs::remove_dir(&there).unwrap();
             assert_eq!(absent != present, *asks, "{source} -> {dest}");
+        }
+        // cr-ecm15-3: and where it can change, the place written to
+        // changes with it only if the source has a name to put there.
+        for (source, changes) in [
+            ("src", true),
+            ("/a/b/src", true),
+            ("source/child/..", false),
+            ("..", false),
+        ] {
+            let src = Endpoint::Local(PathBuf::from(source));
+            assert!(nesting_asks_the_disk(source, &at, &local()), "{source}");
+            assert_eq!(
+                nesting_changes_the_destination(source, &at, &src, &local()),
+                changes,
+                "{source}"
+            );
+            // Shown by the two answers themselves.
+            let places =
+                [true, false].map(
+                    |nested| match resolve_destination_as(nested, &src, local()) {
+                        Endpoint::Local(place) => place,
+                        Endpoint::Remote(_) => unreachable!("a local destination"),
+                    },
+                );
+            assert_eq!(places[0] != places[1], changes, "{source}: {places:?}");
+        }
+        // A source that is its contents asks nothing, so changes nothing;
+        // and a root is one.
+        for source in ["src/", "/"] {
+            assert!(!nesting_changes_the_destination(
+                source,
+                &at,
+                &Endpoint::Local(PathBuf::from(source)),
+                &local()
+            ));
         }
         // A destination on a daemon is read by its spelling alone.
         let remote = match crate::endpoints::parse_transfer_endpoint("host:/module/backup") {

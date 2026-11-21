@@ -289,10 +289,16 @@ pub(crate) async fn job_to_retry(target: &str) -> Result<Option<JobToRun>> {
     // retry says so and writes nothing; where the two words alone decide,
     // they decide now as they did.
     if record.destination_nested.is_none() {
+        let source = blit_core::endpoints::parse_transfer_endpoint(&args.source)?;
         let destination = blit_core::endpoints::parse_transfer_endpoint(&args.destination)?;
-        if blit_core::transfers::resolution::nesting_asks_the_disk(
+        // cr-ecm15-3: refused only where the two readings write to
+        // different places. A source with no name to put under the
+        // destination (`source/child/..`) is written to the same place
+        // under both.
+        if blit_core::transfers::resolution::nesting_changes_the_destination(
             &args.source,
             &args.destination,
+            &source,
             &destination,
         ) {
             eyre::bail!(
