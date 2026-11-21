@@ -9,27 +9,25 @@ use std::process::ExitCode;
 
 use crate::cli::DfArgs;
 use blit_core::admin::df::{self, FilesystemSpace};
+use blit_core::admin::operand::Operand;
 use blit_core::disk_usage::{blocks_1k, human_size, use_percent};
-use blit_core::endpoints::{module_and_typed_path, parse_endpoint_or_local, Endpoint};
 use eyre::{bail, Result};
 
 pub async fn run_df(args: DfArgs) -> Result<ExitCode> {
-    let remote = match parse_endpoint_or_local(&args.target) {
-        Endpoint::Local(path) => {
-            bail!(
-                "`blit df` requires a remote path (received local path: {})",
-                path.display()
-            );
-        }
-        Endpoint::Remote(remote) => remote,
+    // The operand as typed (cr-uv1-1, cr-uv1-4).
+    let Some(operand) = Operand::read(&args.target)? else {
+        bail!(
+            "`blit df` requires a remote path (received local path: {})",
+            args.target.to_string_lossy()
+        );
     };
-    // The path as typed (cr-uv1-1).
-    let (module, path) = module_and_typed_path(&remote)?;
-    let space = match df::query(&remote, module, path).await {
+    let typed = operand.shown();
+    let asked = df::query(&operand.remote, operand.module.clone(), operand.wire_path());
+    let space = match asked.await {
         Ok(space) => space,
         // `df: PATH: No such file or directory`, and exit 1.
         Err(error) => {
-            eprintln!("blit df: {}: {error}", args.target);
+            eprintln!("blit df: {typed}: {error}");
             return Ok(ExitCode::from(1));
         }
     };
@@ -37,7 +35,7 @@ pub async fn run_df(args: DfArgs) -> Result<ExitCode> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&space)?);
     } else {
-        print!("{}", table(&args.target, &space, args.human_readable));
+        print!("{}", table(&typed, &space, args.human_readable));
     }
     Ok(ExitCode::SUCCESS)
 }

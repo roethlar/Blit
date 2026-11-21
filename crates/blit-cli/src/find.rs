@@ -13,12 +13,13 @@
 //! refused by name before anything is asked of the daemon: a test that
 //! was silently dropped would find more than was asked for.
 
+use std::ffi::OsString;
 use std::io::Write as _;
 use std::process::ExitCode;
 
 use crate::cli::FindArgs;
 use blit_core::admin::find::{self, FindEvent, FindQuery, Kind, NameTest};
-use blit_core::endpoints::{module_and_typed_path, parse_endpoint_or_local, Endpoint};
+use blit_core::admin::operand::{self, Operand};
 use blit_core::find_name::NamePattern;
 use eyre::{bail, Result};
 
@@ -38,39 +39,46 @@ const TAKES: &str = "blit find takes -name PATTERN, -iname PATTERN, -type f|d|l 
 /// takes, with its argument, or the command is refused: by the word's
 /// name, with what replaces it when it is one of the options `blit find`
 /// had before 1.0.
-fn parse(words: &[String]) -> Result<Expression> {
+fn parse(words: &[OsString]) -> Result<Expression> {
     let mut expression = Expression::default();
     let mut words = words.iter();
     while let Some(word) = words.next() {
-        let mut argument = |what: &str| -> Result<&String> {
+        // A test's own name is text; its argument need not be (cr-uv1-4:
+        // a name `find` prints by its bytes can be a `-name` pattern).
+        let word = word.to_string_lossy();
+        let word = word.as_ref();
+        let mut argument = |what: &str| -> Result<&OsString> {
             match words.next() {
                 Some(argument) => Ok(argument),
                 None => bail!("missing argument to `{word}': {what}"),
             }
         };
-        match word.as_str() {
+        match word {
             "-name" | "-iname" => {
-                let pattern = argument("a pattern")?;
+                let typed = argument("a pattern")?;
+                let pattern = operand::word_bytes(typed)?;
                 let ignore_case = word == "-iname";
                 // Read here as the daemon will read it: a pattern it would
                 // refuse is refused before anything is asked.
-                NamePattern::new(pattern.as_bytes(), ignore_case)
-                    .map_err(|refusal| eyre::eyre!("{word} '{pattern}': {refusal}"))?;
+                NamePattern::new(pattern, ignore_case).map_err(|refusal| {
+                    eyre::eyre!("{word} '{}': {refusal}", typed.to_string_lossy())
+                })?;
                 expression.names.push(NameTest {
-                    pattern: pattern.as_bytes().to_vec(),
+                    pattern: pattern.to_vec(),
                     ignore_case,
                 });
             }
-            "-type" => expression
-                .kinds
-                .push(match argument("f, d or l")?.as_str() {
+            "-type" => {
+                let kind = argument("f, d or l")?.to_string_lossy();
+                expression.kinds.push(match kind.as_ref() {
                     "f" => Kind::File,
                     "d" => Kind::Directory,
                     "l" => Kind::Link,
                     other => bail!("-type {other} is not supported: -type takes f, d or l"),
-                }),
+                })
+            }
             "-maxdepth" => {
-                let depth = argument("a number of levels")?;
+                let depth = argument("a number of levels")?.to_string_lossy();
                 expression.max_depth = Some(depth.parse().map_err(|_| {
                     eyre::eyre!("-maxdepth {depth}: expected a number of levels, 0 or more")
                 })?);
@@ -81,7 +89,10 @@ fn parse(words: &[String]) -> Result<Expression> {
             "--case-insensitive" => bail!("--case-insensitive is gone: write -iname PATTERN"),
             "--files" => bail!("--files is gone: write -type f"),
             "--dirs" => bail!("--dirs is gone: write -type d"),
-            "--pattern" | "--limit" => bail!("{}", gone(word, words.next().map(String::as_str))),
+            "--pattern" | "--limit" => {
+                let value = words.next().map(|value| value.to_string_lossy());
+                bail!("{}", gone(word, value.as_deref()))
+            }
             other => match other.split_once('=') {
                 Some((option @ ("--pattern" | "--limit"), value)) => {
                     bail!("{}", gone(option, Some(value)))
@@ -114,28 +125,26 @@ fn gone(option: &str, value: Option<&str>) -> String {
 pub async fn run_find(args: FindArgs) -> Result<ExitCode> {
     // The whole expression is read before anything is asked of a daemon.
     let expression = parse(&args.expression)?;
-    let remote = match parse_endpoint_or_local(&args.target) {
-        Endpoint::Local(path) => {
-            bail!(
-                "`blit find` requires a remote path (received local path: {})",
-                path.display()
-            );
-        }
-        Endpoint::Remote(remote) => remote,
+    // The operand as typed (cr-uv1-1, cr-uv1-4).
+    let Some(operand) = Operand::read(&args.target)? else {
+        bail!(
+            "`blit find` requires a remote path (received local path: {})",
+            args.target.to_string_lossy()
+        );
     };
-    // The path as typed (cr-uv1-1).
-    let (module, start_path) = module_and_typed_path(&remote)?;
-    let operand = args.target.as_str();
+    let remote = operand.remote.clone();
     let query = FindQuery {
-        module,
-        start_path,
+        module: operand.module.clone(),
+        start_path: operand.wire_path(),
         // `find dir/` names the directory a link called `dir` points to.
-        follow_start: operand.ends_with('/') || (cfg!(windows) && operand.ends_with('\\')),
+        follow_start: operand.path().ends_with(b"/"),
         names: expression.names,
         kinds: expression.kinds,
         max_depth: expression.max_depth,
     };
-    let shown = |path: &blit_core::admin::du::EntryPath| crate::du::shown(operand, path);
+    // As `find` prints an entry: every separator typed after the operand
+    // kept (`dir//` prints `dir//sub`).
+    let shown = |path: &blit_core::admin::du::EntryPath| operand.below_as_find(path);
 
     let mut failed = false;
     if args.json || expression.json {
@@ -217,8 +226,28 @@ pub async fn run_find(args: FindArgs) -> Result<ExitCode> {
 mod tests {
     use super::*;
 
-    fn words(typed: &[&str]) -> Vec<String> {
-        typed.iter().map(|word| word.to_string()).collect()
+    fn words(typed: &[&str]) -> Vec<OsString> {
+        typed.iter().map(OsString::from).collect()
+    }
+
+    /// cr-uv1-4: a pattern need not be text — it is taken by its bytes,
+    /// as the name it is to match is printed by its bytes. The tests' own
+    /// names are text, and a word that is none is no test.
+    #[cfg(unix)]
+    #[test]
+    fn a_pattern_that_is_not_text_is_taken_by_its_bytes() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let pattern = OsString::from_vec(b"bad\xff*.dat".to_vec());
+        let parsed = parse(&[OsString::from("-name"), pattern.clone()]).unwrap();
+        assert_eq!(
+            parsed.names,
+            [NameTest {
+                pattern: b"bad\xff*.dat".to_vec(),
+                ignore_case: false,
+            }]
+        );
+        let refused = parse(&[pattern]).expect_err("no test").to_string();
+        assert!(refused.contains("is not a test"), "{refused}");
     }
 
     fn name(pattern: &str, ignore_case: bool) -> NameTest {

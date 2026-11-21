@@ -234,20 +234,6 @@ pub fn module_and_rel_path(remote: &RemoteEndpoint) -> Result<(String, PathBuf)>
     }
 }
 
-/// A remote operand's module and its path below it EXACTLY AS TYPED
-/// (cr-uv1-1): no separator dropped, no `.` folded away, no space trimmed.
-/// What the utility verbs send — a path that was tidied on the way is
-/// another path ([`crate::admin::operand`]). The transfer verbs go on
-/// using [`module_and_rel_path`] and [`rel_path_to_string`].
-pub fn module_and_typed_path(remote: &RemoteEndpoint) -> Result<(String, String)> {
-    let (module, rel_path) = module_and_rel_path(remote)?;
-    // The endpoint was read from text, so its path is text.
-    let Some(typed) = rel_path.to_str() else {
-        bail!("remote path is not valid text: {}", rel_path.display());
-    };
-    Ok((module, typed.to_string()))
-}
-
 /// Render a relative `Path` as a forward-slashed string suitable
 /// for the wire `path` / `start_path` fields. Empty or `.` paths
 /// produce an empty string (the daemon-side convention for "the

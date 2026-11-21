@@ -15,26 +15,14 @@
 //! `rm -rf` does.
 
 use crate::cli::RmArgs;
-use blit_core::admin::operand;
+use blit_core::admin::operand::{self, Operand};
 use blit_core::admin::rm::{self, RmError, RmOptions};
-use blit_core::endpoints::{parse_endpoint_or_local, Endpoint};
-use blit_core::remote::RemoteEndpoint;
 use eyre::{bail, Result};
 use std::process::ExitCode;
 
 // Re-export the helper used by `crate::transfers::mod::run_move`
 // so existing call sites stay working without an import update.
 pub use blit_core::admin::rm::delete_remote_path;
-
-/// One operand: as typed, and where it is.
-struct Operand {
-    typed: String,
-    remote: RemoteEndpoint,
-    module: String,
-    /// Its path below the module, exactly as typed (cr-uv1-1): what is
-    /// sent.
-    rel: String,
-}
 
 /// One entry that was not removed.
 struct Failed {
@@ -51,36 +39,24 @@ const DOT_OR_DOT_DOT: &str = "refusing to remove '.' or '..' directory";
 
 pub async fn run_rm(args: RmArgs) -> Result<ExitCode> {
     // Every operand is read before anything is asked or sent: one that
-    // cannot be an operand at all refuses the command whole.
+    // cannot be an operand at all refuses the command whole. Each is kept
+    // as typed (cr-uv1-1) and by its bytes (cr-uv1-4): a separator after
+    // it, a `.`, a space at its end, a name that is not text.
     let mut operands = Vec::with_capacity(args.targets.len());
     for typed in &args.targets {
-        let remote = match parse_endpoint_or_local(typed) {
-            Endpoint::Local(path) => {
-                bail!(
-                    "`blit rm` only supports remote paths (received local path: {})",
-                    path.display()
-                );
-            }
-            Endpoint::Remote(remote) => remote,
+        let Some(read) = Operand::read(typed)? else {
+            bail!(
+                "`blit rm` only supports remote paths (received local path: {})",
+                typed.to_string_lossy()
+            );
         };
-        let (module, rel_path) = rm::extract_module_and_path(&remote)?;
-        // As typed: the endpoint was read from text, and its path is kept
-        // as that text — a separator after it, a `.`, a space at its end.
-        let Some(rel) = rel_path.to_str() else {
-            bail!("remote path is not valid text: {}", rel_path.display());
-        };
-        if operand::is_the_root(rel) {
+        if operand::is_the_root(read.path()) {
             bail!(
                 "refusing to delete entire module '{}'; specify a sub-path",
-                module
+                read.module
             );
         }
-        operands.push(Operand {
-            typed: typed.clone(),
-            remote,
-            module,
-            rel: rel.to_string(),
-        });
+        operands.push(read);
     }
 
     // `rm` refuses a path whose last name is `.` or `..` whatever its
@@ -90,10 +66,10 @@ pub async fn run_rm(args: RmArgs) -> Result<ExitCode> {
     let mut refused: Vec<Failed> = Vec::new();
     let mut asked: Vec<usize> = Vec::new();
     for (at, each) in operands.iter().enumerate() {
-        if operand::names_dot(&each.rel) {
+        if operand::names_dot(each.path()) {
             refused.push(Failed {
                 operand: at,
-                path: each.typed.clone(),
+                path: each.shown(),
                 reason: DOT_OR_DOT_DOT.to_string(),
                 refused: true,
             });
@@ -147,7 +123,7 @@ pub async fn run_rm(args: RmArgs) -> Result<ExitCode> {
     let mut unfinished: Vec<String> = Vec::new();
     for group in groups {
         let first = &operands[group[0]];
-        let paths = group.iter().map(|&at| operands[at].rel.clone()).collect();
+        let paths = group.iter().map(|&at| operands[at].wire_path()).collect();
         let answered = rm::remove(
             &first.remote,
             first.module.clone(),
@@ -157,7 +133,7 @@ pub async fn run_rm(args: RmArgs) -> Result<ExitCode> {
                 let Some(&at) = group.get(failure.operand) else {
                     return;
                 };
-                let shown = crate::du::shown(&operands[at].typed, &failure.path);
+                let shown = operands[at].below(&failure.path);
                 said.failed(Failed {
                     operand: at,
                     path: String::from_utf8_lossy(&shown).into_owned(),
@@ -175,7 +151,7 @@ pub async fn run_rm(args: RmArgs) -> Result<ExitCode> {
                 for &at in &group {
                     said.failed(Failed {
                         operand: at,
-                        path: operands[at].typed.clone(),
+                        path: operands[at].shown(),
                         reason: format!("{error:#}"),
                         refused: false,
                     });
@@ -264,7 +240,7 @@ fn question<'a>(operands: impl ExactSizeIterator<Item = &'a Operand>) -> String 
     let more = operands.len().saturating_sub(NAMED);
     let mut named: Vec<String> = operands
         .take(NAMED)
-        .map(|operand| format!("'{}'", operand.typed))
+        .map(|operand| format!("'{}'", operand.shown()))
         .collect();
     if more > 0 {
         named.push(format!("{more} more"));
@@ -287,15 +263,9 @@ mod tests {
         typed
             .iter()
             .map(|typed| {
-                let Endpoint::Remote(remote) = parse_endpoint_or_local(typed) else {
-                    panic!("{typed} is a remote path");
-                };
-                Operand {
-                    typed: typed.to_string(),
-                    remote,
-                    module: "m".into(),
-                    rel: "x".into(),
-                }
+                Operand::read(std::ffi::OsStr::new(typed))
+                    .expect(typed)
+                    .expect("a remote path")
             })
             .collect()
     }

@@ -11,26 +11,27 @@ use std::io::Write as _;
 use std::process::ExitCode;
 
 use crate::cli::DuArgs;
-use blit_core::admin::du::{self, DuEvent, EntryPath, UsageOptions};
+use blit_core::admin::du::{self, DuEvent, UsageOptions};
+use blit_core::admin::operand::Operand;
 use blit_core::disk_usage::{blocks_1k, human_size};
-use blit_core::endpoints::{module_and_typed_path, parse_endpoint_or_local, Endpoint};
 use eyre::{bail, Result};
 
 pub async fn run_du(args: DuArgs) -> Result<ExitCode> {
-    let remote = match parse_endpoint_or_local(&args.target) {
-        Endpoint::Local(path) => {
-            bail!(
-                "`blit du` requires a remote path (received local path: {})",
-                path.display()
-            );
-        }
-        Endpoint::Remote(remote) => remote,
+    // The operand as typed (cr-uv1-1, cr-uv1-4): `du link/` is the
+    // directory the link points to, said by the separator; and a path
+    // need not be text.
+    let Some(operand) = Operand::read(&args.target)? else {
+        bail!(
+            "`blit du` requires a remote path (received local path: {})",
+            args.target.to_string_lossy()
+        );
     };
     let options = usage_options(&args)?;
-    // The path as typed (cr-uv1-1): `du link/` is the directory the link
-    // points to, and that is said by the separator.
-    let (module, start_path) = module_and_typed_path(&remote)?;
-    let operand = args.target.as_str();
+    let (remote, module, start_path) = (
+        operand.remote.clone(),
+        operand.module.clone(),
+        operand.wire_path(),
+    );
     let size = |bytes: u64| {
         if args.human_readable {
             human_size(bytes)
@@ -49,7 +50,7 @@ pub async fn run_du(args: DuArgs) -> Result<ExitCode> {
                     path,
                     allocated_bytes,
                 } => rows.push(serde_json::json!({
-                    "path": String::from_utf8_lossy(&shown(operand, &path)),
+                    "path": String::from_utf8_lossy(&operand.below(&path)),
                     "allocated_bytes": allocated_bytes,
                 })),
                 DuEvent::Failure {
@@ -57,7 +58,7 @@ pub async fn run_du(args: DuArgs) -> Result<ExitCode> {
                     action,
                     reason,
                 } => failures.push(serde_json::json!({
-                    "path": String::from_utf8_lossy(&shown(operand, &path)),
+                    "path": String::from_utf8_lossy(&operand.below(&path)),
                     "action": action,
                     "reason": reason,
                 })),
@@ -83,7 +84,7 @@ pub async fn run_du(args: DuArgs) -> Result<ExitCode> {
                     // is printed as the name it is.
                     let mut line = size(allocated_bytes).into_bytes();
                     line.push(b'\t');
-                    line.extend_from_slice(&shown(operand, &path));
+                    line.extend_from_slice(&operand.below(&path));
                     line.push(b'\n');
                     std::io::stdout().lock().write_all(&line)?;
                 }
@@ -95,7 +96,7 @@ pub async fn run_du(args: DuArgs) -> Result<ExitCode> {
                     failed = true;
                     eprintln!(
                         "blit du: {action} '{}': {reason}",
-                        String::from_utf8_lossy(&shown(operand, &path))
+                        String::from_utf8_lossy(&operand.below(&path))
                     );
                 }
             }
@@ -130,20 +131,6 @@ fn usage_options(args: &DuArgs) -> Result<UsageOptions> {
             args.max_depth
         },
     })
-}
-
-/// An entry's path as it is printed: the operand as typed for the start
-/// itself, and below it the operand, one `/`, and the entry's path — so
-/// `host:/module/dir/` and `host:/module/dir` both print
-/// `host:/module/dir/sub`, as `du dir/` prints `dir/sub`.
-pub(crate) fn shown(operand: &str, path: &EntryPath) -> Vec<u8> {
-    if path.is_start() {
-        return operand.as_bytes().to_vec();
-    }
-    let mut shown = operand.trim_end_matches('/').as_bytes().to_vec();
-    shown.push(b'/');
-    shown.extend_from_slice(path.bytes());
-    shown
 }
 
 #[cfg(test)]
@@ -221,28 +208,5 @@ mod tests {
             refused(&["-s", "-d", "1", "h:/m/"]),
             "summarizing conflicts with --max-depth=1"
         );
-    }
-
-    /// AC-2: a path begins with the operand as typed; the start is the
-    /// operand itself, and a trailing slash on it is not doubled.
-    #[test]
-    fn a_printed_path_begins_with_the_operand_as_typed() {
-        let path = |text: &str| EntryPath {
-            text: text.to_string(),
-            raw: None,
-        };
-        let text =
-            |operand: &str, entry: &str| String::from_utf8(shown(operand, &path(entry))).unwrap();
-        assert_eq!(text("h:/m/dir", ""), "h:/m/dir");
-        assert_eq!(text("h:/m/dir/", ""), "h:/m/dir/");
-        assert_eq!(text("h:/m/dir", "sub/deep"), "h:/m/dir/sub/deep");
-        assert_eq!(text("h:/m/dir/", "sub"), "h:/m/dir/sub");
-        assert_eq!(text("h:/m/", "a"), "h:/m/a");
-        // A name that is not valid text is its own bytes.
-        let raw = EntryPath {
-            text: "sub/\u{fffd}.bin".to_string(),
-            raw: Some(b"sub/\xff.bin".to_vec()),
-        };
-        assert_eq!(shown("h:/m/", &raw), b"h:/m/sub/\xff.bin");
     }
 }

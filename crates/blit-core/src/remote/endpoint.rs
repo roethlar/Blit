@@ -104,6 +104,21 @@ impl RemoteEndpoint {
         })
     }
 
+    /// Where, in an operand [`parse`](Self::parse) reads as holding a
+    /// path, the path below the module — or below the default root —
+    /// begins: its byte offset in `raw`. What stands before it is the
+    /// daemon's part of the operand, separators and all (cr-uv1-4).
+    pub fn path_offset(raw: &str) -> Option<usize> {
+        let lead = raw.len() - raw.trim_start().len();
+        let trimmed = &raw[lead..];
+        if let Some(at) = trimmed.find("://") {
+            return Some(lead + at + 3);
+        }
+        let at = trimmed.find(":/")?;
+        let module_ends = trimmed[at + 2..].find('/')?;
+        Some(lead + at + 2 + module_ends + 1)
+    }
+
     pub fn control_plane_uri(&self) -> String {
         // R58-F10: IPv6 literals must be bracketed in the URI's
         // authority component. The host field is stored bracket-
@@ -350,6 +365,24 @@ mod tests {
             assert_eq!(typed(raw), ("m".to_string(), rel.to_string()), "{raw:?}");
         }
         assert_eq!(typed("srv://dir/ "), (String::new(), "dir/ ".to_string()));
+        // Where the path begins, for each form.
+        for (raw, daemon) in [
+            ("srv:/m/report", "srv:/m/"),
+            ("srv:/m/", "srv:/m/"),
+            ("srv://", "srv://"),
+            ("srv://dir/x", "srv://"),
+            ("srv:9031:/m/a/b", "srv:9031:/m/"),
+            ("[::1]:9031:/m/a", "[::1]:9031:/m/"),
+            ("  srv:/m/x ", "  srv:/m/"),
+        ] {
+            assert_eq!(
+                RemoteEndpoint::path_offset(raw).map(|at| &raw[..at]),
+                Some(daemon),
+                "{raw:?}"
+            );
+        }
+        assert_eq!(RemoteEndpoint::path_offset("srv"), None);
+        assert_eq!(RemoteEndpoint::path_offset("srv:/m"), None);
         // A bare host holds no path: the space around it is nobody's name.
         let host = RemoteEndpoint::parse("  example.com:9130  ").expect("a host");
         assert_eq!((host.host.as_str(), host.port), ("example.com", 9130));

@@ -649,6 +649,7 @@ fn a_daemon_refuses_rm_from_another_contract() {
         contract_version,
         module: "test".into(),
         paths: vec![path.to_string()],
+        raw_paths: Vec::new(),
         recursive: true,
         force: true,
     };

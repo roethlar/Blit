@@ -176,7 +176,13 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// 1,000 failures for an operand and flagged the rest, and held them all
 /// until the end, in a message that could outgrow the transport's limit
 /// after the removal had been done.
-pub const CONTRACT_VERSION: u32 = 17;
+/// v18: the path in `Rm`, `Du`, `Df` and `FindPaths` has its exact bytes
+/// beside it when it is not valid UTF-8 (cr-uv1-4: `raw_paths`,
+/// `raw_start_path`, `raw_path`). These commands print such a name by its
+/// bytes, and what they print has to be a path they take. A daemon of
+/// contract 17 would read the text alone — a near-copy of the name, which
+/// is another name or none.
+pub const CONTRACT_VERSION: u32 = 18;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames

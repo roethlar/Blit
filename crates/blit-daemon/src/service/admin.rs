@@ -34,17 +34,39 @@ const DOT_OR_DOT_DOT: &str = "refusing to remove '.' or '..' directory";
 /// Where a read starts — `du`, `df`, `find` — from the path as typed: its
 /// place below the module, and whether it was typed as a directory.
 #[allow(clippy::result_large_err)]
-pub(crate) fn read_start(typed: &str) -> Result<TypedOperand, Status> {
+pub(crate) fn read_start(typed: &[u8]) -> Result<TypedOperand, Status> {
     use blit_core::admin::operand;
     let rel = if operand::is_the_root(typed) {
         PathBuf::from(".")
     } else {
-        resolve_relative_path(typed)?
+        resolve_typed(typed)?
     };
     Ok(TypedOperand {
         rel,
         as_directory: operand::names_a_directory(typed),
     })
+}
+
+/// A path as a request carries it (cr-uv1-4): its exact bytes when the
+/// asker sent them — the path is then not valid UTF-8 — and its text
+/// otherwise.
+pub(crate) fn typed_bytes<'a>(text: &'a str, raw: Option<&'a [u8]>) -> &'a [u8] {
+    match raw {
+        Some(raw) if !raw.is_empty() => raw,
+        _ => text.as_bytes(),
+    }
+}
+
+/// A typed path's place below the module: validated as every path from
+/// the wire is — relative, no `..` — whether it is text or bytes that are
+/// none. A host whose names must be text refuses the latter by saying so.
+#[allow(clippy::result_large_err)]
+fn resolve_typed(typed: &[u8]) -> Result<PathBuf, Status> {
+    match std::str::from_utf8(typed) {
+        Ok(text) => resolve_relative_path(text),
+        Err(_) => blit_core::path_safety::validate_wire_path_bytes(typed)
+            .map_err(|error| Status::invalid_argument(format!("path not allowed: {error}"))),
+    }
 }
 
 impl TypedOperand {
@@ -70,25 +92,40 @@ impl TypedOperand {
 /// is refused in `rm`'s words — `work/.` was read as `work`, and `work`
 /// removed with everything in it; one typed with a separator after it is
 /// a directory or nothing.
-pub(crate) fn read_operands(paths: Vec<String>) -> Vec<RmOperand> {
+///
+/// `raw` holds, at an operand's place, its exact bytes when it is not
+/// valid UTF-8 (cr-uv1-4); it is empty, or as long as `paths`.
+#[allow(clippy::result_large_err)]
+pub(crate) fn read_operands(
+    paths: Vec<String>,
+    raw: Vec<Vec<u8>>,
+) -> Result<Vec<RmOperand>, Status> {
     use blit_core::admin::operand;
-    paths
-        .into_iter()
-        .map(|typed| {
-            if operand::is_the_root(&typed) {
+    if !raw.is_empty() && raw.len() != paths.len() {
+        return Err(Status::invalid_argument(format!(
+            "{} paths and {} of their byte forms: one for each, or none",
+            paths.len(),
+            raw.len()
+        )));
+    }
+    Ok(paths
+        .iter()
+        .enumerate()
+        .map(|(at, text)| {
+            let typed = typed_bytes(text, raw.get(at).map(Vec::as_slice));
+            if operand::is_the_root(typed) {
                 return Err(THE_MODULE_ROOT.to_string());
             }
-            if operand::names_dot(&typed) {
+            if operand::names_dot(typed) {
                 return Err(DOT_OR_DOT_DOT.to_string());
             }
-            let rel =
-                resolve_relative_path(&typed).map_err(|status| status.message().to_string())?;
+            let rel = resolve_typed(typed).map_err(|status| status.message().to_string())?;
             Ok(TypedOperand {
                 rel,
-                as_directory: operand::names_a_directory(&typed),
+                as_directory: operand::names_a_directory(typed),
             })
         })
-        .collect()
+        .collect())
 }
 
 /// `rm`'s operands, each removed as the command removes it
@@ -542,7 +579,11 @@ mod rm_tests {
 
     /// `paths` removed below `root`, every failure collected.
     pub(super) fn answer(root: &Path, paths: &[&str], recursive: bool, force: bool) -> Answer {
-        let operands = read_operands(paths.iter().map(|path| path.to_string()).collect());
+        let operands = read_operands(
+            paths.iter().map(|path| path.to_string()).collect(),
+            Vec::new(),
+        )
+        .expect("operands");
         let mut failures = Vec::new();
         let entries_removed = remove_each(
             root,
@@ -574,7 +615,7 @@ mod rm_tests {
         fs::write(root.join("there"), b"x").unwrap();
         let mut paths: Vec<String> = (0..5000).map(|at| format!("missing-{at:04}")).collect();
         paths.push("there".to_string());
-        let operands = read_operands(paths.clone());
+        let operands = read_operands(paths.clone(), Vec::new()).expect("operands");
         let (tx, mut rx) = mpsc::channel::<Result<RmReply, Status>>(4096);
         let module = root.clone();
         let worker = std::thread::spawn(move || {
@@ -694,7 +735,8 @@ mod rm_tests {
         // A `..` as the last name is `rm`'s own refusal; one on the way is
         // a path this daemon does not take.
         assert_eq!(
-            read_operands(vec!["x/..".into(), "x/../y".into()])
+            read_operands(vec!["x/..".into(), "x/../y".into()], Vec::new())
+                .expect("operands")
                 .into_iter()
                 .map(|operand| operand.unwrap_err())
                 .map(|reason| reason.starts_with("path not allowed"))
@@ -798,7 +840,7 @@ mod typed_operand_tests {
             ("a/./b", "a/b", false, "/srv/module/a/b"),
             ("report ", "report ", false, "/srv/module/report "),
         ] {
-            let start = read_start(typed).expect(typed);
+            let start = read_start(typed.as_bytes()).expect(typed);
             assert_eq!(
                 (start.rel.as_path(), start.as_directory),
                 (Path::new(rel), as_directory),
@@ -808,7 +850,56 @@ mod typed_operand_tests {
                 assert_eq!(start.below(root).as_os_str(), asked, "{typed:?}");
             }
         }
-        assert!(read_start("dir/..").is_err() && read_start("../x").is_err());
+        assert!(read_start(b"dir/..").is_err() && read_start(b"../x").is_err());
+    }
+
+    /// cr-uv1-4: a path whose bytes are not text is the name those bytes
+    /// are — as a start, and as an operand of a removal — and the bytes
+    /// win over the text beside them, which is only a near-copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_text_is_read_by_its_bytes() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let name = std::ffi::OsStr::from_bytes(b"bad\xff.txt");
+        if fs::write(root.join(name), b"x").is_err() {
+            eprintln!("this filesystem refuses a name that is not text");
+            return;
+        }
+        fs::write(root.join("bad\u{fffd}.txt"), b"the near-copy").unwrap();
+
+        let start = read_start(typed_bytes("bad\u{fffd}.txt", Some(b"bad\xff.txt"))).unwrap();
+        assert_eq!(start.rel.as_os_str(), name);
+        assert_eq!(typed_bytes("plain", None), b"plain");
+        assert_eq!(typed_bytes("plain", Some(b"")), b"plain");
+
+        let operands = read_operands(
+            vec!["bad\u{fffd}.txt".into(), "missing".into()],
+            vec![b"bad\xff.txt".to_vec(), Vec::new()],
+        )
+        .expect("operands");
+        let mut failures = Vec::new();
+        let removed = remove_each(
+            &root,
+            &root,
+            &operands,
+            blit_core::deletion::RmOptions::default(),
+            &mut |failure| {
+                failures.push((failure.operand, failure.reason));
+                Ok(())
+            },
+        )
+        .expect("an answer");
+        assert_eq!(removed, 1);
+        assert_eq!(failures, [(1, "No such file or directory".to_string())]);
+        assert!(!root.join(name).exists(), "the name the bytes are");
+        assert!(root.join("bad\u{fffd}.txt").exists(), "not its near-copy");
+
+        // One byte form for each path, or none.
+        assert!(read_operands(vec!["a".into(), "b".into()], vec![Vec::new()]).is_err());
+        // And a `..` is a `..` in bytes too.
+        assert!(read_start(b"dir\xff/../x").is_err());
     }
 }
 
@@ -826,7 +917,10 @@ mod disk_usage_tests {
     fn sent(root: &Path, start: &str, options: UsageOptions) -> Vec<du_reply::Reply> {
         // Drain on this thread while a worker sends: both ends block.
         let (tx, mut rx) = mpsc::channel::<Result<DuReply, Status>>(4096);
-        let (module_root, start) = (root.to_path_buf(), read_start(start).expect("a start"));
+        let (module_root, start) = (
+            root.to_path_buf(),
+            read_start(start.as_bytes()).expect("a start"),
+        );
         let worker =
             std::thread::spawn(move || stream_disk_usage(module_root, start, options, &tx));
         let mut replies = Vec::new();
@@ -1003,7 +1097,7 @@ mod status_mapping_tests {
         drop(disk_receiver);
         let disk_error = stream_disk_usage(
             module_root.clone(),
-            read_start("entry").expect("a start"),
+            read_start(b"entry").expect("a start"),
             UsageOptions::default(),
             &disk_sender,
         )
@@ -1018,7 +1112,7 @@ mod status_mapping_tests {
         drop(find_receiver);
         let find_error = stream_find(
             module_root,
-            read_start("entry").expect("a start"),
+            read_start(b"entry").expect("a start"),
             b"entry".to_vec(),
             FindOptions::default(),
             &find_sender,

@@ -1,6 +1,6 @@
 use super::admin::{
     filesystem_space_for_path, list_completions, read_operands, read_start,
-    split_completion_prefix, stream_disk_usage, stream_find, stream_removal,
+    split_completion_prefix, stream_disk_usage, stream_find, stream_removal, typed_bytes,
 };
 use super::util::{
     internal_err, io_to_status, resolve_contained_path, resolve_module, resolve_relative_path,
@@ -166,7 +166,7 @@ impl BlitService {
                 module.name
             )));
         }
-        let operands = read_operands(req.paths);
+        let operands = read_operands(req.paths, req.raw_paths)?;
         let options = blit_core::deletion::RmOptions {
             recursive: req.recursive,
             force: req.force,
@@ -1175,7 +1175,7 @@ impl Blit for BlitService {
         let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
         // As typed (cr-uv1-1): nothing trimmed, and a separator after the
         // path kept for the system to read.
-        let start = read_start(&req.start_path)?;
+        let start = read_start(typed_bytes(&req.start_path, req.raw_start_path.as_deref()))?;
         let options = blit_core::disk_usage::UsageOptions {
             all_files: req.all_files,
             max_depth: req.max_depth,
@@ -1218,13 +1218,14 @@ impl Blit for BlitService {
         let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
         // As typed (cr-uv1-1): nothing trimmed, and a separator after the
         // path kept for the system to read.
-        let start = read_start(&req.start_path)?;
+        let typed_start = typed_bytes(&req.start_path, req.raw_start_path.as_deref());
+        let start = read_start(typed_start)?;
         // The start's own name, for the name tests: the last name of the
         // path asked for AS TYPED — `.` for `dir/.`, as `find` reads it —
         // and the module's when the path is the module.
-        let typed_last = blit_core::admin::operand::final_name(&req.start_path);
+        let typed_last = blit_core::admin::operand::final_name(typed_start);
         let start_name = match start.rel.file_name() {
-            Some(_) if typed_last == "." => b".".to_vec(),
+            Some(_) if typed_last == b"." => b".".to_vec(),
             Some(name) => blit_core::find::name_bytes(name).into_owned(),
             None => module.name.clone().into_bytes(),
         };
@@ -1282,10 +1283,11 @@ impl Blit for BlitService {
         // AC-1: the path asked about, not the module it is in — a path on
         // another mount below the module reports that mount.
         // As typed (cr-uv1-1): `df doc/` of a file is `Not a directory`.
-        let path = if req.path.is_empty() {
+        let typed_path = typed_bytes(&req.path, req.raw_path.as_deref());
+        let path = if typed_path.is_empty() {
             module.path.clone()
         } else {
-            let path = read_start(&req.path)?.below(&module.path);
+            let path = read_start(typed_path)?.below(&module.path);
             blit_core::path_safety::verify_contained(&module.path, &path)
                 .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))?;
             path

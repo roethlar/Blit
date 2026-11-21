@@ -36,7 +36,7 @@ impl From<FilesystemSpace> for crate::disk_usage::FilesystemSpace {
 pub async fn query(
     remote: &RemoteEndpoint,
     module: String,
-    path: String,
+    path: super::du::EntryPath,
 ) -> Result<FilesystemSpace> {
     let uri = remote.control_plane_uri();
     let mut client = crate::client::connect_with_timeout(uri.clone()).await?;
@@ -45,7 +45,8 @@ pub async fn query(
         .df(DfRequest {
             contract_version: crate::transfer_session::CONTRACT_VERSION,
             module,
-            path,
+            path: path.text,
+            raw_path: path.raw,
         })
         .await
         .map_err(|status| super::same_build::refusal("df", status))?

@@ -286,6 +286,57 @@ fn du_equals_the_system_du() {
         );
     }
     assert!(has_odd, "this filesystem stores a name that is not UTF-8");
+    // cr-uv1-4: and that name, as printed, is an operand `du` and `df`
+    // take — the bytes typed are the bytes asked about.
+    let mut typed = remote(&ctx, "t/b/").into_bytes();
+    typed.extend_from_slice(b"not-\xff-text.bin");
+    let typed = std::ffi::OsStr::from_bytes(&typed);
+    let ours = run_with_timeout(
+        {
+            let mut cmd = Command::new(&ctx.cli_bin);
+            cmd.arg("--config-dir")
+                .arg(&ctx.config_dir)
+                .arg("du")
+                .arg(typed);
+            cmd
+        },
+        Duration::from_secs(60),
+    );
+    let theirs = Command::new("du")
+        .arg(std::ffi::OsStr::from_bytes(b"t/b/not-\xff-text.bin"))
+        .current_dir(&ctx.module_dir)
+        .env("LC_ALL", "C.UTF-8")
+        .output()
+        .expect("the system du");
+    assert_eq!(
+        ours.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&ours.stderr)
+    );
+    assert_eq!(
+        as_local(&ours.stdout, &remote(&ctx, ""), ""),
+        theirs.stdout,
+        "du of a name that is not text: {}",
+        String::from_utf8_lossy(&ours.stdout)
+    );
+    let ours = run_with_timeout(
+        {
+            let mut cmd = Command::new(&ctx.cli_bin);
+            cmd.arg("--config-dir")
+                .arg(&ctx.config_dir)
+                .arg("df")
+                .arg(typed);
+            cmd
+        },
+        Duration::from_secs(60),
+    );
+    assert_eq!(
+        ours.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&ours.stderr)
+    );
     let all = blit(&ctx, &["du", "-a", &remote(&ctx, "t/b")]);
     assert!(
         all.stdout.windows(14).any(|w| w == b"not-\xff-text.bin"),
@@ -594,6 +645,7 @@ fn a_daemon_refuses_du_and_df_from_another_contract() {
                     contract_version: version,
                     module: "test".into(),
                     start_path: "t".into(),
+                    raw_start_path: None,
                     all_files: false,
                     max_depth: None,
                 })
@@ -604,6 +656,7 @@ fn a_daemon_refuses_du_and_df_from_another_contract() {
                     contract_version: version,
                     module: "test".into(),
                     path: "t".into(),
+                    raw_path: None,
                 })
                 .await
                 .expect_err("df from another contract");
@@ -625,6 +678,7 @@ fn a_daemon_refuses_du_and_df_from_another_contract() {
                 contract_version: CONTRACT_VERSION,
                 module: "test".into(),
                 start_path: "t".into(),
+                raw_start_path: None,
                 all_files: false,
                 max_depth: Some(0),
             })

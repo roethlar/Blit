@@ -384,6 +384,12 @@ message RmRequest {
   bool recursive = 4;
   // `-f`: an operand that is not there is no failure.
   bool force = 5;
+  // The exact bytes of each operand that is not valid UTF-8 (contract 18),
+  // at its place in `paths`; empty at the place of one that is text.
+  // Either no entry at all, or one for every path. A name the daemon's
+  // disk holds need not be text, and what `find` prints for it has to be
+  // an operand `rm` takes.
+  repeated bytes raw_paths = 6;
 }
 
 // One entry that could not be removed.
@@ -465,6 +471,8 @@ message FindPathsRequest {
   // `-maxdepth N`: nothing more than N levels below the start is entered.
   // Unset is every level.
   optional uint32 max_depth = 7;
+  // The start's exact bytes when it is not valid UTF-8 (contract 18).
+  optional bytes raw_start_path = 8;
 }
 
 // One name test: the pattern as typed, by its bytes.
@@ -530,6 +538,8 @@ message DuRequest {
   // `-d N`: rows only for entries at most N levels below the start; 0 is
   // `-s`. Unset: every level. Totals count everything either way.
   optional uint32 max_depth = 5;
+  // The start's exact bytes when it is not valid UTF-8 (contract 18).
+  optional bytes raw_start_path = 6;
 }
 
 message DuReply {
@@ -567,6 +577,8 @@ message DfRequest {
   // (contract 16); empty is the module itself. A path on another mount
   // reports that mount.
   string path = 3;
+  // The path's exact bytes when it is not valid UTF-8 (contract 18).
+  optional bytes raw_path = 4;
 }
 
 // The filesystem that holds the path, as `df` computes it.

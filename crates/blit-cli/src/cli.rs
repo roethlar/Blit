@@ -717,7 +717,7 @@ pub struct ListArgs {
 #[command(disable_help_flag = true)]
 pub struct DuArgs {
     /// Remote path to measure (e.g., server:/module/path)
-    pub target: String,
+    pub target: std::ffi::OsString,
     /// Print a line for every file, not only for directories
     #[arg(short = 'a', long = "all")]
     pub all: bool,
@@ -745,7 +745,7 @@ pub struct DuArgs {
 #[command(disable_help_flag = true)]
 pub struct DfArgs {
     /// Remote path whose filesystem to report (e.g., server:/module/path)
-    pub target: String,
+    pub target: std::ffi::OsString,
     /// Print sizes in powers of 1024 (16G, 254M)
     #[arg(short = 'h', long = "human-readable")]
     pub human_readable: bool,
@@ -767,7 +767,7 @@ pub struct DfArgs {
 pub struct RmArgs {
     /// Remote paths to remove (e.g., server:/module/path)
     #[arg(required = true, num_args = 1..)]
-    pub targets: Vec<String>,
+    pub targets: Vec<std::ffi::OsString>,
     /// Remove directories and everything in them
     #[arg(short = 'r', long = "recursive", visible_short_alias = 'R')]
     pub recursive: bool,
@@ -788,7 +788,7 @@ pub struct RmArgs {
 #[derive(Args, Clone, Debug)]
 pub struct FindArgs {
     /// Remote path to search (e.g., server:/module/path)
-    pub target: String,
+    pub target: std::ffi::OsString,
     /// The tests, every one of which must hold: -name PATTERN,
     /// -iname PATTERN, -type f|d|l, -maxdepth N
     #[arg(
@@ -796,7 +796,7 @@ pub struct FindArgs {
         trailing_var_arg = true,
         allow_hyphen_values = true
     )]
-    pub expression: Vec<String>,
+    pub expression: Vec<std::ffi::OsString>,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,

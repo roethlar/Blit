@@ -33,13 +33,30 @@ pub enum DuEvent {
 /// An entry's path below the start (`/`-separated, empty for the start
 /// itself), as text and — when the name is not valid UTF-8 — as the exact
 /// bytes the daemon's disk holds, so what is printed is the real name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EntryPath {
     pub text: String,
     pub raw: Option<Vec<u8>>,
 }
 
 impl EntryPath {
+    /// A path from its bytes as typed (cr-uv1-4): its text, and — when
+    /// they are not valid UTF-8 — the bytes themselves beside it, so that
+    /// the daemon is asked about the name that was typed and not a
+    /// near-copy of it.
+    pub fn typed(bytes: &[u8]) -> Self {
+        match std::str::from_utf8(bytes) {
+            Ok(text) => Self {
+                text: text.to_string(),
+                raw: None,
+            },
+            Err(_) => Self {
+                text: String::from_utf8_lossy(bytes).into_owned(),
+                raw: Some(bytes.to_vec()),
+            },
+        }
+    }
+
     /// The path's bytes: the exact ones when it has them, its text's
     /// otherwise.
     pub fn bytes(&self) -> &[u8] {
@@ -59,7 +76,7 @@ impl EntryPath {
 pub async fn stream<F>(
     remote: &RemoteEndpoint,
     module: String,
-    start_path: String,
+    start_path: EntryPath,
     options: UsageOptions,
     mut on_event: F,
 ) -> Result<()>
@@ -73,7 +90,8 @@ where
         .du(DuRequest {
             contract_version: crate::transfer_session::CONTRACT_VERSION,
             module,
-            start_path,
+            start_path: start_path.text,
+            raw_start_path: start_path.raw,
             all_files: options.all_files,
             max_depth: options.max_depth,
         })

@@ -392,6 +392,10 @@ fn find_equals_the_system_find() {
         "t/a.dat/",
         "t/broken/",
         "t/missing/",
+        // cr-uv1-4: every separator typed after the start is kept in what
+        // is printed below it, as `find` keeps it.
+        "t/sub//",
+        "t//",
     ];
     let mut compared = 0;
     for (start, expression) in starts.iter().flat_map(|start| {
@@ -477,6 +481,141 @@ fn find_equals_the_system_find() {
     if !is_root {
         assert!(compared > 100, "{compared} expressions were compared");
     }
+}
+
+/// cr-uv1-4: what `find` prints can be given back. A name that is not
+/// text is printed by its bytes; those bytes are a start `find` takes, a
+/// literal `-name` pattern it matches, and an operand `rm` removes — each
+/// was refused as "not valid text". Against the system `find` where it is
+/// the reference.
+#[cfg(unix)]
+#[test]
+fn a_name_that_is_not_text_goes_round() {
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let ctx = TestContext::new();
+    let system_root = ctx.workspace.join("system");
+    for root in [system_root.as_path(), ctx.module_dir.as_path()] {
+        write(root, "t/plain.dat");
+        write(root, "t/sub/inner.dat");
+        if fs::write(root.join("t").join(OsStr::from_bytes(b"bad\xff.dat")), b"x").is_err() {
+            eprintln!("this filesystem refuses a name that is not text");
+            return;
+        }
+        fs::write(root.join("t/sub").join(OsStr::from_bytes(b"in\xfe")), b"x").unwrap();
+    }
+    let ours = |args: &[&OsStr]| {
+        let mut cmd = Command::new(&ctx.cli_bin);
+        cmd.arg("--config-dir").arg(&ctx.config_dir).args(args);
+        run_with_timeout(cmd, Duration::from_secs(60))
+    };
+    let operand = |below: &[u8]| -> OsString {
+        let mut typed = remote(&ctx, "").into_bytes();
+        typed.extend_from_slice(below);
+        OsString::from_vec(typed)
+    };
+    let lines = |out: &[u8]| -> Vec<Vec<u8>> {
+        let module = remote(&ctx, "").into_bytes();
+        let mut lines: Vec<Vec<u8>> = out
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| line.strip_prefix(&module[..]).unwrap_or(line).to_vec())
+            .collect();
+        lines.sort();
+        lines
+    };
+
+    // Printed by its bytes.
+    let all = ours(&[OsStr::new("find"), &operand(b"t")]);
+    assert!(
+        all.status.success(),
+        "{}",
+        String::from_utf8_lossy(&all.stderr)
+    );
+    assert!(lines(&all.stdout).contains(&b"t/bad\xff.dat".to_vec()));
+
+    // The same bytes as a start, as a pattern, and under `-iname`.
+    for (start, expression) in [
+        (&b"t/bad\xff.dat"[..], vec![]),
+        (b"t", vec![&b"-name"[..], b"bad\xff.dat"]),
+        (b"t", vec![b"-name", b"bad\xff*"]),
+        (b"t", vec![b"-name", b"in\xfe"]),
+        (b"t", vec![b"-iname", b"BAD\xff.DAT"]),
+        (b"t/sub", vec![b"-name", b"*\xfe"]),
+    ] {
+        let typed = operand(start);
+        let mut args: Vec<&OsStr> = vec![OsStr::new("find"), &typed];
+        args.extend(expression.iter().map(|word| OsStr::from_bytes(word)));
+        let found = ours(&args);
+        assert!(
+            found.status.success(),
+            "find {:?}: {}",
+            String::from_utf8_lossy(start),
+            String::from_utf8_lossy(&found.stderr)
+        );
+        if cfg!(target_os = "linux") {
+            let system = Command::new("find")
+                .arg(OsStr::from_bytes(start))
+                .args(expression.iter().map(|word| OsStr::from_bytes(word)))
+                .current_dir(&system_root)
+                .env("LC_ALL", "C.UTF-8")
+                .stdin(Stdio::null())
+                .output()
+                .expect("the system find");
+            assert_eq!(
+                lines(&found.stdout),
+                lines(&system.stdout),
+                "find {:?} {:?}",
+                String::from_utf8_lossy(start),
+                expression
+                    .iter()
+                    .map(|word| String::from_utf8_lossy(word).into_owned())
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(!found.stdout.is_empty(), "something is found");
+    }
+
+    // And each line `find` printed for it is an operand `rm` removes.
+    let printed = ours(&[
+        OsStr::new("find"),
+        &operand(b"t"),
+        OsStr::new("-name"),
+        OsStr::from_bytes(b"*\xff*"),
+    ]);
+    let line = printed
+        .stdout
+        .strip_suffix(b"\n")
+        .expect("one line")
+        .to_vec();
+    assert_eq!(
+        line,
+        operand(b"t/bad\xff.dat").into_vec(),
+        "the line is the operand"
+    );
+    let removed = ours(&[OsStr::new("rm"), OsStr::new("-y"), OsStr::from_bytes(&line)]);
+    assert!(
+        removed.status.success() && removed.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!ctx
+        .module_dir
+        .join("t")
+        .join(OsStr::from_bytes(b"bad\xff.dat"))
+        .exists());
+    assert!(ctx.module_dir.join("t/plain.dat").exists());
+    // One that is not there is named by its bytes in what `rm` says.
+    let missing = ours(&[OsStr::new("rm"), OsStr::new("-y"), OsStr::from_bytes(&line)]);
+    assert_eq!(missing.status.code(), Some(1));
+    let mut said = b"blit rm: cannot remove '".to_vec();
+    said.extend_from_slice(&String::from_utf8_lossy(&line).into_owned().into_bytes());
+    said.extend_from_slice(b"': No such file or directory\n");
+    assert_eq!(
+        String::from_utf8_lossy(&missing.stderr),
+        String::from_utf8_lossy(&said)
+    );
 }
 
 /// AC-12, on every Unix: a directory that cannot be read is listed like
@@ -629,6 +768,7 @@ fn a_daemon_refuses_find_from_another_contract() {
         contract_version,
         module: "test".into(),
         start_path: "t".into(),
+        raw_start_path: None,
         ..Default::default()
     };
     let runtime = tokio::runtime::Runtime::new().unwrap();

@@ -63,7 +63,7 @@ impl std::error::Error for RmError {}
 pub async fn remove<F>(
     remote: &RemoteEndpoint,
     module: String,
-    paths: Vec<String>,
+    paths: Vec<EntryPath>,
     options: RmOptions,
     mut on_failure: F,
 ) -> std::result::Result<u64, RmError>
@@ -78,7 +78,17 @@ where
         .rm(RmRequest {
             contract_version: crate::transfer_session::CONTRACT_VERSION,
             module,
-            paths,
+            // Beside the text, the bytes of each path that is not text
+            // (cr-uv1-4) — or none at all when every one is.
+            raw_paths: if paths.iter().any(|path| path.raw.is_some()) {
+                paths
+                    .iter()
+                    .map(|path| path.raw.clone().unwrap_or_default())
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            paths: paths.into_iter().map(|path| path.text).collect(),
             recursive: options.recursive,
             force: options.force,
         })
@@ -126,7 +136,7 @@ pub async fn delete_remote_path(remote: &RemoteEndpoint, rel_path: &str) -> Resu
     let removed = remove(
         remote,
         module,
-        vec![rel_path.to_string()],
+        vec![EntryPath::typed(rel_path.as_bytes())],
         RmOptions {
             recursive: true,
             force: true,

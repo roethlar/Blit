@@ -27,8 +27,8 @@ pub struct NameTest {
 #[derive(Debug, Clone, Default)]
 pub struct FindQuery {
     pub module: String,
-    /// The path below the module; empty is the module itself.
-    pub start_path: String,
+    /// The path below the module, as typed; empty is the module itself.
+    pub start_path: super::du::EntryPath,
     /// The start was typed with a separator after it.
     pub follow_start: bool,
     pub names: Vec<NameTest>,
@@ -65,7 +65,8 @@ where
         .find_paths(FindPathsRequest {
             contract_version: crate::transfer_session::CONTRACT_VERSION,
             module: query.module,
-            start_path: query.start_path,
+            start_path: query.start_path.text,
+            raw_start_path: query.start_path.raw,
             follow_start: query.follow_start,
             names: query
                 .names
