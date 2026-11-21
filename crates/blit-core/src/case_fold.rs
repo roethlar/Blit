@@ -107,72 +107,60 @@ pub(crate) struct Whole<'a> {
     pub includes: &'a [String],
 }
 
-/// One list of [`Whole`] as a filter of its own: as typed, and — made only
-/// when a loss has to be checked — as `--ignore-case` would read it. The
-/// lists are the ones the run's filter holds, so the sets compiled for
+/// The run's COMPLETE filter — both lists in one, as the run applies
+/// them — as typed and, made only when something has to be asked of it,
+/// as `--ignore-case` would read it.
+///
+/// cr-ecm10-2: one filter and not one for each list. What a run does with
+/// a name is decided by the includes AND the excludes: with `--exclude
+/// '[!a].bin' --exclude '[!b].txt' --include '*.txt'` the line named the
+/// loss of `A` at `[!a].bin`, and both runs left `A.bin` alone, no include
+/// naming it — the file the option gave up was `B.txt`.
+///
+/// The lists are the ones the run's filter holds, so the sets compiled for
 /// the run are the ones asked here; nothing is compiled twice.
-struct Listed {
-    patterns: Vec<String>,
-    role: Role,
+struct Complete {
+    excludes: Vec<String>,
+    includes: Vec<String>,
     typed: crate::fs_enum::FileFilter,
     ignoring: std::cell::OnceCell<crate::fs_enum::FileFilter>,
 }
 
-impl Listed {
-    fn of(patterns: &[String], role: Role) -> std::rc::Rc<Self> {
+impl Complete {
+    fn of(whole: Whole) -> std::rc::Rc<Self> {
         std::rc::Rc::new(Self {
-            patterns: patterns.to_vec(),
-            role,
-            typed: Self::filter(patterns, role, false),
+            excludes: whole.excludes.to_vec(),
+            includes: whole.includes.to_vec(),
+            typed: Self::filter(whole.excludes, whole.includes, false),
             ignoring: std::cell::OnceCell::new(),
         })
-    }
-
-    fn filter(patterns: &[String], role: Role, ignore_case: bool) -> crate::fs_enum::FileFilter {
-        let mut filter = crate::fs_enum::FileFilter::default();
-        match role {
-            Role::Exclude => filter.exclude_files = patterns.to_vec(),
-            Role::Include => filter.include_files = patterns.to_vec(),
-        }
-        filter.ignore_case = ignore_case;
-        filter
-    }
-
-    fn ignoring(&self) -> &crate::fs_enum::FileFilter {
-        self.ignoring
-            .get_or_init(|| Self::filter(&self.patterns, self.role, true))
-    }
-}
-
-/// Both lists of a command, each as [`Listed`].
-struct WholeFilters {
-    excludes: std::rc::Rc<Listed>,
-    includes: std::rc::Rc<Listed>,
-}
-
-impl WholeFilters {
-    fn of(whole: Whole) -> Self {
-        Self {
-            excludes: Listed::of(whole.excludes, Role::Exclude),
-            includes: Listed::of(whole.includes, Role::Include),
-        }
     }
 
     /// The pattern alone, as an exclude: what a claim about one pattern
     /// is judged against when it is the whole filter.
     #[cfg(test)]
-    fn alone(pattern: &str) -> Self {
+    fn alone(pattern: &str) -> std::rc::Rc<Self> {
         Self::of(Whole {
             excludes: &[pattern.to_string()],
             includes: &[],
         })
     }
 
-    fn listing(&self, role: Role) -> std::rc::Rc<Listed> {
-        std::rc::Rc::clone(match role {
-            Role::Exclude => &self.excludes,
-            Role::Include => &self.includes,
-        })
+    fn filter(
+        excludes: &[String],
+        includes: &[String],
+        ignore_case: bool,
+    ) -> crate::fs_enum::FileFilter {
+        let mut filter = crate::fs_enum::FileFilter::default();
+        filter.exclude_files = excludes.to_vec();
+        filter.include_files = includes.to_vec();
+        filter.ignore_case = ignore_case;
+        filter
+    }
+
+    fn ignoring(&self) -> &crate::fs_enum::FileFilter {
+        self.ignoring
+            .get_or_init(|| Self::filter(&self.excludes, &self.includes, true))
     }
 }
 
@@ -227,7 +215,7 @@ pub(crate) struct Noted<'a> {
 /// - a pattern whose reading the option does not change at all is neither
 ///   shown nor counted.
 pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> Option<String> {
-    let whole = WholeFilters::of(whole);
+    let whole = Complete::of(whole);
     // By the text alone, and cheaply, for every pattern: the ones the
     // option could read otherwise. Only the ones looked at for showing are
     // checked against the filter.
@@ -235,23 +223,35 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
         .iter()
         .filter(|noted| widen_case(noted.read_as, windows) != noted.read_as)
         .collect();
+    fn read<'a>(
+        noted: &Noted<'a>,
+        windows: bool,
+        whole: &std::rc::Rc<Complete>,
+    ) -> Option<Spellings<'a>> {
+        Spellings::of_role(noted.read_as, noted.role, windows, whole)
+    }
     let mut unchanged: Vec<usize> = Vec::new();
     let mut shown: Option<(usize, Spellings)> = None;
-    for (at, noted) in candidates.iter().enumerate() {
-        if has_narrowed_class(noted.read_as, windows) {
-            match Spellings::of_role(noted.read_as, noted.role, windows, &whole) {
-                Some(spellings) if spellings.narrowed.is_some() => {
-                    shown = Some((at, spellings));
-                    break;
-                }
-                _ => {}
+    // A loss first: a pattern the option would NARROW, wherever it stands.
+    let narrowing = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, noted)| has_narrowed_class(noted.read_as, windows));
+    for (at, noted) in narrowing {
+        match read(noted, windows, &whole) {
+            Some(spellings) if spellings.narrowed.is_some() => {
+                shown = Some((at, spellings));
+                break;
             }
+            _ => {}
         }
     }
+    // Else the first pattern with a spelling the run would also match;
+    // else the first the option reads otherwise, in words.
     if shown.is_none() {
         let mut in_words: Option<(usize, Spellings)> = None;
         for (at, noted) in candidates.iter().enumerate() {
-            match Spellings::of_role(noted.read_as, noted.role, windows, &whole) {
+            match read(noted, windows, &whole) {
                 None => unchanged.push(at),
                 Some(spellings) if !spellings.others.is_empty() => {
                     shown = Some((at, spellings));
@@ -281,7 +281,7 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
             break;
         }
         asked += 1;
-        if Spellings::of_role(noted.read_as, noted.role, windows, &whole).is_none() {
+        if read(noted, windows, &whole).is_none() {
             unchanged.push(at);
         }
     }
@@ -361,10 +361,10 @@ fn one_line(text: &str) -> String {
 struct Spellings<'a> {
     typed: &'a str,
     others: Vec<String>,
-    /// cr-ecm4-3: the first negated class `--ignore-case` would make take
-    /// less, with the letters it would stop matching (`[!x]`, `X`). When
-    /// there is one, `others` is empty: no spelling of the pattern says
-    /// what the option does to it.
+    /// cr-ecm4-3: a negated class `--ignore-case` would make take less,
+    /// with the letters it would stop matching (`[!x]`, `X`). When there
+    /// is one, `others` is empty: no spelling of the pattern says what the
+    /// option does to it.
     narrowed: Option<(&'a str, String)>,
 }
 
@@ -390,12 +390,7 @@ impl<'a> Spellings<'a> {
     /// a name the option does not match (a mirror deleted it).
     #[cfg(test)]
     fn of(pattern: &'a str, windows: bool) -> Option<Self> {
-        Self::of_role(
-            pattern,
-            Role::Exclude,
-            windows,
-            &WholeFilters::alone(pattern),
-        )
+        Self::of_role(pattern, Role::Exclude, windows, &Complete::alone(pattern))
     }
 
     /// [`Self::of`] for a pattern in `role`, with every claim CHECKED
@@ -407,9 +402,11 @@ impl<'a> Spellings<'a> {
     /// - the text shown for the pattern (its end wildcards trimmed) must
     ///   name nothing the pattern does not; else the pattern is shown whole;
     /// - each other spelling must name only what the option would match,
-    ///   and something the pattern as typed does NOT — else it is dropped;
-    /// - a class said to stop matching a letter must really stop, where
-    ///   that class stands in the pattern ([`Asked::stops_matching`]);
+    ///   and stand for a name the RUN treats otherwise with the option
+    ///   ([`Asked::gained`]) — else it is dropped;
+    /// - a class is said to stop matching a letter when a name shows the
+    ///   run stops naming it, where that class stands in the pattern
+    ///   ([`Asked::lost_here`]);
     /// - and a pattern is left out (`None`) only when it is ESTABLISHED
     ///   that the option changes nothing it names ([`Asked::compared`]:
     ///   `{a,A}` already takes both). cr-ecm8-2: it was left out whenever
@@ -422,7 +419,12 @@ impl<'a> Spellings<'a> {
     /// names read off each text's own syntax ([`samples`]). Under the
     /// other platform's path rule nothing can be asked of this machine's
     /// filter, and the rules stand unchecked.
-    fn of_role(pattern: &'a str, role: Role, windows: bool, whole: &WholeFilters) -> Option<Self> {
+    fn of_role(
+        pattern: &'a str,
+        role: Role,
+        windows: bool,
+        whole: &std::rc::Rc<Complete>,
+    ) -> Option<Self> {
         let asked = (windows == cfg!(windows))
             .then(|| Asked::about(pattern, role, whole))
             .flatten();
@@ -447,40 +449,7 @@ impl<'a> Spellings<'a> {
             }
             _ => trimmed,
         };
-        let (mut lower, mut upper) = (String::new(), String::new());
-        let mut rest = typed;
-        while let Some(c) = rest.chars().next() {
-            let class = if c == '[' {
-                bracket_class_len(rest)
-            } else {
-                None
-            };
-            let len = match class {
-                Some(len) => {
-                    lower.push_str(&class_in_case(&rest[..len], false));
-                    upper.push_str(&class_in_case(&rest[..len], true));
-                    len
-                }
-                // globset's escape under the Unix rule: the next character
-                // is itself — a `[` after it opens no class.
-                None if c == '\\' && !windows => {
-                    let escaped = rest[1..].chars().next();
-                    lower.push(c);
-                    upper.push(c);
-                    if let Some(escaped) = escaped {
-                        lower.push(in_case(escaped, false));
-                        upper.push(in_case(escaped, true));
-                    }
-                    1 + escaped.map_or(0, char::len_utf8)
-                }
-                None => {
-                    lower.push(in_case(c, false));
-                    upper.push(in_case(c, true));
-                    c.len_utf8()
-                }
-            };
-            rest = &rest[len..];
-        }
+        let (lower, upper) = in_both_cases(typed, windows);
         // cr-ecm8-2: every negated class of the pattern that would take
         // less, and the first of them the filter bears out WHERE IT STANDS.
         // The first such class was credited when any name at all stopped
@@ -526,8 +495,8 @@ impl<'a> Spellings<'a> {
             if others.is_empty() && narrowed.is_none() {
                 match asked.compared(pattern, windows) {
                     Compared::Same => return None,
-                    // Names the option would match and the pattern does
-                    // not: asked of both filters, each of them.
+                    // Names the option would match and the filter does
+                    // not already name.
                     Compared::Differs(names) => others = names,
                     Compared::Unknown => {}
                 }
@@ -539,6 +508,47 @@ impl<'a> Spellings<'a> {
             narrowed,
         })
     }
+}
+
+/// `text` with its letters all lower, and all upper: each letter changed
+/// for the one `--ignore-case` pairs it with, a class for the class of its
+/// letters' other case.
+fn in_both_cases(text: &str, windows: bool) -> (String, String) {
+    let (mut lower, mut upper) = (String::new(), String::new());
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        let class = if c == '[' {
+            bracket_class_len(rest)
+        } else {
+            None
+        };
+        let len = match class {
+            Some(len) => {
+                lower.push_str(&class_in_case(&rest[..len], false));
+                upper.push_str(&class_in_case(&rest[..len], true));
+                len
+            }
+            // globset's escape under the Unix rule: the next character
+            // is itself — a `[` after it opens no class.
+            None if c == '\\' && !windows => {
+                let escaped = rest[1..].chars().next();
+                lower.push(c);
+                upper.push(c);
+                if let Some(escaped) = escaped {
+                    lower.push(in_case(escaped, false));
+                    upper.push(in_case(escaped, true));
+                }
+                1 + escaped.map_or(0, char::len_utf8)
+            }
+            None => {
+                lower.push(in_case(c, false));
+                upper.push(in_case(c, true));
+                c.len_utf8()
+            }
+        };
+        rest = &rest[len..];
+    }
+    (lower, upper)
 }
 
 /// Every negated class of `pattern` that `--ignore-case` would make take
@@ -584,17 +594,17 @@ struct Asked {
     role: Role,
     as_typed: crate::fs_enum::FileFilter,
     ignoring_case: crate::fs_enum::FileFilter,
-    /// The whole list this pattern stands in (cr-ecm9-2): what the option
-    /// changes is judged against the filter, not against one pattern.
-    whole: std::rc::Rc<Listed>,
+    /// The run's complete filter (cr-ecm9-2, cr-ecm10-2): what the option
+    /// changes is judged by what the RUN does with a name, not by what
+    /// one pattern, or one list, says of it.
+    whole: std::rc::Rc<Complete>,
 }
 
-/// What a filter of one pattern says of one name: taken as a file, and
-/// taken as a folder.
+/// What a filter says of one name: taken as a file, and taken as a folder.
 type Named = (bool, bool);
 
 impl Asked {
-    fn about(pattern: &str, role: Role, whole: &WholeFilters) -> Option<Self> {
+    fn about(pattern: &str, role: Role, whole: &std::rc::Rc<Complete>) -> Option<Self> {
         let probing = |ignore_case| {
             crate::fs_enum::FileFilter::probing(pattern, role == Role::Exclude, ignore_case)
         };
@@ -602,10 +612,14 @@ impl Asked {
             role,
             as_typed: probing(false)?,
             ignoring_case: probing(true)?,
-            whole: whole.listing(role),
+            whole: std::rc::Rc::clone(whole),
         })
     }
 
+    /// Whether `filter` NAMES `name` the way a pattern of `role` does: an
+    /// exclude leaves it out, an include lets it in. Asked of a filter
+    /// holding one pattern, that is what the pattern matches; asked of
+    /// the complete filter, it is what the run does.
     fn named(role: Role, filter: &crate::fs_enum::FileFilter, name: &str) -> Named {
         let path = std::path::Path::new(name);
         match role {
@@ -645,10 +659,49 @@ impl Asked {
         names_something
     }
 
+    /// The RUN would treat `name` otherwise with the option, through this
+    /// pattern: the pattern names it with the option, and the complete
+    /// filter — both lists (cr-ecm10-2) — names it with the option and not
+    /// as typed.
+    ///
+    /// An exclude that names an entry leaves it out whatever else the
+    /// filter holds, so only the filter as typed is asked: the sets the
+    /// run compiled already. An include lets an entry in only if no
+    /// exclude, read the same way, takes it out again, and the filter as
+    /// the option would read it is asked — made then, and not before.
+    fn gained(&self, name: &str) -> bool {
+        let by_pattern = Self::named(self.role, &self.ignoring_case, name);
+        if !(by_pattern.0 || by_pattern.1) {
+            return false;
+        }
+        let typed = Self::named(self.role, &self.whole.typed, name);
+        let with = match self.role {
+            Role::Exclude => by_pattern,
+            Role::Include => Self::named(self.role, self.whole.ignoring(), name),
+        };
+        (by_pattern.0 && with.0 && !typed.0) || (by_pattern.1 && with.1 && !typed.1)
+    }
+
+    /// The RUN stops naming the FILE `name` with the option, through this
+    /// pattern: the pattern names it as typed and not with the option, and
+    /// so does the complete filter — both lists (cr-ecm10-2).
+    ///
+    /// A file, and not a folder of that name. An include says nothing of
+    /// folders, so beside one an exclude can stop naming a FOLDER the run
+    /// goes on leaving every file of alone; that is no loss to show before
+    /// a file's (`A.bin` beside `--include '*.txt'`).
+    fn lost(&self, name: &str) -> bool {
+        let named = |filter| Self::named(self.role, filter, name).0;
+        named(&self.as_typed)
+            && !named(&self.ignoring_case)
+            && named(&self.whole.typed)
+            && !named(self.whole.ignoring())
+    }
+
     /// `spelling` — the pattern's letters all lowered, or all `raised` —
     /// names only what the option would match through this pattern, and
-    /// stands for something the FILTER as typed does not name: the whole
-    /// list, since a name another pattern keeps already is no gain.
+    /// stands for a name the RUN would treat otherwise with the option
+    /// ([`Self::gained`]).
     ///
     /// What it stands for is more than the names read off its own text.
     /// The text shown has lost its end wildcards (`.O` for `*.O`), and the
@@ -666,13 +719,6 @@ impl Asked {
         let Some((filter, names)) = self.text(spelling, windows) else {
             return false;
         };
-        let gained = |name: &str| {
-            let (typed, ignoring) = (
-                Self::named(self.role, &self.whole.typed, name),
-                Self::named(self.role, &self.ignoring_case, name),
-            );
-            (ignoring.0 && !typed.0) || (ignoring.1 && !typed.1)
-        };
         let mut shows_a_difference = false;
         for name in &names {
             let by_spelling = Self::named(self.role, &filter, name);
@@ -680,13 +726,13 @@ impl Asked {
             if (by_spelling.0 && !ignoring.0) || (by_spelling.1 && !ignoring.1) {
                 return false;
             }
-            shows_a_difference |= (by_spelling.0 || by_spelling.1) && gained(name);
+            shows_a_difference |= (by_spelling.0 || by_spelling.1) && self.gained(name);
         }
         shows_a_difference
             || samples(pattern, windows, None).is_some_and(|names| {
                 names.iter().any(|name| {
                     let cased: String = name.chars().map(|c| in_case(c, raised)).collect();
-                    gained(&cased)
+                    self.gained(&cased)
                 })
             })
     }
@@ -694,10 +740,8 @@ impl Asked {
     /// The letters the class that begins at byte `at` of the pattern
     /// really stops matching: each of those it is said to lose for which a
     /// name with that letter where this class stands — read through the
-    /// alternative that holds the class, and no other — is named by the
-    /// pattern as typed, is not named by it with the option, and is not
-    /// named by any OTHER pattern with the option either. That last is the
-    /// filter's answer: a name another pattern still keeps is not lost.
+    /// alternative that holds the class, and no other — is one the run
+    /// stops naming with the option ([`Self::lost`]).
     fn lost_here(&self, pattern: &str, at: usize, class: &str, windows: bool) -> Vec<char> {
         let Some(letters) = lost_letters(class) else {
             return Vec::new();
@@ -705,16 +749,8 @@ impl Asked {
         letters
             .into_iter()
             .filter(|&letter| {
-                samples(pattern, windows, Some((at, letter))).is_some_and(|names| {
-                    names.iter().any(|name| {
-                        let (typed, ignoring, kept) = (
-                            Self::named(self.role, &self.as_typed, name),
-                            Self::named(self.role, &self.ignoring_case, name),
-                            Self::named(self.role, self.whole.ignoring(), name),
-                        );
-                        (typed.0 && !ignoring.0 && !kept.0) || (typed.1 && !ignoring.1 && !kept.1)
-                    })
-                })
+                samples(pattern, windows, Some((at, letter)))
+                    .is_some_and(|names| names.iter().any(|name| self.lost(name)))
             })
             .collect()
     }
@@ -776,9 +812,9 @@ impl Asked {
                         letter
                     })
                     .collect();
-                // cr-ecm9-2: against the whole list as typed. What the
-                // option names through this pattern and the filter names
-                // already is no change.
+                // cr-ecm9-2: against the filter as typed. What the option
+                // names through this pattern and the filter names already
+                // is no change.
                 let (typed, ignoring) = (
                     Self::named(self.role, &self.whole.typed, &name),
                     Self::named(self.role, &self.ignoring_case, &name),
@@ -2594,6 +2630,63 @@ mod tests {
                 )),
             );
         }
+        // cr-ecm10-2: both lists, as the run applies them. The line named
+        // the loss of `A` at `[!a].bin`; no include names `A.bin`, so the
+        // run leaves it alone either way. What the option gives up is
+        // `B.txt`.
+        let listed = |patterns: &[&str], role: Role| -> (Vec<String>, Vec<Noted<'static>>) {
+            let owned: Vec<String> = patterns.iter().map(|p| p.to_string()).collect();
+            let noted = patterns
+                .iter()
+                .map(|p| {
+                    let typed: &'static str = Box::leak(p.to_string().into_boxed_str());
+                    Noted {
+                        typed,
+                        read_as: typed,
+                        file: None,
+                        role,
+                    }
+                })
+                .collect();
+            (owned, noted)
+        };
+        let both = |excludes: &[&str], includes: &[&str]| {
+            let (excluded, mut noted) = listed(excludes, Role::Exclude);
+            let (included, more) = listed(includes, Role::Include);
+            noted.extend(more);
+            case_note_of(
+                &noted,
+                Whole {
+                    excludes: &excluded,
+                    includes: &included,
+                },
+                cfg!(windows),
+            )
+        };
+        assert_eq!(
+            both(&["[!a].bin", "[!b].txt"], &["*.txt"]).as_deref(),
+            Some(
+                "\"[!b].txt\" matches exactly as typed, and 2 more patterns match only as \
+                 typed; capital letters matter (--ignore-case changes what they match: [!b] \
+                 would stop matching B)."
+            )
+        );
+        // An include the option widens is offered what it would let in —
+        // unless an exclude, read the same way, takes it out again.
+        assert_eq!(
+            both(&[], &["*.Txt"]).as_deref(),
+            Some(
+                "\"*.Txt\" matches .Txt only; capital letters matter (--ignore-case would also \
+                 match .txt, .TXT)."
+            )
+        );
+        assert_eq!(
+            both(&["*.[Tt][Xx][Tt]"], &["*.Txt"]).as_deref(),
+            Some(
+                "\"*.Txt\" matches exactly as typed; capital letters matter (--ignore-case \
+                 ignores them)."
+            )
+        );
     }
 
     /// Each check the line rests on, asked directly: the filter is what
@@ -2601,17 +2694,23 @@ mod tests {
     #[test]
     fn each_claim_is_checked_against_the_filter() {
         let asked = |pattern: &str| {
-            Asked::about(pattern, Role::Exclude, &WholeFilters::alone(pattern)).expect("a pattern")
+            Asked::about(pattern, Role::Exclude, &Complete::alone(pattern)).expect("a pattern")
         };
-        // The same pattern among others: the list is the filter.
-        let among = |pattern: &str, others: &[&str]| {
-            let mut all = vec![pattern.to_string()];
-            all.extend(others.iter().map(|other| other.to_string()));
-            let whole = WholeFilters::of(Whole {
-                excludes: &all,
-                includes: &[],
+        // The same pattern among others: the lists are the filter.
+        let within = |pattern: &str, role: Role, excludes: &[&str], includes: &[&str]| {
+            let owned = |list: &[&str]| -> Vec<String> {
+                list.iter().map(|other| other.to_string()).collect()
+            };
+            let whole = Complete::of(Whole {
+                excludes: &owned(excludes),
+                includes: &owned(includes),
             });
-            Asked::about(pattern, Role::Exclude, &whole).expect("a pattern")
+            Asked::about(pattern, role, &whole).expect("a pattern")
+        };
+        let among = |pattern: &str, others: &[&str]| {
+            let mut all = vec![pattern];
+            all.extend(others);
+            within(pattern, Role::Exclude, &all, &[])
         };
         // The text shown names nothing the pattern does not.
         for (pattern, shown, faithful) in [
@@ -2687,15 +2786,34 @@ mod tests {
             among("[!a].dat", &["Keep"]).lost_here("[!a].dat", 0, "[!a]", false),
             ['A']
         );
+        // cr-ecm10-2: and against BOTH lists. No include names `A.bin`, so
+        // the run leaves it alone either way and nothing is lost at
+        // `[!a]`; `B.txt` is let in by `*.txt` once `[!b]` refuses it.
+        let (excludes, includes) = (["[!a].bin", "[!b].txt"], ["*.txt"]);
+        assert_eq!(
+            within("[!a].bin", Role::Exclude, &excludes, &includes)
+                .lost_here("[!a].bin", 0, "[!a]", false),
+            Vec::<char>::new()
+        );
+        assert_eq!(
+            within("[!b].txt", Role::Exclude, &excludes, &includes)
+                .lost_here("[!b].txt", 0, "[!b]", false),
+            ['B']
+        );
+        // An include the option widens lets a name in only if no exclude,
+        // read the same way, takes it out again.
+        assert!(within("*.Txt", Role::Include, &[], &["*.Txt"]).gained("x.txt"));
+        assert!(!within("*.Txt", Role::Include, &["*.TXT"], &["*.Txt"]).gained("x.txt"));
         // So with a gain: a spelling another pattern names already is not
-        // offered, and a pattern that adds nothing to the filter is the
-        // same with the option.
+        // offered.
         assert!(asked("a").matched_only_ignoring_case("a", "A", true, false));
         assert!(!among("a", &["A"]).matched_only_ignoring_case("a", "A", true, false));
         // The text shown for `*.o` is `.o`, and `.O` is a name `??` takes;
         // the names it is shown for, `x.O` among them, are not.
         assert!(among("*.o", &["??"]).matched_only_ignoring_case("*.o", ".O", true, false));
         assert!(!among("*.o", &["*"]).matched_only_ignoring_case("*.o", ".O", true, false));
+        // And a pattern that adds nothing to the filter is the same with
+        // the option.
         assert_eq!(among("a", &["A"]).compared("a", false), Compared::Same);
         assert_eq!(among("A", &["a"]).compared("A", false), Compared::Same);
         assert_eq!(

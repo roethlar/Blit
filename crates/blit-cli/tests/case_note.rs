@@ -816,7 +816,7 @@ fn the_line_keeps_what_is_under_a_folder_apart_from_the_folder() {
     );
 }
 
-/// cr-ecm7-2, cr-ecm7-3, cr-ecm7-4, cr-ecm8-2, cr-ecm9-2: commands whose line claimed
+/// cr-ecm7-2, cr-ecm7-3, cr-ecm7-4, cr-ecm8-2, cr-ecm9-2, cr-ecm10-2: commands whose line claimed
 /// something the mirror then contradicted — or was absent when it had
 /// something to say — each shown the line it gets now and run both ways.
 ///
@@ -833,6 +833,7 @@ fn the_line_keeps_what_is_under_a_folder_apart_from_the_folder() {
 fn the_line_claims_only_what_the_mirror_then_does() {
     struct Case {
         excludes: &'static [&'static str],
+        includes: &'static [&'static str],
         line: &'static str,
         /// Destination-only entries, with whether each is kept as typed
         /// and whether it is kept with `--ignore-case`.
@@ -841,12 +842,14 @@ fn the_line_claims_only_what_the_mirror_then_does() {
     for case in [
         Case {
             excludes: &["**//Cache"],
+            includes: &[],
             line: "\"**//Cache\" matches exactly as typed; capital letters matter \
                    (--ignore-case ignores them).",
             entries: &[("cache", false, false), ("Cache", false, false)],
         },
         Case {
             excludes: &["Keep", "[!a].dat"],
+            includes: &[],
             line: "\"[!a].dat\" matches exactly as typed, and 1 more pattern matches only as \
                    typed; capital letters matter (--ignore-case changes what they match: [!a] \
                    would stop matching A).",
@@ -861,6 +864,7 @@ fn the_line_claims_only_what_the_mirror_then_does() {
         // which `--ignore-case` keeps.
         Case {
             excludes: &["{Σ,σ}"],
+            includes: &[],
             line: "\"{Σ,σ}\" matches {Σ,σ} only; capital letters matter (--ignore-case would \
                    also match ς).",
             entries: &[("ς", false, true), ("σ", true, true)],
@@ -870,6 +874,7 @@ fn the_line_claims_only_what_the_mirror_then_does() {
         // line states the rule and claims no more.
         Case {
             excludes: &["{[a-c],A,B}"],
+            includes: &[],
             line: "\"{[a-c],A,B}\" matches exactly as typed; capital letters matter \
                    (--ignore-case ignores them).",
             entries: &[("C", false, true), ("B", true, true), ("c", true, true)],
@@ -878,6 +883,7 @@ fn the_line_claims_only_what_the_mirror_then_does() {
         // stays kept, and `B.2` is what the option stops keeping.
         Case {
             excludes: &["{[!a].1,A.1,[!b].2}"],
+            includes: &[],
             line: "\"{[!a].1,A.1,[!b].2}\" matches exactly as typed; capital letters matter \
                    (--ignore-case changes what it matches: [!b] would stop matching B).",
             entries: &[
@@ -892,6 +898,7 @@ fn the_line_claims_only_what_the_mirror_then_does() {
         // stops keeping.
         Case {
             excludes: &["Keep", "{[!ab].txt,A.txt}"],
+            includes: &[],
             line: "\"{[!ab].txt,A.txt}\" matches exactly as typed, and 1 more pattern matches \
                    only as typed; capital letters matter (--ignore-case changes what they \
                    match: [!ab] would stop matching B).",
@@ -906,12 +913,25 @@ fn the_line_claims_only_what_the_mirror_then_does() {
         // what the option changes is `x.doc`.
         Case {
             excludes: &["a", "A", "*.Doc"],
+            includes: &[],
             line: "\"*.Doc\" matches .Doc only; capital letters matter (--ignore-case would \
                    also match .doc, .DOC).",
             entries: &[("A", true, true), ("a", true, true), ("x.doc", false, true)],
         },
+        // cr-ecm10-2: includes and excludes together. The line named the
+        // loss of `A` at `[!a].bin`; no include names `A.bin`, and both
+        // mirrors leave it alone. What the option gives up is `B.txt`.
+        Case {
+            excludes: &["[!a].bin", "[!b].txt"],
+            includes: &["*.txt"],
+            line: "\"[!b].txt\" matches exactly as typed, and 2 more patterns match only as \
+                   typed; capital letters matter (--ignore-case changes what they match: [!b] \
+                   would stop matching B).",
+            entries: &[("A.bin", true, true), ("B.txt", true, false)],
+        },
         Case {
             excludes: &["{a,A}", "*.Doc"],
+            includes: &[],
             line: "\"*.Doc\" matches .Doc only; capital letters matter (--ignore-case would \
                    also match .doc, .DOC).",
             entries: &[
@@ -928,6 +948,9 @@ fn the_line_claims_only_what_the_mirror_then_does() {
         let mut args = vec!["mirror"];
         for exclude in case.excludes {
             args.extend(["--exclude", exclude]);
+        }
+        for include in case.includes {
+            args.extend(["--include", include]);
         }
         let fill = || {
             for (entry, _, _) in case.entries {
