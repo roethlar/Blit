@@ -510,11 +510,17 @@ none of the options it had.**
   read-only module refuses it, and a module itself is never removed
   (`blit find HOST:/module/ -delete` empties it). The same expression
   without `-delete` lists exactly what it would try to remove.
-- **One deliberate difference from `find`: nothing is removed through a
-  symbolic link.** `find link/ -delete` empties the directory the link
-  points to and then says `Not a directory`; `blit find HOST:/m/link/
-  -delete` says the same words with the same exit status and removes
-  nothing — the rule `blit rm -r HOST:/m/link/` has.
+- **One deliberate difference from `find`: `-delete` removes nothing
+  through a symbolic link, wherever in the path typed the link stands.**
+  `find link/ -delete` empties the directory the link points to and then
+  says `Not a directory`; `blit find HOST:/m/link/ -delete` says the
+  same words with the same exit status and removes nothing, as `blit rm
+  -r HOST:/m/link/` does. And a path that goes THROUGH a link —
+  `HOST:/m/alias/entry`, `alias` a link — is refused whole, nothing
+  walked (`cannot delete ‘…’: its path goes through the symbolic link
+  ‘alias’`), where `find` removes through it, and so does `blit rm`.
+  Such a path is still listed; name the directory itself to delete in
+  it.
 - **The old options are refused, each with what replaces it**:
   `--pattern X` → `-name 'X'` (it was a glob against the whole path below
   the module, with `**/`; `-name` is against the entry's name, at any

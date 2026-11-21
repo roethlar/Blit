@@ -1403,3 +1403,64 @@ fn find_delete_starts_where_the_system_find_starts() {
         assert_eq!(said, they_said, "{what}");
     }
 }
+
+/// cr-uv4-3: `-delete` removes nothing by a path that goes through a
+/// link, wherever in the path the link stands. `find alias/entry -delete`
+/// (and `rm -r alias/entry`) remove through `alias`; `blit find` says
+/// that it will not, once, walks nothing and removes nothing — with or
+/// without tests, with or without a separator after the path. The same
+/// path is still LISTED through the link, as `find` lists it, and the
+/// directory named by itself is emptied.
+#[cfg(unix)]
+#[test]
+fn find_delete_removes_nothing_through_a_link_in_its_path() {
+    let ctx = TestContext::new();
+    let t = ctx.module_dir.join("t");
+    fs::create_dir_all(t.join("real/entry/inner")).unwrap();
+    fs::write(t.join("real/entry/f.tmp"), b"x").unwrap();
+    fs::write(t.join("real/entry/inner/g.tmp"), b"x").unwrap();
+    fs::write(t.join("real/keep"), b"x").unwrap();
+    std::os::unix::fs::symlink("real", t.join("alias")).unwrap();
+    let whole = listed(&ctx.module_dir);
+    for (start, expression) in [
+        ("t/alias/entry", &[][..]),
+        ("t/alias/entry/", &[]),
+        ("t/alias/entry", &["-name", "*.tmp"]),
+        ("t/alias/entry/inner/g.tmp", &[]),
+        ("t/alias/keep", &["-type", "f"]),
+    ] {
+        let target = remote(&ctx, start);
+        let mut args = vec!["find", target.as_str()];
+        args.extend(expression);
+        // What it lists, through the link.
+        let listing = blit(&ctx, &args);
+        assert_eq!(listing.code, Some(0), "{start}: {}", listing.all());
+        assert!(!listing.stdout.is_empty(), "{start}: {}", listing.all());
+        args.extend(["-delete", "-y"]);
+        let ran = blit(&ctx, &args);
+        let what = format!("find {start} {expression:?} -delete\n{}", ran.all());
+        assert_eq!(ran.code, Some(1), "{what}");
+        assert!(ran.stdout.is_empty(), "{what}");
+        assert_eq!(
+            ran.stderr,
+            format!(
+                "blit find: cannot delete \u{2018}{target}\u{2019}: its path goes through the \
+                 symbolic link \u{2018}t/alias\u{2019}, and -delete removes nothing through a \
+                 link: name the directory itself\n"
+            ),
+            "{what}"
+        );
+        assert_eq!(listed(&ctx.module_dir), whole, "{what}");
+    }
+    // Named by itself, the directory is emptied and goes.
+    let ran = blit(
+        &ctx,
+        &["find", &remote(&ctx, "t/real/entry"), "-delete", "-y"],
+    );
+    assert_eq!(ran.code, Some(0), "{}", ran.all());
+    assert!(ran.stderr.is_empty(), "{}", ran.all());
+    assert_eq!(
+        listed(&ctx.module_dir),
+        ["t", "t/alias", "t/real", "t/real/keep"]
+    );
+}
