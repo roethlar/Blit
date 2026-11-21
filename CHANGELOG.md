@@ -382,7 +382,11 @@ asks before it deletes.
   symbolic link, which a move does not carry`), and the move exits 1.
   A daemon restarted between the copy and the removal refuses the
   removal, and the source stays whole. A move whose source is on this
-  machine is unchanged.
+  machine is unchanged. (As first built on the development branch, the
+  account missed every file the destination had asked for before the
+  listing was complete: a move of more than 128 files delivered all of
+  them, left part of the source in place and exited 1. No release has
+  that.)
 - **Every entry that could not be removed is named**, as the daemon meets
   it — a tree with a million of them prints a million lines, as `rm`
   does. If a daemon's answer stops before it says it is done, what it

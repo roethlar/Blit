@@ -571,3 +571,61 @@ fn a_move_removes_what_it_sent_and_leaves_what_it_did_not() {
         "{said}"
     );
 }
+
+/// A move from a daemon removes EVERY file it delivered, however many.
+/// The daemon's account of what a move sent was written, when the
+/// manifest was complete, from what was left of the map of the manifest —
+/// and a need takes its entry out of that map, and needs arrive while the
+/// manifest is still going. Past the first batch of needs (128 files) a
+/// move delivered everything, left at its source whatever had been asked
+/// for early, said `it is not a file the move sent` of each, and exited
+/// 1. Found measuring a move of 20,000 files, 2026-11-21: 3,840 left.
+#[test]
+fn a_move_of_many_files_removes_every_one_it_delivered() {
+    let ctx = TestContext::new();
+    let tree = ctx.module_dir.join("tree");
+    let (dirs, files) = (10, 100);
+    for d in 0..dirs {
+        let dir = tree.join(format!("d{d:02}"));
+        fs::create_dir_all(&dir).unwrap();
+        for f in 0..files {
+            fs::write(dir.join(format!("f{f:03}")), format!("{d}/{f}")).unwrap();
+        }
+    }
+    let landed = ctx.workspace.join("landed");
+    let source = format!("127.0.0.1:{}:/test/tree/", ctx.daemon_port);
+    let (code, said) = blit(
+        &ctx,
+        &["move", "-y", &source, &format!("{}/", landed.display())],
+    );
+    assert_eq!(code, Some(0), "{said}");
+    let count = |root: &std::path::Path| -> usize {
+        fn walk(dir: &std::path::Path, count: &mut usize) {
+            for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    walk(&entry.path(), count);
+                } else {
+                    *count += 1;
+                }
+            }
+        }
+        let mut count = 0;
+        walk(root, &mut count);
+        count
+    };
+    assert_eq!(count(&landed), dirs * files, "everything landed\n{said}");
+    assert_eq!(
+        fs::read(landed.join("d09/f099")).unwrap(),
+        b"9/99",
+        "{said}"
+    );
+    assert_eq!(
+        count(&tree),
+        0,
+        "and nothing delivered stays at the source\n{said}"
+    );
+    assert!(
+        !tree.join("d00").exists(),
+        "nor the directories it emptied\n{said}"
+    );
+}

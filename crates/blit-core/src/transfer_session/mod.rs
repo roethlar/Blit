@@ -2168,6 +2168,16 @@ async fn source_send_half(
         // bytes — what the account of what was not found is taken from.
         let listed = scan_source.files_from_scope().is_some();
         let mut names_found: HashSet<Vec<u8>> = HashSet::new();
+        // The entries a MOVE's account is written from: every one put on
+        // the manifest, kept as it goes — its name, size and time, no
+        // more. The map of the manifest (`sent`) is no record of them: a
+        // need takes its entry out of it, and needs arrive while the
+        // manifest is still being sent. Read at the manifest's end, it
+        // held what had not been asked for yet — past the first 128
+        // files, a move left at its source what it had already delivered.
+        let moving = negotiated.open.source_removed_after
+            && negotiated.open.initiator_role() == TransferRole::Destination;
+        let mut listed_for_account: Vec<FileHeader> = Vec::new();
         // The TCP carrier owns a separate authenticated lane, so an ordinary
         // copy can restore the old push driver's scan/transfer overlap as soon
         // as DESTINATION has authorized a batch through NeedBatch. Mirror and
@@ -2271,6 +2281,15 @@ async fn source_send_half(
                 if listed {
                     names_found.insert(own_name(&header).to_vec());
                 }
+                if moving {
+                    listed_for_account.push(FileHeader {
+                        relative_path: header.relative_path.clone(),
+                        raw_relative_path: header.raw_relative_path.clone(),
+                        size: header.size,
+                        mtime_seconds: header.mtime_seconds,
+                        ..FileHeader::default()
+                    });
+                }
                 if let Some(probe) = &small_file_probe {
                     let wait_started = probe.start();
                     let mut sent = sent.lock().expect("sent-manifest lock poisoned");
@@ -2361,16 +2380,9 @@ async fn source_send_half(
         // the regular file the manifest wrote, of that size and second.
         // The account answers nothing until this session has ended well
         // (below, where the destination's summary arrives).
-        let sent_ticket = if negotiated.open.source_removed_after
-            && negotiated.open.initiator_role() == TransferRole::Destination
-        {
+        let sent_ticket = if moving {
             let root = scan_source.root().to_path_buf();
-            let headers: Vec<FileHeader> = sent
-                .lock()
-                .expect("sent-manifest lock poisoned")
-                .values()
-                .cloned()
-                .collect();
+            let headers = std::mem::take(&mut listed_for_account);
             // One look at each file: off the runtime's own threads.
             let account = tokio::task::spawn_blocking(move || account_of(&root, &headers))
                 .await
