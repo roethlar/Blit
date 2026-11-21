@@ -377,6 +377,7 @@ mod delegated_options_tests {
             include_from: Vec::new(),
             exclude_origin: Vec::new(),
             include_origin: Vec::new(),
+            resolved_excludes: None,
             save: None,
             export: None,
             retry_only_raw: None,

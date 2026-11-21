@@ -74,6 +74,8 @@ fn filter_inputs<'a>(args: &'a TransferArgs, source_root: Option<&'a Path>) -> F
         max_size: args.max_size.as_deref(),
         min_age: args.min_age.as_deref(),
         max_age: args.max_age.as_deref(),
+        // cr-ecm5-3: the one resolution the command began with.
+        resolved: args.resolved_excludes.as_deref(),
     }
 }
 use blit_core::endpoints::{ensure_remote_destination_supported, ensure_remote_source_supported};
@@ -147,12 +149,17 @@ fn reject_unusable_filter(args: &TransferArgs) -> Result<()> {
 ///
 /// Returns what the excludes resolved to, for the line about capital
 /// letters (cr-ecm4-3): that line is said of the same effective patterns.
+/// cr-ecm5-3: and it is the resolution the command began with
+/// ([`resolve_excludes_once`]), the one its filter is built from — not
+/// another reading of the disk.
 fn warn_unmatchable_excludes(
     args: &TransferArgs,
     source_display: &str,
-) -> filter::ResolvedExcludes {
-    let source_root = local_source_root(args);
-    let resolved = filter::resolve_excludes(&args.exclude, source_root.as_deref());
+) -> std::sync::Arc<filter::ResolvedExcludes> {
+    let resolved = match &args.resolved_excludes {
+        Some(resolved) => std::sync::Arc::clone(resolved),
+        None => std::sync::Arc::new(resolved_excludes(args)),
+    };
     for pattern in &resolved.unmatchable {
         eprintln!("blit: --exclude '{pattern}' cannot match anything under {source_display}");
     }
@@ -160,6 +167,25 @@ fn warn_unmatchable_excludes(
         eprintln!("{}", filter::shared_entry_note(pattern, patterns));
     }
     resolved
+}
+
+/// The command's excludes resolved against its source, read from the
+/// disk as it stands now.
+fn resolved_excludes(args: &TransferArgs) -> filter::ResolvedExcludes {
+    let source_root = local_source_root(args);
+    filter::resolve_excludes(&args.exclude, source_root.as_deref())
+}
+
+/// cr-ecm5-3: resolve the command's excludes ONCE and keep the result
+/// with the command, so that its validation, its warnings, the line in
+/// its question, every filter it builds and every retry of it use one
+/// answer. `run_command` calls this when the command begins, after its
+/// pattern files are read. Resolving reads the disk (a source reached
+/// through a link, the names the source stores), and it used to be done
+/// again each time a filter was built — the last time after the operator
+/// had answered the question, when the disk could say something else.
+pub(crate) fn resolve_excludes_once(args: &mut TransferArgs) {
+    args.resolved_excludes = Some(std::sync::Arc::new(resolved_excludes(args)));
 }
 
 /// EXCLUDE_CASE_MATCHING slice 3b (AC-8, AC-11): the patterns of each
@@ -1657,6 +1683,7 @@ mod tests {
             include_from: Vec::new(),
             exclude_origin: Vec::new(),
             include_origin: Vec::new(),
+            resolved_excludes: None,
             save: None,
             export: None,
             retry_only_raw: None,
@@ -1732,6 +1759,7 @@ mod tests {
             include_from: Vec::new(),
             exclude_origin: Vec::new(),
             include_origin: Vec::new(),
+            resolved_excludes: None,
             save: None,
             export: None,
             retry_only_raw: None,
@@ -1813,6 +1841,7 @@ mod tests {
             include_from: Vec::new(),
             exclude_origin: Vec::new(),
             include_origin: Vec::new(),
+            resolved_excludes: None,
             save: None,
             export: None,
             retry_only_raw: None,

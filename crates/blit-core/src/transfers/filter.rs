@@ -48,6 +48,27 @@ pub struct FilterInputs<'a> {
     pub max_size: Option<&'a str>,
     pub min_age: Option<&'a str>,
     pub max_age: Option<&'a str>,
+    /// cr-ecm5-3: what `exclude` resolved to, when the caller has resolved
+    /// it already ([`resolve_excludes`]) — then THAT is the filter, and
+    /// nothing here reads the disk for it again. `None`: resolved on the
+    /// spot, from `exclude` and `source_root`.
+    ///
+    /// A front end resolves once, before it warns or asks anything, and
+    /// hands the same result to every use: resolving again at dispatch,
+    /// after the question, could give another answer than the one shown.
+    /// An absolute exclude through a source alias was displayed as
+    /// `first/Keep`; the alias changed while the question was open, and
+    /// the confirmed mirror copied `first/Keep`.
+    pub resolved: Option<&'a ResolvedExcludes>,
+}
+
+/// The exclude patterns `inputs` describe: the caller's own resolution
+/// when it gave one (cr-ecm5-3), else resolved here.
+fn resolved_patterns(inputs: &FilterInputs<'_>) -> Vec<String> {
+    match inputs.resolved {
+        Some(resolved) => resolved.patterns.clone(),
+        None => resolve_excludes(inputs.exclude, inputs.source_root).patterns,
+    }
 }
 
 /// Build a `FileFilter` from filter inputs. Used by every command
@@ -60,7 +81,7 @@ pub struct FilterInputs<'a> {
 pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
     let mut filter = FileFilter::default();
     filter.include_files = inputs.include.to_vec();
-    filter.exclude_files = resolve_excludes(inputs.exclude, inputs.source_root).patterns;
+    filter.exclude_files = resolved_patterns(inputs);
     filter.ignore_case = inputs.ignore_case;
     if let Some(s) = inputs.min_size {
         filter.min_size = Some(parse_size(s).with_context(|| format!("--min-size {s}"))?);
@@ -190,7 +211,7 @@ fn case_note_on(
 pub fn validate(inputs: &FilterInputs<'_>) -> Result<()> {
     let mut probe = FileFilter::default();
     probe.include_files = inputs.include.to_vec();
-    probe.exclude_files = resolve_excludes(inputs.exclude, inputs.source_root).patterns;
+    probe.exclude_files = resolved_patterns(inputs);
     probe.ignore_case = inputs.ignore_case;
     probe
         .validate_globs()
@@ -224,7 +245,7 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
         include: wire_includes(inputs.include, cfg!(windows)),
         // audit-19: relativized HERE, before the spec leaves this host —
         // the peer that applies it never knows this side's source root.
-        exclude: resolve_excludes(inputs.exclude, inputs.source_root).patterns,
+        exclude: resolved_patterns(inputs),
         min_size: None,
         max_size: None,
         min_age_secs: None,
@@ -1881,6 +1902,7 @@ mod tests {
             max_size: None,
             min_age: None,
             max_age: None,
+            resolved: None,
         })
         .unwrap();
         let listed = filter.files_from.expect("a list");
@@ -1903,6 +1925,7 @@ mod tests {
             max_size: None,
             min_age: None,
             max_age: None,
+            resolved: None,
         }
     }
 
@@ -4371,5 +4394,54 @@ mod tests {
                  match cache, CACHE)."
             )
         );
+    }
+
+    /// cr-ecm5-3: a filter is built from the resolution its caller hands
+    /// it, and reads no disk for the excludes again. The front end resolves
+    /// once, shows the operator what the patterns became, and asks; the
+    /// filter that then runs must be that one. Resolved a second time, an
+    /// absolute exclude through an alias that had moved meanwhile named
+    /// another entry, and the confirmed mirror copied what the question
+    /// said was excluded.
+    #[test]
+    fn a_filter_is_built_from_the_resolution_it_is_handed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        // As typed, this exclude is outside the source: resolved here and
+        // now it could match nothing. The caller's resolution says what it
+        // was when the operator was asked.
+        let typed = vec!["/an-alias-that-has-moved/Keep".to_string()];
+        let shown = ResolvedExcludes {
+            patterns: vec!["./first/Keep".to_string()],
+            became: std::iter::once(0..1).collect(),
+            ..ResolvedExcludes::default()
+        };
+        let mut given = inputs(&[], &typed);
+        given.source_root = Some(&root);
+
+        // Without a resolution: resolved on the spot, to nothing.
+        assert_eq!(build(&given).unwrap().exclude_files, typed);
+        assert_eq!(build_spec(&given).unwrap().exclude, typed);
+
+        given.resolved = Some(&shown);
+        let filter = build(&given).unwrap();
+        assert_eq!(filter.exclude_files, shown.patterns);
+        let passes = |rel: &str| filter.allows_entry(Some(Path::new(rel)), Path::new(rel), 1, None);
+        assert!(
+            !passes("first/Keep"),
+            "what the question showed is excluded"
+        );
+        assert!(passes("second/Keep"));
+        assert_eq!(build_spec(&given).unwrap().exclude, shown.patterns);
+
+        // And validation judges those patterns, not the typed text.
+        let unusable = ResolvedExcludes {
+            patterns: vec!["./first/[".to_string()],
+            became: std::iter::once(0..1).collect(),
+            ..ResolvedExcludes::default()
+        };
+        validate(&given).expect("the resolution handed in is usable");
+        given.resolved = Some(&unusable);
+        assert!(validate(&given).is_err());
     }
 }

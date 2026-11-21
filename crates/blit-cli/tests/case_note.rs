@@ -588,6 +588,101 @@ fn the_line_is_said_of_the_filter_the_run_uses() {
     );
 }
 
+/// cr-ecm5-3: the filter the question showed is the filter that runs. An
+/// absolute exclude through an alias of a folder in the source is shown as
+/// what it names there, `first/Keep`. While the question waits, the alias
+/// is pointed at another folder; the operator, who was shown `first/Keep`,
+/// says yes — and `first/Keep` is what is left out. The excludes used to
+/// be resolved again once the answer was in, to `second/Keep` by then, and
+/// the confirmed mirror copied `first/Keep`.
+///
+/// Unix: an alias is a symbolic link, which Windows does not let every
+/// account make. The rule itself — a filter is built from the resolution
+/// it is handed — is guarded on every OS in
+/// `blit_core::transfers::filter`.
+#[cfg(unix)]
+#[test]
+fn the_filter_the_question_showed_is_the_filter_that_runs() {
+    use std::io::{Read as _, Write as _};
+    use std::sync::{Arc, Mutex};
+
+    let tmp = tempdir().unwrap();
+    let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+    write(&src, "first/Keep/f.txt");
+    write(&src, "second/Keep/g.txt");
+    write(&src, "other.txt");
+    let alias = tmp.path().join("alias");
+    std::os::unix::fs::symlink(src.join("first"), &alias).unwrap();
+    let exclude = format!("{}/Keep", alias.display());
+
+    let mut child = std::process::Command::new(cli_bin())
+        .arg("--config-dir")
+        .arg(tmp.path().join("settings"))
+        .args(["mirror", "--exclude", &exclude])
+        .arg(with_slash(&src))
+        .arg(with_slash(&dst))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn blit mirror");
+    let shown = Arc::new(Mutex::new(Vec::new()));
+    let reader = {
+        let (mut stdout, shown) = (child.stdout.take().unwrap(), Arc::clone(&shown));
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            while let Ok(read) = stdout.read(&mut chunk) {
+                if read == 0 {
+                    break;
+                }
+                shown.lock().unwrap().extend_from_slice(&chunk[..read]);
+            }
+        })
+    };
+    let mut stderr = child.stderr.take().unwrap();
+    let said = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+    let text_shown = || String::from_utf8_lossy(&shown.lock().unwrap()).into_owned();
+
+    // The question is on the screen, and it describes `first/Keep`.
+    let asked = std::time::Instant::now();
+    while !text_shown().contains("Continue?") {
+        assert!(
+            asked.elapsed() < Duration::from_secs(60),
+            "no question: {}",
+            text_shown()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        text_shown().contains(&format!("\"{exclude}\" matches first/Keep only")),
+        "{}",
+        text_shown()
+    );
+
+    // The alias moves; then the operator answers what they were shown.
+    fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink(src.join("second"), &alias).unwrap();
+    child.stdin.take().unwrap().write_all(b"y\n").unwrap();
+    let status = child.wait().expect("wait for blit mirror");
+    reader.join().unwrap();
+    let said = said.join().unwrap();
+
+    assert!(status.success(), "{}{said}", text_shown());
+    assert!(dst.join("other.txt").exists(), "{said}");
+    assert!(
+        !dst.join("first/Keep").exists(),
+        "what the question showed as excluded is left out\n{said}"
+    );
+    assert!(
+        dst.join("second/Keep/g.txt").exists(),
+        "and nothing else is\n{said}"
+    );
+}
+
 /// cr-ecm3-5: no line when a list of names overrides the patterns. With
 /// `--files-from`, what is copied is what is listed, whatever a pattern
 /// says — the note described a `*.cfg` exclusion while the listed

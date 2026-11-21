@@ -44,14 +44,14 @@ pub async fn run_check(args: &CheckArgs) -> Result<ExitCode> {
     // relative; one that cannot match anything is named, once.
     // cr-g3fix4-1: so is one naming an entry stored under several names.
     let resolved = filter::resolve_excludes(&exclude, Some(&src));
-    for pattern in resolved.unmatchable {
+    for pattern in &resolved.unmatchable {
         eprintln!(
             "blit: --exclude '{pattern}' cannot match anything under {}",
             src.display()
         );
     }
-    for (pattern, patterns) in resolved.expanded {
-        eprintln!("{}", filter::shared_entry_note(&pattern, &patterns));
+    for (pattern, patterns) in &resolved.expanded {
+        eprintln!("{}", filter::shared_entry_note(pattern, patterns));
     }
 
     // Build filter via the same chokepoint that copy/mirror/move use, so
@@ -68,6 +68,8 @@ pub async fn run_check(args: &CheckArgs) -> Result<ExitCode> {
         max_size: args.max_size.as_deref(),
         min_age: args.min_age.as_deref(),
         max_age: args.max_age.as_deref(),
+        // cr-ecm5-3: the resolution just reported on, not another one.
+        resolved: Some(&resolved),
     })?;
 
     let use_checksum = args.checksum;

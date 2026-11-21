@@ -500,6 +500,12 @@ pub struct TransferArgs {
     /// The same for `include`.
     #[arg(skip)]
     pub include_origin: Vec<Option<PathBuf>>,
+    /// cr-ecm5-3: what `exclude` resolved to against the source, once,
+    /// when the command began (`run_command`) — the filter every pass of
+    /// it runs with, and what its warnings and its question describe.
+    /// `None` until then; resolved on the spot where it is. Never a flag.
+    #[arg(skip)]
+    pub resolved_excludes: Option<std::sync::Arc<blit_core::transfers::filter::ResolvedExcludes>>,
     /// Only transfer files listed in FILE (one relative path per line, # comments allowed)
     #[arg(long, value_name = "FILE", help_heading = "Filtering")]
     pub files_from: Option<PathBuf>,

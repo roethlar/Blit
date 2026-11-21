@@ -268,6 +268,10 @@ async fn run_command(
         crate::transfers::reject_move_filters(&args)?;
     } else {
         crate::transfers::absorb_pattern_files(&mut args).await?;
+        // cr-ecm5-3: and the excludes are resolved against the source
+        // once, here — what is validated, warned about, shown in the
+        // question and run is this one resolution.
+        crate::transfers::resolve_excludes_once(&mut args);
     }
     // cr-ecm4-4: and a command refused for what it says is refused HERE,
     // before a run is recorded, a job saved or a job exported. Saving
