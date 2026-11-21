@@ -91,6 +91,67 @@ pub fn validate_wire_path(wire_path: &str) -> Result<PathBuf> {
     normalize_relative_components(Path::new(wire_path), wire_path)
 }
 
+/// A utility verb's path AS TYPED, read into this system's path
+/// (cr-uv3-3): its components are what stands between `/`, and each is
+/// ONE name — whatever bytes it holds. Empty components and `.` say
+/// nothing and are passed over; `..` and a NUL are refused.
+///
+/// The path used to be handed to this system's own path reader, and to a
+/// check for "Windows-looking" paths made for transfers between unlike
+/// systems. On Unix that refused names Unix allows — `\notes`,
+/// `C:receipt`, which `find` had just printed; on Windows it split
+/// `quarter\notes.pst`, one name where it was typed, into two, so `rm`
+/// could remove `quarter/notes.pst`, another entry.
+///
+/// Under the Windows rule (`windows`: this system's own, outside tests) a
+/// component that is not one name there — it holds a `\` or a `:`, is
+/// not text, or reads as a drive, a device or more than one name — is
+/// refused before the filesystem is asked anything.
+pub fn typed_components(typed: &[u8], windows: bool) -> Result<PathBuf> {
+    let mut path = PathBuf::new();
+    for component in typed.split(|&byte| byte == b'/') {
+        if component.is_empty() || component == b"." {
+            continue;
+        }
+        let shown = || crate::raw_name::escape_raw(component);
+        if component == b".." {
+            bail!(
+                "parent directory components not allowed: {}",
+                crate::raw_name::escape_raw(typed)
+            );
+        }
+        if component.contains(&0) {
+            bail!("a name cannot hold a NUL byte: {}", shown());
+        }
+        if windows {
+            let one_name = std::str::from_utf8(component).is_ok_and(|text| {
+                !text.contains(['\\', ':'])
+                    && (!cfg!(windows) || {
+                        let mut parts = Path::new(text).components();
+                        matches!(
+                            (parts.next(), parts.next()),
+                            (Some(Component::Normal(name)), None) if name == std::ffi::OsStr::new(text)
+                        )
+                    })
+            });
+            if !one_name {
+                bail!("{} cannot be the name of an entry on this system", shown());
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            path.push(std::ffi::OsStr::from_bytes(component));
+        }
+        #[cfg(not(unix))]
+        match std::str::from_utf8(component) {
+            Ok(text) => path.push(text),
+            Err(_) => bail!("{} cannot be the name of an entry on this system", shown()),
+        }
+    }
+    Ok(path)
+}
+
 /// Validate a wire-supplied relative path carried as raw name bytes
 /// (contract v7 `FileHeader.raw_relative_path`, `/`-separated exact source
 /// bytes — `docs/plan/SOURCE_SIDE_CONTAINMENT.md` D-F). The bytes are
@@ -886,6 +947,80 @@ mod raw_byte_tests {
             safe_join_named(Path::new("/root"), "caf\u{fffd}.txt", None).unwrap(),
             PathBuf::from("/root/caf\u{fffd}.txt")
         );
+    }
+}
+
+#[cfg(test)]
+mod typed_components_tests {
+    use super::*;
+
+    /// cr-uv3-3: a typed path is its components between `/`, each one
+    /// name. What Unix allows in a name is a name; what Windows cannot
+    /// hold as one name is refused there, never read as two.
+    #[test]
+    fn a_typed_path_is_its_components_between_slashes() {
+        let unix =
+            |typed: &[u8]| typed_components(typed, false).map(|path| path.components().count());
+        for (typed, names) in [
+            (&b"a/b"[..], 2),
+            (b"a//b/./c/", 3),
+            (b"", 0),
+            (b"./", 0),
+            (b"\\notes", 1),
+            (b"C:receipt", 1),
+            (b"quarter\\notes.pst", 1),
+            (b"t/quarter\\notes.pst", 2),
+            (b"t/bad\xff.dat", 2),
+            (b" lead/trail ", 2),
+            (b"~x/C:\\y", 2),
+        ] {
+            #[cfg(unix)]
+            assert_eq!(
+                unix(typed).ok(),
+                Some(names),
+                "{}",
+                String::from_utf8_lossy(typed)
+            );
+            #[cfg(not(unix))]
+            let _ = (unix, typed, names);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            // Each name is the bytes typed, and nothing else.
+            let path = typed_components(b"t/quarter\\notes.pst", false).unwrap();
+            assert_eq!(
+                path.file_name().map(|name| name.as_bytes()),
+                Some(&b"quarter\\notes.pst"[..])
+            );
+            assert_eq!(path, Path::new("t").join("quarter\\notes.pst"));
+        }
+        for refused in [&b".."[..], b"a/../b", b"a/..", b"a\0b"] {
+            assert!(typed_components(refused, false).is_err());
+            assert!(typed_components(refused, true).is_err());
+        }
+        // Under the Windows rule: one name, or refused — before any disk
+        // is asked.
+        for (typed, one_name) in [
+            (&b"plain.txt"[..], true),
+            (b"dir/sub/plain.txt", true),
+            (b"quarter\\notes.pst", false),
+            (b"\\notes", false),
+            (b"C:receipt", false),
+            (b"dir/C:receipt", false),
+            (b"bad\xff.dat", false),
+        ] {
+            let read = typed_components(typed, true);
+            assert_eq!(read.is_ok(), one_name, "{}", String::from_utf8_lossy(typed));
+            if let Err(refusal) = read {
+                assert!(
+                    refusal
+                        .to_string()
+                        .contains("cannot be the name of an entry"),
+                    "{refusal}"
+                );
+            }
+        }
     }
 }
 

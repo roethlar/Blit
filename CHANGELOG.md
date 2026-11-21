@@ -407,7 +407,11 @@ none of the options it had.**
   '\n' blit rm -y` removes it. `find` keeps every `/` typed after its
   path in what it prints below it (`dir//` prints `dir//sub`), as `find`
   does. A name with a `\` in it — one Unix allows — is a path they take
-  too: `HOST:/m/quarter\notes.pst` was refused as "a local path".
+  too: `HOST:/m/quarter\notes.pst` was refused as "a local path". So
+  are `\notes` and `C:receipt`, which a daemon on Linux refused as
+  Windows paths: a path given to these commands is its names between
+  `/`, each one name. A daemon on Windows refuses a name it cannot hold
+  as one, and never reads it as two.
 - **A name in a message is written so that it reads back**, as each
   command's namesake writes it: `blit rm: cannot remove
   'HOST:/m/bad'$'\377''.dat'`, `"it's"`, `'new'$'\n''line'` from `rm`

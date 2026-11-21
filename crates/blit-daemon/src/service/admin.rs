@@ -57,16 +57,20 @@ pub(crate) fn typed_bytes<'a>(text: &'a str, raw: Option<&'a [u8]>) -> &'a [u8] 
     }
 }
 
-/// A typed path's place below the module: validated as every path from
-/// the wire is — relative, no `..` — whether it is text or bytes that are
-/// none. A host whose names must be text refuses the latter by saying so.
+/// A typed path's place below the module: its components are what stands
+/// between `/`, each one name, whatever it holds (cr-uv3-3,
+/// `path_safety::typed_components`) — relative, no `..`. A system that
+/// cannot hold a component as one name refuses it by saying so. The
+/// module itself is `.`.
 #[allow(clippy::result_large_err)]
 fn resolve_typed(typed: &[u8]) -> Result<PathBuf, Status> {
-    match std::str::from_utf8(typed) {
-        Ok(text) => resolve_relative_path(text),
-        Err(_) => blit_core::path_safety::validate_wire_path_bytes(typed)
-            .map_err(|error| Status::invalid_argument(format!("path not allowed: {error}"))),
-    }
+    let path = blit_core::path_safety::typed_components(typed, cfg!(windows))
+        .map_err(|error| Status::invalid_argument(format!("path not allowed: {error}")))?;
+    Ok(if path.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        path
+    })
 }
 
 impl TypedOperand {

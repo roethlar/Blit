@@ -705,6 +705,85 @@ fn a_name_these_commands_print_is_one_they_take() {
     assert!(ctx.module_dir.join("t/plain.txt").exists());
 }
 
+/// cr-uv3-3: a name another system would read as a PATH is a name here.
+/// `find` printed the module-root entries `\notes` and `C:receipt`, and
+/// `du` refused both printed operands as "Windows paths": the daemon read
+/// a typed path with a check made for transfers between unlike systems.
+/// A path is its components between `/`, each one name — at the module's
+/// root and below it.
+#[cfg(unix)]
+#[test]
+fn a_name_another_system_reads_as_a_path_is_a_name_here() {
+    use std::ffi::OsStr;
+
+    let ctx = TestContext::new();
+    for name in [
+        "\\notes",
+        "C:receipt",
+        "a:b\\c",
+        "t/\\notes",
+        "t/D:\\x",
+        "kept.txt",
+    ] {
+        write(&ctx.module_dir, name);
+    }
+    let ours = |args: &[&str]| {
+        let mut cmd = Command::new(&ctx.cli_bin);
+        cmd.arg("--config-dir")
+            .arg(&ctx.config_dir)
+            .args(args.iter().map(OsStr::new))
+            .stdin(Stdio::null());
+        run_with_timeout(cmd, Duration::from_secs(60))
+    };
+    for (start, pattern, name) in [
+        ("", "?notes", "\\notes"),
+        ("", "C:*", "C:receipt"),
+        ("", "a:*", "a:b\\c"),
+        ("t", "?notes", "t/\\notes"),
+        ("t", "D:*", "t/D:\\x"),
+    ] {
+        let found = ours(&[
+            "find",
+            &remote(&ctx, start),
+            "-maxdepth",
+            "1",
+            "-name",
+            pattern,
+        ]);
+        let printed = String::from_utf8_lossy(&found.stdout)
+            .trim_end()
+            .to_string();
+        assert_eq!(printed, remote(&ctx, name), "what `find` prints for {name}");
+
+        let usage = ours(&["du", &printed]);
+        assert!(
+            usage.status.success()
+                && String::from_utf8_lossy(&usage.stdout)
+                    .trim_end()
+                    .ends_with(&printed),
+            "du {name}: {}{}",
+            String::from_utf8_lossy(&usage.stdout),
+            String::from_utf8_lossy(&usage.stderr)
+        );
+        let space = ours(&["df", &printed]);
+        assert!(
+            space.status.success(),
+            "df {name}: {}",
+            String::from_utf8_lossy(&space.stderr)
+        );
+        let removed = ours(&["rm", "-y", &printed]);
+        assert!(
+            removed.status.success() && removed.stderr.is_empty(),
+            "rm {name}: {}",
+            String::from_utf8_lossy(&removed.stderr)
+        );
+        assert!(!ctx.module_dir.join(name).exists(), "{name} is gone");
+    }
+    // That file, and no other: nothing was read as a path it is not.
+    assert!(ctx.module_dir.join("kept.txt").exists() && ctx.module_dir.join("t").is_dir());
+    assert_eq!(fs::read_dir(ctx.module_dir.join("t")).unwrap().count(), 0);
+}
+
 /// AC-12, on every Unix: a name that is not valid text is removed as the
 /// name it is, with the tree that holds it.
 #[cfg(unix)]
