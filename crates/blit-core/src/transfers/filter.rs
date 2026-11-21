@@ -26,6 +26,16 @@ pub struct FilterInputs<'a> {
     pub include: &'a [String],
     pub exclude: &'a [String],
     pub files_from: Option<&'a PathBuf>,
+    /// cr-ecm6-4: the list's content, when the caller has read the file
+    /// already — `Ok` the text, `Err` why it could not be read. Then THAT
+    /// is the list, and `files_from` is not opened again: a front end
+    /// reads the list once, before it asks anything, for the job's record
+    /// (review cr-jl5-1), and the run must use what the record holds. Read
+    /// again when the filter was built, after the question, a list changed
+    /// meanwhile from `first.txt` to `second.txt` made the mirror copy
+    /// `second.txt` while its saved job replayed `first.txt`. `None`: the
+    /// file named by `files_from` is read here.
+    pub files_from_read: Option<std::result::Result<&'a str, &'a str>>,
     /// ssc-6: an in-memory exact-path set (the previous pass's failed
     /// files) that overrides `files_from` for a retry pass. Never set by
     /// a CLI flag — the orchestrator threads it between passes.
@@ -60,6 +70,19 @@ pub struct FilterInputs<'a> {
     /// `first/Keep`; the alias changed while the question was open, and
     /// the confirmed mirror copied `first/Keep`.
     pub resolved: Option<&'a ResolvedExcludes>,
+}
+
+/// The names of `inputs`' `--files-from` list, `None` when there is no
+/// list: from the content the caller read already when it gave it
+/// (cr-ecm6-4), else from the file. A list the caller could not read is
+/// the same error the file would give, and the file is not tried again.
+fn listed_names(inputs: &FilterInputs<'_>) -> Result<Option<std::collections::HashSet<PathBuf>>> {
+    match (inputs.files_from_read, inputs.files_from) {
+        (Some(Ok(text)), _) => Ok(Some(FileFilter::files_from_text(text))),
+        (Some(Err(why)), _) => Err(eyre!("opening files-from list {why}")),
+        (None, Some(path)) => Ok(Some(FileFilter::load_files_from(path)?)),
+        (None, None) => Ok(None),
+    }
 }
 
 /// The exclude patterns `inputs` describe: the caller's own resolution
@@ -102,8 +125,8 @@ pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
         // helper, not by leaf code each time `allows_entry` is called.
         filter.reference_time = Some(SystemTime::now());
     }
-    if let Some(path) = inputs.files_from {
-        filter.files_from = Some(FileFilter::load_files_from(path)?);
+    if let Some(listed) = listed_names(inputs)? {
+        filter.files_from = Some(listed);
     }
     if let Some(set) = inputs.retry_only {
         filter.files_from = Some(set.clone());
@@ -259,6 +282,7 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
         ignore_case: inputs.ignore_case,
         // cr-ecm4-2: a list is in force even when it holds no name.
         files_from_set: inputs.files_from.is_some()
+            || inputs.files_from_read.is_some()
             || inputs.retry_only.is_some()
             || inputs.retry_only_raw.is_some(),
     };
@@ -282,8 +306,7 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
                 .as_secs(),
         );
     }
-    if let Some(path) = inputs.files_from {
-        let entries = FileFilter::load_files_from(path)?;
+    if let Some(entries) = listed_names(inputs)? {
         spec.files_from = entries
             .into_iter()
             .map(|p| p.to_string_lossy().into_owned())
@@ -1906,6 +1929,7 @@ mod tests {
             include: &[],
             exclude: &[],
             files_from: None,
+            files_from_read: None,
             retry_only: Some(&names),
             retry_only_raw: Some(&raw),
             source_root: None,
@@ -1929,6 +1953,7 @@ mod tests {
             include,
             exclude,
             files_from: None,
+            files_from_read: None,
             retry_only: None,
             retry_only_raw: None,
             source_root: None,
@@ -4539,5 +4564,62 @@ mod tests {
         validate(&given).expect("the resolution handed in is usable");
         given.resolved = Some(&unusable);
         assert!(validate(&given).is_err());
+    }
+
+    /// cr-ecm6-4: the list a filter is built from is the one its caller
+    /// read, when it read one — the file is not opened again. The front
+    /// end reads the list once, before it asks anything, for the job's
+    /// record; read again after the question, a list that had changed
+    /// meanwhile gave a run that did one thing and a saved job that
+    /// replays another.
+    #[test]
+    fn a_list_is_built_from_what_its_caller_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = dir.path().join("list.txt");
+        // The file as it is NOW; the caller read it when it said `first`.
+        std::fs::write(&list, "second.txt\n").unwrap();
+        let read = "# picked\n first.txt \n\n";
+        let mut given = inputs(&[], &[]);
+        given.files_from = Some(&list);
+        let names = |listed: std::collections::HashSet<PathBuf>| {
+            let mut names: Vec<PathBuf> = listed.into_iter().collect();
+            names.sort();
+            names
+        };
+
+        // Nothing read by the caller: the file, as before.
+        assert_eq!(
+            names(build(&given).unwrap().files_from.unwrap()),
+            [PathBuf::from("second.txt")]
+        );
+        assert_eq!(build_spec(&given).unwrap().files_from, ["second.txt"]);
+
+        given.files_from_read = Some(Ok(read));
+        assert_eq!(
+            names(build(&given).unwrap().files_from.unwrap()),
+            [PathBuf::from("first.txt")],
+            "the list as read, by the list's own line rule"
+        );
+        let spec = build_spec(&given).unwrap();
+        assert_eq!(spec.files_from, ["first.txt"]);
+        assert!(spec.files_from_set);
+
+        // A list the caller could not read is not tried again.
+        given.files_from_read = Some(Err("list.txt: it was not there"));
+        for error in [
+            format!("{:#}", build(&given).unwrap_err()),
+            format!("{:#}", build_spec(&given).unwrap_err()),
+        ] {
+            assert!(
+                error.contains("opening files-from list list.txt: it was not there"),
+                "{error}"
+            );
+        }
+        // What was read stands on its own: a list that names nothing is a
+        // list, with no file named at all.
+        given.files_from = None;
+        given.files_from_read = Some(Ok("# nothing\n"));
+        assert_eq!(build(&given).unwrap().files_from.map(|l| l.len()), Some(0));
+        assert!(build_spec(&given).unwrap().files_from_set);
     }
 }

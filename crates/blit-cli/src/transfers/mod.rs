@@ -66,6 +66,12 @@ fn filter_inputs<'a>(args: &'a TransferArgs, source_root: Option<&'a Path>) -> F
         include: &args.include,
         exclude: &args.exclude,
         files_from: args.files_from.as_ref(),
+        // cr-ecm6-4: the list as `run_command` read it before anything
+        // was asked — the one the job's record holds.
+        files_from_read: args.files_from_text.as_deref().map(|read| match read {
+            Ok(text) => Ok(text.as_str()),
+            Err(why) => Err(why.as_str()),
+        }),
         retry_only: args.retry_only.as_ref(),
         retry_only_raw: args.retry_only_raw.as_ref(),
         source_root,

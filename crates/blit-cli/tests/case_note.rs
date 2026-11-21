@@ -803,6 +803,109 @@ fn the_line_keeps_what_is_under_a_folder_apart_from_the_folder() {
     );
 }
 
+/// `blit <args>` with a question in it: once the question is on the
+/// screen, `meanwhile` runs (it is given everything shown so far); then
+/// the answer is "y".
+fn answered_yes_after(scratch: &Path, args: &[&str], meanwhile: impl FnOnce(&str)) -> Ran {
+    use std::io::{Read as _, Write as _};
+    use std::sync::{Arc, Mutex};
+
+    let mut child = std::process::Command::new(cli_bin())
+        .arg("--config-dir")
+        .arg(scratch.join("settings"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn blit");
+    let shown = Arc::new(Mutex::new(Vec::new()));
+    let reader = {
+        let (mut stdout, shown) = (child.stdout.take().unwrap(), Arc::clone(&shown));
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            while let Ok(read) = stdout.read(&mut chunk) {
+                if read == 0 {
+                    break;
+                }
+                shown.lock().unwrap().extend_from_slice(&chunk[..read]);
+            }
+        })
+    };
+    let mut stderr = child.stderr.take().unwrap();
+    let said = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+    let text_shown = || String::from_utf8_lossy(&shown.lock().unwrap()).into_owned();
+
+    let asked = std::time::Instant::now();
+    while !text_shown().contains("Continue?") {
+        assert!(
+            asked.elapsed() < Duration::from_secs(60),
+            "no question: {}",
+            text_shown()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    meanwhile(&text_shown());
+    child.stdin.take().unwrap().write_all(b"y\n").unwrap();
+    let status = child.wait().expect("wait for blit");
+    reader.join().unwrap();
+    Ran {
+        code: status.code(),
+        stdout: text_shown(),
+        stderr: said.join().unwrap(),
+    }
+}
+
+/// cr-ecm6-4: the list the question was asked about is the list that
+/// runs. `run_command` reads `--files-from` once, before anything is
+/// asked, for the job's record; the filter used to open the file again
+/// when it was built, after the answer. Changed from `first.txt` to
+/// `second.txt` while the question was open, the mirror copied
+/// `second.txt` — and its saved job replays `first.txt`. Now the run
+/// copies what the record holds.
+#[test]
+fn the_list_read_before_the_question_is_the_list_that_runs() {
+    let tmp = tempdir().unwrap();
+    let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+    write(&src, "first.txt");
+    write(&src, "second.txt");
+    fs::create_dir_all(&dst).unwrap();
+    let list = tmp.path().join("list.txt");
+    fs::write(&list, "first.txt\n").unwrap();
+    let (from, to) = (with_slash(&src), with_slash(&dst));
+
+    let ran = answered_yes_after(
+        tmp.path(),
+        &[
+            "mirror",
+            "--save",
+            "picked",
+            "--files-from",
+            list.to_str().unwrap(),
+            &from,
+            &to,
+        ],
+        |_shown| fs::write(&list, "second.txt\n").unwrap(),
+    );
+    assert_eq!(ran.code, Some(0), "{}", ran.all());
+    assert!(dst.join("first.txt").exists(), "{}", ran.all());
+    assert!(
+        !dst.join("second.txt").exists(),
+        "the list as it was when the command began\n{}",
+        ran.all()
+    );
+
+    // The saved job is that same list: run again, it copies the same file.
+    fs::remove_file(dst.join("first.txt")).unwrap();
+    let again = blit(tmp.path(), &["jobs", "run", "picked"], Some("y\n"));
+    assert_eq!(again.code, Some(0), "{}", again.all());
+    assert!(dst.join("first.txt").exists() && !dst.join("second.txt").exists());
+}
+
 /// cr-ecm5-3: the filter the question showed is the filter that runs. An
 /// absolute exclude through an alias of a folder in the source is shown as
 /// what it names there, `first/Keep`. While the question waits, the alias

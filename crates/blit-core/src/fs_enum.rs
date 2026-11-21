@@ -806,6 +806,16 @@ impl FileFilter {
         Ok(set)
     }
 
+    /// The names a `--files-from` list holds, from its content already
+    /// read ([`load_files_from`](Self::load_files_from) for a list whose
+    /// file was read earlier): the same line rule, line by line.
+    pub fn files_from_text(text: &str) -> HashSet<PathBuf> {
+        text.lines()
+            .filter_map(list_line)
+            .map(PathBuf::from)
+            .collect()
+    }
+
     /// EXCLUDE_CASE_MATCHING slice 3b (AC-8, AC-11): the patterns a
     /// pattern file holds, in order — what `--exclude-from FILE` and
     /// `--include-from FILE` read. One pattern per line, each line read by

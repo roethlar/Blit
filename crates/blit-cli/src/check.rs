@@ -60,6 +60,7 @@ pub async fn run_check(args: &CheckArgs) -> Result<ExitCode> {
         include: &include,
         exclude: &exclude,
         files_from: args.files_from.as_ref(),
+        files_from_read: None,
         retry_only: None,
         retry_only_raw: None,
         source_root: Some(&src),

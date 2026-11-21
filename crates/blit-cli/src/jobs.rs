@@ -2430,6 +2430,7 @@ mod retry_name_tests {
                 min_age: None,
                 max_age: None,
                 resolved: None,
+                files_from_read: None,
             })
             .unwrap();
         assert_eq!(spec.files_from, ["plain.txt"]);
