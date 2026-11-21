@@ -1,9 +1,9 @@
 # cr-ecm6-1: An include was read differently here and at a peer
 
 **Severity**: HIGH — the same mirror put a different destination-only file in its deletion scope depending on whether the destination was local or behind a daemon
-**Status**: Fixed, awaiting re-review
+**Status**: Verified — `exclude-case-r7` (Codex openreview, 2026-11-21) reviewed `3bc3ee47..cbab0c39`, which holds this fix, with `guard_confirmed: true`, and required nothing further on this finding
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix cr-ecm6-1: …")
+**Commit**: `370df03b`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r6` over `3bc3ee47..a13238b6` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r6.codex.md`.
 
 ## Evidence

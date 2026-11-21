@@ -1,9 +1,9 @@
 # cr-ecm6-5: Nothing bounded what one connection could buffer across streams
 
 **Severity**: MEDIUM — memory, not data: many slow readers on one connection could hold far more unread than before the window fix; found by reading the code
-**Status**: Fixed, awaiting re-review
+**Status**: Verified — `exclude-case-r7` (Codex openreview, 2026-11-21) reviewed `3bc3ee47..cbab0c39`, which holds this fix, with `guard_confirmed: true`, and required nothing further on this finding
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix cr-ecm6-5: …")
+**Commit**: `b81b191b`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r6` over `3bc3ee47..a13238b6` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r6.codex.md`. On the fix `h2-small-frames` (`f72c7dd1`), which was in that range.
 
 ## Evidence

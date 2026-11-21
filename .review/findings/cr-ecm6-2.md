@@ -1,9 +1,9 @@
 # cr-ecm6-2: The line's example dropped a trailing `/**`
 
 **Severity**: HIGH — the line said `--ignore-case` would also match a name it does not; a mirror run on that reading deleted it
-**Status**: Fixed, awaiting re-review
+**Status**: Verified — `exclude-case-r7` (Codex openreview, 2026-11-21) reviewed `3bc3ee47..cbab0c39`, which holds this fix, with `guard_confirmed: true`, and required nothing further on this finding (it found a doubled separator after `**` trimmed the same way: `**//Cache` shown as `Cache` — cr-ecm7-2; and two faults in which pattern the line shows — cr-ecm7-3, cr-ecm7-4)
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix cr-ecm6-2: …")
+**Commit**: `a7e32b60`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r6` over `3bc3ee47..a13238b6` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r6.codex.md`.
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-ecm6-4: The `--files-from` list was read again after the question
 
 **Severity**: MEDIUM — the run and its own saved job disagreed about which files the command named
-**Status**: Fixed, awaiting re-review
+**Status**: Verified — `exclude-case-r7` (Codex openreview, 2026-11-21) reviewed `3bc3ee47..cbab0c39`, which holds this fix, with `guard_confirmed: true`, and required nothing further on this finding (it found the separators of a listed name sent as the sending platform writes them — cr-ecm7-1)
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix cr-ecm6-4: …")
+**Commit**: `21b6469e`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r6` over `3bc3ee47..a13238b6` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r6.codex.md`.
 
 ## Evidence

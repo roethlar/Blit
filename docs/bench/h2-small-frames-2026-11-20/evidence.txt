@@ -1,21 +1,21 @@
 before: tree
   push   copy tree/ HOST:/bench/t/: exit 1       34.9 ms  files there 768  stderr: Error:  |    0: [91mpushing to 127.0.0.1:44669:/bench/t[0m |    1: [91msession INTERNAL: transfer transport peer closed[0m
   mirror tree/ HOST:/bench/t/ (nothing to do): exit 1       16.1 ms  files there 768  stderr: Error:  |    0: [91mpushing to 127.0.0.1:44669:/bench/t[0m |    1: [91msession INTERNAL: transfer transport peer closed[0m
-  pull   copy HOST:/bench/t/ local/: exit 0       19.6 ms  files there 768  stderr: 
-  daemon said: 
+  pull   copy HOST:/bench/t/ local/: exit 0       19.6 ms  files there 768  stderr:
+  daemon said:
 before: blit find HOST:/bench/, reader stalls 2.0s
-  run 0: exit 1    2027.9 ms  stdout lines 17855  stderr: Error:  |    0: [91mh2 protocol error: error reading a body from connection[0m | 
-  run 1: exit 1    2018.2 ms  stdout lines 17472  stderr: Error:  |    0: [91mh2 protocol error: error reading a body from connection[0m | 
-  run 2: exit 1    2018.3 ms  stdout lines 17080  stderr: Error:  |    0: [91mh2 protocol error: error reading a body from connection[0m | 
+  run 0: exit 1    2027.9 ms  stdout lines 17855  stderr: Error:  |    0: [91mh2 protocol error: error reading a body from connection[0m |
+  run 1: exit 1    2018.2 ms  stdout lines 17472  stderr: Error:  |    0: [91mh2 protocol error: error reading a body from connection[0m |
+  run 2: exit 1    2018.3 ms  stdout lines 17080  stderr: Error:  |    0: [91mh2 protocol error: error reading a body from connection[0m |
 after:  tree
-  push   copy tree/ HOST:/bench/t/: exit 0     2870.8 ms  files there 200000  stderr: 
-  mirror tree/ HOST:/bench/t/ (nothing to do): exit 0     1504.0 ms  files there 200000  stderr: 
-  pull   copy HOST:/bench/t/ local/: exit 0     2546.7 ms  files there 200000  stderr: 
-  daemon said: 
+  push   copy tree/ HOST:/bench/t/: exit 0     2870.8 ms  files there 200000  stderr:
+  mirror tree/ HOST:/bench/t/ (nothing to do): exit 0     1504.0 ms  files there 200000  stderr:
+  pull   copy HOST:/bench/t/ local/: exit 0     2546.7 ms  files there 200000  stderr:
+  daemon said:
 after:  blit find HOST:/bench/, reader stalls 2.0s
-  run 0: exit 0    2200.3 ms  stdout lines 202001  stderr: 
-  run 1: exit 0    2218.7 ms  stdout lines 202001  stderr: 
-  run 2: exit 0    2200.6 ms  stdout lines 202001  stderr: 
+  run 0: exit 0    2200.3 ms  stdout lines 202001  stderr:
+  run 1: exit 0    2218.7 ms  stdout lines 202001  stderr:
+  run 2: exit 0    2200.6 ms  stdout lines 202001  stderr:
 before: one 2048 MiB file, best of 3: push 287 ms (7136 MiB/s), pull 240 ms (8529 MiB/s)
 after:  one 2048 MiB file, best of 3: push 286 ms (7161 MiB/s), pull 244 ms (8402 MiB/s)
 before: one 2048 MiB file, best of 3: push 282 ms (7261 MiB/s), pull 245 ms (8345 MiB/s)
