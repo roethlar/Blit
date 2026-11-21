@@ -335,9 +335,14 @@ fn test_utils_du() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    // UTILITY_VERBS_LOCAL_PARITY slice 1: `du`'s lines — the folder below,
+    // then the path given, each `SIZE<TAB>PATH`; no header, no file line.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("BYTES"), "expected BYTES header");
-    assert!(stdout.contains("FILES"), "expected FILES header");
+    let paths: Vec<&str> = stdout
+        .lines()
+        .map(|line| line.split_once('\t').expect("SIZE<TAB>PATH").1)
+        .collect();
+    assert_eq!(paths, [format!("{remote}sub"), remote.clone()], "{stdout}");
 }
 
 #[test]
@@ -356,12 +361,13 @@ fn test_utils_du_json() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("invalid JSON: {}\noutput: {}", e, stdout));
-    let rows = parsed.as_array().expect("expected JSON array");
-    assert!(!rows.is_empty(), "du JSON should have at least one entry");
-    assert!(
-        rows[0].get("bytes").is_some(),
-        "du JSON entries should have 'bytes' field"
-    );
+    // UTILITY_VERBS_LOCAL_PARITY slice 1: the lines as rows, and what could
+    // not be read beside them.
+    let rows = parsed["rows"].as_array().expect("rows");
+    assert_eq!(rows.len(), 1, "the directory given: {stdout}");
+    assert_eq!(rows[0]["path"], remote.as_str());
+    assert!(rows[0]["allocated_bytes"].is_u64(), "{stdout}");
+    assert_eq!(parsed["failures"].as_array().map(Vec::len), Some(0));
 }
 
 // ── df ────────────────────────────────────────────────────────────────
@@ -381,18 +387,19 @@ fn test_utils_df() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    // UTILITY_VERBS_LOCAL_PARITY slice 1: `df -k`'s two lines.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("Module:"),
-        "expected 'Module:' in df output"
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "{stdout}");
+    assert_eq!(
+        lines[0].split_whitespace().collect::<Vec<_>>(),
+        ["Filesystem", "1K-blocks", "Used", "Available", "Use%"]
     );
-    assert!(stdout.contains("Total:"), "expected 'Total:' in df output");
-    assert!(stdout.contains("Free :"), "expected 'Free :' in df output");
-    // Verify human-readable formatting is present (e.g. "GiB" or "MiB")
+    let fields: Vec<&str> = lines[1].split_whitespace().collect();
+    assert_eq!(fields[0], remote, "{stdout}");
     assert!(
-        stdout.contains("iB"),
-        "expected human-readable byte units (KiB/MiB/GiB) in df output, got:\n{}",
-        stdout
+        fields[1].parse::<u64>().is_ok() && fields[4].ends_with('%'),
+        "{stdout}"
     );
 }
 
@@ -414,8 +421,13 @@ fn test_utils_df_json() {
         parsed["total_bytes"].is_u64(),
         "expected total_bytes as u64"
     );
-    assert!(parsed["free_bytes"].is_u64(), "expected free_bytes as u64");
-    assert!(parsed["module"].is_string(), "expected module as string");
+    // UTILITY_VERBS_LOCAL_PARITY slice 1: used and available, as `df` has
+    // them (the old `free_bytes` could not say which of the two it was).
+    assert!(parsed["used_bytes"].is_u64(), "expected used_bytes as u64");
+    assert!(
+        parsed["available_bytes"].is_u64(),
+        "expected available_bytes as u64"
+    );
 }
 
 // ── rm ────────────────────────────────────────────────────────────────

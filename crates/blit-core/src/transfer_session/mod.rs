@@ -140,7 +140,15 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// rule of v11 that peer took the unrelated destination file called
 /// exactly that for the one listed. Two ends that read an entry
 /// differently select different files; the reading is part of the contract.
-pub const CONTRACT_VERSION: u32 = 12;
+/// v13: the utility requests answer only their own contract
+/// (UTILITY_VERBS_LOCAL_PARITY slice 1, AC-11). `Du` and `Df` replace
+/// `DiskUsage` and `FilesystemStats`: request names a daemon of an earlier
+/// contract does not serve, each carrying the asker's contract version,
+/// which the daemon compares before it reads anything
+/// (`admin::same_build`). The rows changed with the names — `du` reports
+/// allocated space per printed line, `df` the filesystem that holds the
+/// path given.
+pub const CONTRACT_VERSION: u32 = 13;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames

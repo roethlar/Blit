@@ -151,13 +151,15 @@ fn test_admin_du() {
     let output = run_with_timeout(cli_cmd, Duration::from_secs(10));
     assert!(output.status.success(), "blit du failed");
 
+    // UTILITY_VERBS_LOCAL_PARITY slice 1: `du`'s own shape — one line for
+    // the directory given, `SIZE<TAB>PATH`, no header and no line for the
+    // file (that is `-a`). It used to print a `PATH BYTES FILES DIRS` table.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("10"),
-        "expected size 10 in output, got:\n{}",
-        stdout
-    );
-    assert!(stdout.contains("BYTES"), "expected BYTES header");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "one directory, one line:\n{stdout}");
+    let (size, path) = lines[0].split_once('\t').expect("SIZE<TAB>PATH");
+    assert_eq!(path, remote_path);
+    size.parse::<u64>().expect("a size in 1K blocks");
 }
 
 #[test]
@@ -175,12 +177,16 @@ fn test_admin_df() {
     let output = run_with_timeout(cli_cmd, Duration::from_secs(10));
     assert!(output.status.success(), "blit df failed");
 
+    // UTILITY_VERBS_LOCAL_PARITY slice 1: `df -k`'s shape, the operand in
+    // the first column. It used to print `Module:` / `Total:` / `Free :`.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Free"), "expected 'Free' header in output");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "a header and one filesystem:\n{stdout}");
     assert!(
-        stdout.contains("Total"),
-        "expected 'Total' header in output"
+        lines[0].starts_with("Filesystem") && lines[0].contains("1K-blocks"),
+        "{stdout}"
     );
+    assert!(lines[1].starts_with(&remote_path), "{stdout}");
 }
 
 #[test]

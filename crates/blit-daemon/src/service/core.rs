@@ -1,5 +1,5 @@
 use super::admin::{
-    delete_rel_paths, filesystem_stats_for_path, list_completions, sanitize_request_paths,
+    delete_rel_paths, filesystem_space_for_path, list_completions, sanitize_request_paths,
     split_completion_prefix, stream_disk_usage, stream_find_entries,
 };
 use super::util::{
@@ -14,11 +14,10 @@ pub use blit_core::generated::blit_server::BlitServer;
 use blit_core::generated::{
     daemon_event, ActiveTransfer, CancelJobRequest, CancelJobResponse, ClearRecentRequest,
     ClearRecentResponse, CompletionRequest, CompletionResponse, Counters, DaemonEvent, DaemonState,
-    DelegatedPullProgress, DelegatedPullRequest, DiskUsageEntry, DiskUsageRequest, FileInfo,
-    FilesystemStatsRequest, FilesystemStatsResponse, FindEntry, FindRequest, GetStateRequest,
-    ListModulesRequest, ListModulesResponse, ListRequest, ListResponse, ModuleInfo, PurgeRequest,
-    PurgeResponse, SubscribeRequest, TransferComplete, TransferError, TransferProgress,
-    TransferRecord, TransferStarted,
+    DelegatedPullProgress, DelegatedPullRequest, DfReply, DfRequest, DuReply, DuRequest, FileInfo,
+    FindEntry, FindRequest, GetStateRequest, ListModulesRequest, ListModulesResponse, ListRequest,
+    ListResponse, ModuleInfo, PurgeRequest, PurgeResponse, SubscribeRequest, TransferComplete,
+    TransferError, TransferProgress, TransferRecord, TransferStarted,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -354,7 +353,7 @@ pub(crate) fn build_transfer_finished_event(
 #[tonic::async_trait]
 impl Blit for BlitService {
     type FindStream = ReceiverStream<Result<FindEntry, Status>>;
-    type DiskUsageStream = ReceiverStream<Result<DiskUsageEntry, Status>>;
+    type DuStream = ReceiverStream<Result<DuReply, Status>>;
     type DelegatedPullStream = ReceiverStream<Result<DelegatedPullProgress, Status>>;
     type SubscribeStream =
         std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<DaemonEvent, Status>> + Send>>;
@@ -1140,34 +1139,29 @@ impl Blit for BlitService {
         }))
     }
 
-    async fn disk_usage(
-        &self,
-        request: Request<DiskUsageRequest>,
-    ) -> Result<Response<Self::DiskUsageStream>, Status> {
+    async fn du(&self, request: Request<DuRequest>) -> Result<Response<Self::DuStream>, Status> {
         let req = request.into_inner();
+        // AC-11: an asker of this daemon's own contract, or nothing is read.
+        blit_core::admin::same_build::check(req.contract_version)?;
         let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
         let start_rel = if req.start_path.trim().is_empty() {
             PathBuf::from(".")
         } else {
             resolve_relative_path(req.start_path.trim())?
         };
-
-        let max_depth = if req.max_depth == 0 {
-            None
-        } else {
-            Some(req.max_depth as usize)
+        let options = blit_core::disk_usage::UsageOptions {
+            all_files: req.all_files,
+            max_depth: req.max_depth,
         };
 
-        let (tx, rx): (
-            DiskUsageSender,
-            mpsc::Receiver<Result<DiskUsageEntry, Status>>,
-        ) = mpsc::channel(32);
+        let (tx, rx): (DiskUsageSender, mpsc::Receiver<Result<DuReply, Status>>) =
+            mpsc::channel(256);
 
         let module_root = module.path.clone();
         tokio::spawn(async move {
             let err_sender = tx.clone();
             let result = tokio::task::spawn_blocking(move || {
-                stream_disk_usage(module_root, start_rel, max_depth, &tx)
+                stream_disk_usage(module_root, start_rel, options, &tx)
             })
             .await;
 
@@ -1249,15 +1243,25 @@ impl Blit for BlitService {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
-    async fn filesystem_stats(
-        &self,
-        request: Request<FilesystemStatsRequest>,
-    ) -> Result<Response<FilesystemStatsResponse>, Status> {
+    async fn df(&self, request: Request<DfRequest>) -> Result<Response<DfReply>, Status> {
         let req = request.into_inner();
+        // AC-11: an asker of this daemon's own contract, or nothing is read.
+        blit_core::admin::same_build::check(req.contract_version)?;
         let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
-        let stats = filesystem_stats_for_path(&module.path)?;
-
-        Ok(Response::new(stats))
+        // AC-1: the path asked about, not the module it is in — a path on
+        // another mount below the module reports that mount.
+        let path = if req.path.trim().is_empty() {
+            module.path.clone()
+        } else {
+            let path = module.path.join(resolve_relative_path(req.path.trim())?);
+            blit_core::path_safety::verify_contained(&module.path, &path)
+                .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))?;
+            path
+        };
+        let reply = tokio::task::spawn_blocking(move || filesystem_space_for_path(&path))
+            .await
+            .map_err(|err| internal_err("df worker failed", err))??;
+        Ok(Response::new(reply))
     }
 }
 

@@ -487,8 +487,8 @@ impl blit_core::generated::blit_server::Blit for StallingTransferBlit {
     type FindStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::FindEntry, tonic::Status>,
     >;
-    type DiskUsageStream = tokio_stream::wrappers::ReceiverStream<
-        Result<blit_core::generated::DiskUsageEntry, tonic::Status>,
+    type DuStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::DuReply, tonic::Status>,
     >;
     type DelegatedPullStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DelegatedPullProgress, tonic::Status>,
@@ -569,17 +569,17 @@ impl blit_core::generated::blit_server::Blit for StallingTransferBlit {
         Err(tonic::Status::unimplemented("stalling fake source"))
     }
 
-    async fn disk_usage(
+    async fn du(
         &self,
-        _: tonic::Request<blit_core::generated::DiskUsageRequest>,
-    ) -> Result<tonic::Response<Self::DiskUsageStream>, tonic::Status> {
+        _: tonic::Request<blit_core::generated::DuRequest>,
+    ) -> Result<tonic::Response<Self::DuStream>, tonic::Status> {
         Err(tonic::Status::unimplemented("stalling fake source"))
     }
 
-    async fn filesystem_stats(
+    async fn df(
         &self,
-        _: tonic::Request<blit_core::generated::FilesystemStatsRequest>,
-    ) -> Result<tonic::Response<blit_core::generated::FilesystemStatsResponse>, tonic::Status> {
+        _: tonic::Request<blit_core::generated::DfRequest>,
+    ) -> Result<tonic::Response<blit_core::generated::DfReply>, tonic::Status> {
         Err(tonic::Status::unimplemented("stalling fake source"))
     }
 

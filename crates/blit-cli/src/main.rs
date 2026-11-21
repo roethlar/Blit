@@ -134,14 +134,8 @@ async fn run_cli(lifecycle_trace: &TransferLifecycleTrace) -> Result<ExitCode> {
             ls::run_ls(args).await?;
             ExitCode::SUCCESS
         }
-        Commands::Du(args) => {
-            du::run_du(args).await?;
-            ExitCode::SUCCESS
-        }
-        Commands::Df(args) => {
-            df::run_df(args).await?;
-            ExitCode::SUCCESS
-        }
+        Commands::Du(args) => du::run_du(args).await?,
+        Commands::Df(args) => df::run_df(args).await?,
         Commands::Rm(args) => {
             rm::run_rm(args).await?;
             ExitCode::SUCCESS

@@ -101,9 +101,27 @@ pub enum Commands {
     /// List directory entries (remote or local)
     #[command(alias = "list")]
     Ls(ListArgs),
-    /// Show disk usage for a remote path
+    /// Disk usage of a path on a daemon, as `du` reports it
+    ///
+    /// What the Unix `du` does, on the daemon's own disk and in one
+    /// request: one line per directory, deepest first and the path given
+    /// last, each SIZE<TAB>PATH with the size in 1K blocks of allocated
+    /// space (a file's length rounded up to 1K where the daemon runs on
+    /// Windows). A file with several hard links is counted once; a
+    /// symbolic link is never followed; a file given as the path prints
+    /// its own line. The options are du's — -a, -s, -d N (--max-depth=N),
+    /// -h — and any other is refused. An entry the daemon cannot read is
+    /// reported as du reports it and makes the exit status 1; the rest is
+    /// still printed.
     Du(DuArgs),
-    /// Show filesystem statistics for a remote module
+    /// Free space on the filesystem that holds a path on a daemon, as `df` reports it
+    ///
+    /// What the Unix `df -k` does for the path given, on the daemon's own
+    /// disk: the size, used and available space of the filesystem that
+    /// holds THAT path — a path below the module that sits on another
+    /// mount reports that mount — as `Filesystem 1K-blocks Used Available
+    /// Use%`, with the path as typed in the first column. -h prints
+    /// human-readable sizes; any other option is refused.
     Df(DfArgs),
     /// Remove a file or directory on a remote daemon
     Rm(RmArgs),
@@ -666,25 +684,55 @@ pub struct ListArgs {
     pub json: bool,
 }
 
+/// `du`, as the Unix command, run on the daemon's own disk
+/// (UTILITY_VERBS_LOCAL_PARITY slice 1). The options are `du`'s; any other
+/// is refused by name before anything is asked of the daemon. `-h` is
+/// `du`'s `-h`, so help is `--help` alone.
 #[derive(Args, Clone, Debug)]
+#[command(disable_help_flag = true)]
 pub struct DuArgs {
-    /// Remote path to check (e.g., server:/module/path)
+    /// Remote path to measure (e.g., server:/module/path)
     pub target: String,
-    /// Max depth to traverse (0 = unlimited)
-    #[arg(long)]
+    /// Print a line for every file, not only for directories
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+    /// Print only the total for the path given
+    #[arg(short = 's', long = "summarize")]
+    pub summarize: bool,
+    /// Print lines only for entries at most N levels below the path given
+    #[arg(short = 'd', long = "max-depth", value_name = "N")]
     pub max_depth: Option<u32>,
+    /// Print sizes in powers of 1024 (4.0K, 12M, 1.5G)
+    #[arg(short = 'h', long = "human-readable")]
+    pub human_readable: bool,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+    /// Print help
+    #[arg(long, action = clap::ArgAction::Help)]
+    pub help: Option<bool>,
 }
 
+/// `df`, as the Unix command, run on the daemon's own disk
+/// (UTILITY_VERBS_LOCAL_PARITY slice 1): the filesystem that holds the
+/// path given. `-h` is `df`'s `-h`, so help is `--help` alone.
 #[derive(Args, Clone, Debug)]
+#[command(disable_help_flag = true)]
 pub struct DfArgs {
-    /// Remote module to check (e.g., server:/module/)
-    pub remote: String,
+    /// Remote path whose filesystem to report (e.g., server:/module/path)
+    pub target: String,
+    /// Print sizes in powers of 1024 (16G, 254M)
+    #[arg(short = 'h', long = "human-readable")]
+    pub human_readable: bool,
+    /// Print sizes in 1K blocks (the default)
+    #[arg(short = 'k')]
+    pub kilobytes: bool,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+    /// Print help
+    #[arg(long, action = clap::ArgAction::Help)]
+    pub help: Option<bool>,
 }
 
 #[derive(Args, Clone, Debug)]

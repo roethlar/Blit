@@ -194,6 +194,36 @@ fn stale_destination_unimplemented_does_not_fall_back_to_relay() {
     assert_eq!(counters.cli_data_plane_outbound_bytes, 0);
 }
 
+/// UTILITY_VERBS_LOCAL_PARITY AC-11, a newer asker against a daemon of an
+/// earlier contract: that daemon does not serve `Du` or `Df` at all and
+/// answers "unimplemented". `blit du` and `blit df` report it as what it
+/// is — the two are different builds — naming the verb, and exit non-zero
+/// with nothing printed as an answer.
+#[test]
+fn du_and_df_against_a_daemon_too_old_to_know_them_are_refused_as_another_build() {
+    let work = tempdir().expect("tempdir");
+    let config_dir = work.path().join("cli-config");
+    fs::create_dir_all(&config_dir).expect("cli config");
+    let stale = spawn_fake_blit_server(UnimplementedBlit, "fake daemon of an earlier contract");
+    let target = format!("127.0.0.1:{}:/test/", stale.port);
+    for verb in ["du", "df"] {
+        let mut cmd = Command::new(common::cli_bin());
+        cmd.arg("--config-dir")
+            .arg(&config_dir)
+            .arg(verb)
+            .arg(&target);
+        let output = run_with_timeout(cmd, Duration::from_secs(20));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{verb}: {stderr}");
+        assert!(output.stdout.is_empty(), "{verb}: nothing is answered");
+        assert!(
+            stderr.contains(&format!("does not serve `{verb}`"))
+                && stderr.contains("another contract version"),
+            "{verb}: {stderr}"
+        );
+    }
+}
+
 #[test]
 fn source_refuses_destination_negotiation_does_not_fall_back_to_relay() {
     let ctx = DualDaemonContext::new(true);
@@ -290,8 +320,8 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
     type FindStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::FindEntry, tonic::Status>,
     >;
-    type DiskUsageStream = tokio_stream::wrappers::ReceiverStream<
-        Result<blit_core::generated::DiskUsageEntry, tonic::Status>,
+    type DuStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::DuReply, tonic::Status>,
     >;
     type DelegatedPullStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DelegatedPullProgress, tonic::Status>,
@@ -370,17 +400,17 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
 
-    async fn disk_usage(
+    async fn du(
         &self,
-        _: tonic::Request<blit_core::generated::DiskUsageRequest>,
-    ) -> Result<tonic::Response<Self::DiskUsageStream>, tonic::Status> {
+        _: tonic::Request<blit_core::generated::DuRequest>,
+    ) -> Result<tonic::Response<Self::DuStream>, tonic::Status> {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
 
-    async fn filesystem_stats(
+    async fn df(
         &self,
-        _: tonic::Request<blit_core::generated::FilesystemStatsRequest>,
-    ) -> Result<tonic::Response<blit_core::generated::FilesystemStatsResponse>, tonic::Status> {
+        _: tonic::Request<blit_core::generated::DfRequest>,
+    ) -> Result<tonic::Response<blit_core::generated::DfReply>, tonic::Status> {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
 
@@ -420,8 +450,8 @@ impl blit_core::generated::blit_server::Blit for RejectingTransferBlit {
     type FindStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::FindEntry, tonic::Status>,
     >;
-    type DiskUsageStream = tokio_stream::wrappers::ReceiverStream<
-        Result<blit_core::generated::DiskUsageEntry, tonic::Status>,
+    type DuStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::DuReply, tonic::Status>,
     >;
     type DelegatedPullStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DelegatedPullProgress, tonic::Status>,
@@ -516,19 +546,19 @@ impl blit_core::generated::blit_server::Blit for RejectingTransferBlit {
         ))
     }
 
-    async fn disk_usage(
+    async fn du(
         &self,
-        _: tonic::Request<blit_core::generated::DiskUsageRequest>,
-    ) -> Result<tonic::Response<Self::DiskUsageStream>, tonic::Status> {
+        _: tonic::Request<blit_core::generated::DuRequest>,
+    ) -> Result<tonic::Response<Self::DuStream>, tonic::Status> {
         Err(tonic::Status::unimplemented(
             "test only exercises pull_sync",
         ))
     }
 
-    async fn filesystem_stats(
+    async fn df(
         &self,
-        _: tonic::Request<blit_core::generated::FilesystemStatsRequest>,
-    ) -> Result<tonic::Response<blit_core::generated::FilesystemStatsResponse>, tonic::Status> {
+        _: tonic::Request<blit_core::generated::DfRequest>,
+    ) -> Result<tonic::Response<blit_core::generated::DfReply>, tonic::Status> {
         Err(tonic::Status::unimplemented(
             "test only exercises pull_sync",
         ))

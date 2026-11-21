@@ -11,6 +11,7 @@ pub mod deletion;
 pub mod diagnostics;
 pub mod dial;
 pub mod discover;
+pub mod disk_usage;
 pub mod display;
 pub mod endpoint;
 pub mod endpoints;

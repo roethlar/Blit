@@ -21,7 +21,7 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `files_from_unnamed`; `client::connect_with_timeout` and
 `connect_transfer_client` return a `BlitClient<client::BlitChannel>`
 (the channel behind `client::BoundedResponses`). The wire
-protocol is contract 12: a peer on any other contract version (every 0.1.x
+protocol is contract 13: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
 
@@ -118,7 +118,7 @@ part, and a job you can list, read, re-run and retry.
   be written the transfer still completes and the report says the log is
   incomplete.
 - A dry run or `--null` run is logged as what it planned, not as copies.
-- Wire protocol (contract 12): the job ID rides the session-open and
+- Wire protocol (contract 13): the job ID rides the session-open and
   delegated-pull requests; `GetJobLog` returns a daemon's log by ID; the
   finished-job record carries the failed-file count. In a filtered mirror,
   `ManifestPruned` tells the destination which source paths were excluded,
@@ -193,6 +193,51 @@ part, and a job you can list, read, re-run and retry.
   does not keep a destination-only `bSS`. This was listed as a known
   limitation; it is the rule, the same on every disk and the one rsync
   follows.
+
+### `du` and `df` behave like the commands they are named after
+
+**Behaviour change from 0.1.x.** The utility verbs exist so that a job on
+a server's files runs on the server's own disk, in one request, instead
+of paying a network filesystem's cost per file. From 1.0.0 each also
+behaves like the Unix command it is named after; `du` and `df` are the
+first two (`rm`, `find` and `ls` follow).
+
+- **`blit df HOST:/module/path`** reports the filesystem that holds THAT
+  path, asked of the operating system directly, as `df -k` prints it —
+  `Filesystem 1K-blocks Used Available Use%`, the path as typed in the
+  first column. It used to drop the path, look the module up in a list of
+  disks and take the longest mount-point match: a module on its own
+  filesystem could be reported with another disk's numbers. `-h` prints
+  human-readable sizes. `--json` gives `total_bytes`, `used_bytes` and
+  `available_bytes` (the old `free_bytes` could not say which it was).
+- **`blit du HOST:/module/path`** prints `du`'s lines: one per directory,
+  deepest first and the path given last, `SIZE<TAB>PATH` with each path
+  beginning with what was typed, sizes in 1K blocks of allocated space.
+  `-a` adds files, `-s` prints the total alone, `-d N` / `--max-depth=N`
+  limits the lines to N levels below the path given, `-h` prints
+  human-readable sizes. A file with several hard links is counted once.
+  It used to print a `PATH BYTES FILES DIRS` table with a row for every
+  file, the path given twice, byte lengths, and a depth counted from the
+  module's root. On Linux the output equals the system `du`'s for the same
+  tree and options.
+- A directory the daemon cannot read is reported in `du`'s own words, the
+  rest is still printed, and the exit status is 1. A name that is not
+  valid UTF-8 is printed by its own bytes. A symbolic link is counted as
+  a link and never followed.
+- `-h` on these two commands is the commands' own `-h`; help is `--help`.
+  An option neither command has is refused before anything is asked of a
+  daemon.
+- The two requests are new on the wire (`Du`, `Df`) and compare the
+  contract version before reading anything, so a client and a daemon of
+  different builds refuse each other here as they do for a transfer; the
+  old `DiskUsage` and `FilesystemStats` requests are gone. The daemon no
+  longer depends on the `sysinfo` library.
+- For a program built on `blit-core`: `admin::du::stream` now takes
+  `UsageOptions` and yields `DuEvent` rows and failures, each with an
+  `EntryPath` that keeps a name's exact bytes; `admin::df::query` takes the
+  path and returns `FilesystemSpace { total_bytes, used_bytes,
+  available_bytes }`; the walk and the size arithmetic are public as
+  `blit_core::disk_usage`.
 
 ### Fixes
 

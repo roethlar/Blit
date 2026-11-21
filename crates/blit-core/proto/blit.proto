@@ -30,11 +30,15 @@ service Blit {
   // Recursively finds files/directories starting at a module path.
   rpc Find(FindRequest) returns (stream FindEntry);
 
-  // Summarises disk usage for a subtree (du-style).
-  rpc DiskUsage(DiskUsageRequest) returns (stream DiskUsageEntry);
+  // `du`: the space allocated under a path, as the Unix command reports
+  // it (contract 10, UTILITY_VERBS_LOCAL_PARITY slice 1). It replaces
+  // `DiskUsage`: a request name a daemon of an earlier contract does not
+  // serve, carrying the contract its asker speaks.
+  rpc Du(DuRequest) returns (stream DuReply);
 
-  // Reports module/storage capacity information (df-style).
-  rpc FilesystemStats(FilesystemStatsRequest) returns (FilesystemStatsResponse);
+  // `df`: the filesystem that holds a path, as the Unix command reports
+  // it (contract 10). It replaces `FilesystemStats`, on the same terms.
+  rpc Df(DfRequest) returns (DfReply);
 
   // Destination-side delegated initiator. The CLI calls this on the
   // destination daemon when both endpoints in a `blit copy` are
@@ -389,28 +393,69 @@ message FindEntry {
   int64 mtime_seconds = 4;
 }
 
-message DiskUsageRequest {
-  string module = 1;
-  string start_path = 2;
-  uint32 max_depth = 3;
+// The utility requests (`Du`, `Df`, and the rest as their slices land) are
+// not transfer sessions, so no HELLO compares the two builds for them.
+// Each therefore says which contract its asker speaks, and the daemon
+// compares before it reads or changes anything (UTILITY_VERBS_LOCAL_PARITY
+// AC-11). A daemon of an earlier contract does not serve these request
+// names at all and answers "unimplemented".
+
+message DuRequest {
+  uint32 contract_version = 1;
+  string module = 2;
+  // The path below the module to measure; empty is the module itself.
+  string start_path = 3;
+  // `-a`: a row for every file as well as every directory.
+  bool all_files = 4;
+  // `-d N`: rows only for entries at most N levels below the start; 0 is
+  // `-s`. Unset: every level. Totals count everything either way.
+  optional uint32 max_depth = 5;
 }
 
-message DiskUsageEntry {
+message DuReply {
+  oneof reply {
+    DuRow row = 1;
+    DuFailure failure = 2;
+  }
+}
+
+// One line of `du`: an entry after everything below it, the start last.
+message DuRow {
+  // The entry's path below the start, `/`-separated; empty for the start.
   string relative_path = 1;
-  uint64 byte_total = 2;
-  uint64 file_count = 3;
-  uint64 dir_count = 4;
+  // The same path as its exact bytes, only when it is not valid UTF-8.
+  optional bytes raw_relative_path = 2;
+  // Space allocated to the entry and everything below it. A file with
+  // several hard links is counted once; a symbolic link is never followed.
+  uint64 allocated_bytes = 3;
 }
 
-message FilesystemStatsRequest {
-  string module = 1;
+// An entry `du` could not read. The walk goes on; the asker exits 1.
+message DuFailure {
+  string relative_path = 1;
+  optional bytes raw_relative_path = 2;
+  // What could not be done: "cannot read directory" or "cannot access".
+  string action = 3;
+  // Why, in the operating system's words ("Permission denied").
+  string reason = 4;
 }
 
-message FilesystemStatsResponse {
-  string module = 1;
-  uint64 total_bytes = 2;
-  uint64 used_bytes = 3;
-  uint64 free_bytes = 4;
+message DfRequest {
+  uint32 contract_version = 1;
+  string module = 2;
+  // The path below the module whose filesystem is wanted; empty is the
+  // module itself. A path on another mount reports that mount.
+  string path = 3;
+}
+
+// The filesystem that holds the path, as `df` computes it.
+message DfReply {
+  uint64 total_bytes = 1;
+  // The size less every free block, whoever may use it.
+  uint64 used_bytes = 2;
+  // What an ordinary user may still fill (less than the free space where
+  // the filesystem keeps a reserve).
+  uint64 available_bytes = 3;
 }
 
 // Removed 2026-05-13: AuthRequest / AuthResponse — see BlitAuth note above.

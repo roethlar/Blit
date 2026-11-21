@@ -128,6 +128,27 @@ the source side too, and adds a retry pass.
   literal name, and an entry the source's walk left out, are still kept
   in the destination's own spelling.)
 
+## `du` and `df` on a daemon behave like `du` and `df`
+
+The utility verbs run on the server's own disk in one request, so a job
+on a server's files never pays a network filesystem's per-file cost.
+From this release each also behaves like the Unix command it is named
+after. **This changes their output from 0.1.x.**
+
+- **`blit df HOST:/module/path`** reports the filesystem that holds that
+  path, in `df -k`'s shape with the path as typed in the first column;
+  `-h` for human-readable sizes. Before, the path was dropped and a module
+  on its own filesystem could be shown another disk's numbers.
+- **`blit du HOST:/module/path`** prints what `du` prints: a line per
+  directory, deepest first and the path given last, `SIZE<TAB>PATH` in 1K
+  blocks of allocated space; `-a`, `-s`, `-d N` and `-h` as in `du`; a
+  hard-linked file counted once. On Linux the output equals the system
+  `du`'s. Before, it printed a table with a row for every file and byte
+  lengths, and counted depth from the module's root.
+- An unreadable directory is reported in `du`'s words and makes the exit
+  status 1 while the rest is printed. `-h` is the commands' own; help is
+  `--help`.
+
 ## Filenames that are not valid UTF-8 transfer
 
 A filename that is valid on Linux (ext4 accepts any bytes) but not valid
@@ -182,7 +203,7 @@ carry such names by their exact bytes.
 
 ## Protocol and compatibility
 
-- **Wire contract 12.** A session is refused at open, with a plain
+- **Wire contract 13.** A session is refused at open, with a plain
   message, when the two ends' protocol contract versions differ (every
   0.1.x release is another contract); upgrade both ends. Two 1.0.0 builds
   from any channel talk to each other. Both executables report

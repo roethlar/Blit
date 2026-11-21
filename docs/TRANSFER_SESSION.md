@@ -2,7 +2,8 @@
 
 **Status**: Active (contract; the session is the ONLY remote transfer
 path since cutover, otp-10c-2)
-**Contract version**: 12 (a listed name travels as its components joined
+**Contract version**: 13 (the utility requests `Du` and `Df`, which
+compare the contract themselves; v12 = a listed name travels as its components joined
 by `/`; the lines of a list that name nothing travel apart,
 `FilterSpec.files_from_unnamed`; v11 = under a list of exact names a
 mirror deletes no directory the list does not name — a rule, no field;

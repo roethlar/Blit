@@ -1,0 +1,18 @@
+tree: tree (2,000 directories, 200,000 empty files); best of 5; LC_ALL=C.UTF-8
+--- the system commands, in the tree's parent
+du -s tree                                                    129.9 ms         1 lines           7 bytes
+du tree                                                       125.1 ms      2001 lines       26007 bytes
+du -a tree                                                    199.2 ms    202001 lines     3626007 bytes
+df -k tree                                                      0.4 ms         2 lines         112 bytes
+--- blit at the base (before this slice)
+blit du HOST:/bench/                                          882.1 ms    202002 lines    14544144 bytes
+blit du --max-depth 1 HOST:/bench/                            266.3 ms      2002 lines      144144 bytes
+blit df HOST:/bench/                                            2.1 ms         4 lines         244 bytes
+--- blit with this slice
+blit du -s HOST:/bench/                                       154.4 ms         1 lines          26 bytes
+    lines 1 vs 1; sizes equal as multisets: True; byte-identical after renaming the operand: True
+blit du HOST:/bench/                                          154.6 ms      2001 lines       62026 bytes
+    lines 2001 vs 2001; sizes equal as multisets: True; byte-identical after renaming the operand: True
+blit du -a HOST:/bench/                                       232.9 ms    202001 lines     7262026 bytes
+    lines 202001 vs 202001; sizes equal as multisets: True; byte-identical after renaming the operand: True
+blit df HOST:/bench/                                            1.6 ms         2 lines         114 bytes

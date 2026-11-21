@@ -1,11 +1,10 @@
 use super::{DiskUsageSender, FindSender};
+use blit_core::disk_usage::{disk_usage, os_reason, Stopped, UsageEnd, UsageEvent, UsageOptions};
 use blit_core::enumeration::{EntryKind, FileEnumerator};
 use blit_core::fs_enum::FileFilter;
-use blit_core::generated::{DiskUsageEntry, FilesystemStatsResponse, FindEntry};
-use std::collections::HashMap;
+use blit_core::generated::{du_reply, DfReply, DuFailure, DuReply, DuRow, FindEntry};
 use std::fs;
 use std::path::{Path, PathBuf};
-use sysinfo::Disks;
 use tokio::task;
 use tonic::Status;
 
@@ -162,149 +161,70 @@ pub(crate) fn list_completions(
     Ok(results)
 }
 
-#[derive(Default)]
-struct UsageAccum {
-    bytes: u64,
-    files: u64,
-    dirs: u64,
-}
-
+/// `du` over `start_rel` below the module
+/// (`docs/plan/UTILITY_VERBS_LOCAL_PARITY.md` slice 1): the walk is
+/// `blit_core::disk_usage`, on this daemon's own disk; every line and
+/// every unreadable entry goes to the asker as it is produced.
+///
+/// A start that cannot be read at all is one failure line for the start
+/// itself, not a failed request: the asker prints it in `du`'s words
+/// (`cannot access 'PATH': No such file or directory`) and exits 1, as
+/// for any other entry.
 pub(crate) fn stream_disk_usage(
     module_root: PathBuf,
     start_rel: PathBuf,
-    max_depth: Option<usize>,
+    options: UsageOptions,
     sender: &DiskUsageSender,
 ) -> Result<(), Status> {
     let start_abs = module_root.join(&start_rel);
-    // F2: containment check before any filesystem operation. The
-    // enumerator below has follow_symlinks=false so it won't escape
-    // during traversal, but the start point itself can be a symlink
+    // F2: containment check before any filesystem operation. The walk
+    // never follows a link, but the start point itself can be a symlink
     // that points outside the module root. `module_root` here is the
     // canonical root — du callers don't mutate it.
     blit_core::path_safety::verify_contained(&module_root, &start_abs)
         .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))?;
-    if !start_abs.exists() {
-        return Err(Status::not_found(format!(
-            "start path not found for disk usage: {}",
-            request_path_to_posix(&start_rel)
-        )));
-    }
 
-    let mut accum: HashMap<PathBuf, UsageAccum> = HashMap::new();
-    accum.entry(PathBuf::from(".")).or_default();
-
-    let add_file = |accum: &mut HashMap<PathBuf, UsageAccum>,
-                    rel: &Path,
-                    size: u64,
-                    max_depth: Option<usize>| {
-        for (depth, prefix) in prefix_paths(rel).into_iter().enumerate() {
-            if let Some(max) = max_depth {
-                if depth > max {
-                    break;
-                }
-            }
-            let entry = accum.entry(prefix).or_default();
-            entry.bytes += size;
-            entry.files += 1;
+    let send = |reply: du_reply::Reply| {
+        sender
+            .blocking_send(Ok(DuReply { reply: Some(reply) }))
+            .map_err(|_| Stopped)
+    };
+    let failure = |relative: &Path, action: &str, error: &std::io::Error| {
+        du_reply::Reply::Failure(DuFailure {
+            relative_path: wire_path(relative),
+            raw_relative_path: blit_core::raw_name::raw_relative_bytes(relative),
+            action: action.to_string(),
+            reason: os_reason(error),
+        })
+    };
+    let mut emit = |event: UsageEvent| match event {
+        UsageEvent::Row(row) => send(du_reply::Reply::Row(DuRow {
+            relative_path: wire_path(&row.relative_path),
+            raw_relative_path: blit_core::raw_name::raw_relative_bytes(&row.relative_path),
+            allocated_bytes: row.allocated_bytes,
+        })),
+        UsageEvent::Failure(failed) => {
+            send(failure(&failed.relative_path, failed.action, &failed.error))
         }
     };
-
-    let add_dir =
-        |accum: &mut HashMap<PathBuf, UsageAccum>, rel: &Path, max_depth: Option<usize>| {
-            for (depth, prefix) in prefix_paths(rel).into_iter().enumerate() {
-                if let Some(max) = max_depth {
-                    if depth > max {
-                        break;
-                    }
-                }
-                let entry = accum.entry(prefix).or_default();
-                entry.dirs += 1;
-            }
-        };
-
-    let metadata = start_abs
-        .metadata()
-        .map_err(|err| io_to_status(format!("stat {}", start_abs.display()), err))?;
-
-    if start_abs.is_file() {
-        add_file(&mut accum, &start_rel, metadata.len(), max_depth);
-    } else {
-        if start_rel != Path::new(".") {
-            add_dir(&mut accum, &start_rel, max_depth);
+    let closed = || response_channel_closed("sending disk usage result");
+    match disk_usage(&start_abs, options, &mut emit) {
+        Ok(()) => Ok(()),
+        Err(UsageEnd::Stopped(Stopped)) => Err(closed()),
+        Err(UsageEnd::Start(error)) => {
+            send(failure(Path::new(""), "cannot access", &error)).map_err(|Stopped| closed())
         }
-        let enumerator = FileEnumerator::new(FileFilter::default());
-        enumerator
-            .enumerate_local_streaming(&start_abs, |entry| {
-                let rel_from_root = if start_rel == Path::new(".") {
-                    entry.relative_path.clone()
-                } else {
-                    let mut combined = start_rel.clone();
-                    if entry.relative_path != Path::new(".") {
-                        combined.push(&entry.relative_path);
-                    }
-                    combined
-                };
-
-                match entry.kind {
-                    EntryKind::Directory => add_dir(&mut accum, &rel_from_root, max_depth),
-                    EntryKind::File { size } => {
-                        add_file(&mut accum, &rel_from_root, size, max_depth)
-                    }
-                    EntryKind::Symlink { .. } => {}
-                }
-                Ok(())
-            })
-            .map_err(|err| internal_err("disk usage enumeration failed", err))?;
     }
-
-    let mut entries: Vec<(usize, PathBuf, UsageAccum)> = accum
-        .into_iter()
-        .map(|(path, usage)| {
-            let depth = if path == Path::new(".") {
-                0
-            } else {
-                path.components().count()
-            };
-            (depth, path, usage)
-        })
-        .collect();
-
-    entries.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| request_path_to_posix(&a.1).cmp(&request_path_to_posix(&b.1)))
-    });
-
-    for (depth, path, usage) in entries {
-        if let Some(max) = max_depth {
-            if depth > max {
-                continue;
-            }
-        }
-        let entry = DiskUsageEntry {
-            relative_path: request_path_to_posix(&path),
-            byte_total: usage.bytes,
-            file_count: usage.files,
-            dir_count: usage.dirs,
-        };
-        sender
-            .blocking_send(Ok(entry))
-            .map_err(|_| response_channel_closed("sending disk usage result"))?;
-    }
-
-    Ok(())
 }
 
-fn prefix_paths(rel: &Path) -> Vec<PathBuf> {
-    if rel == Path::new(".") {
-        return vec![PathBuf::from(".")];
+/// A path below the start as it goes to the asker: `/`-separated text,
+/// empty for the start itself.
+fn wire_path(relative: &Path) -> String {
+    if relative.as_os_str().is_empty() {
+        String::new()
+    } else {
+        request_path_to_posix(relative)
     }
-    let mut prefixes = vec![PathBuf::from(".")];
-    let mut current = PathBuf::new();
-    for component in rel.components() {
-        current.push(component.as_os_str());
-        prefixes.push(current.clone());
-    }
-    prefixes
 }
 
 pub(crate) fn stream_find_entries(
@@ -437,89 +357,77 @@ pub(crate) fn stream_find_entries(
     Ok(())
 }
 
-pub(crate) fn filesystem_stats_for_path(path: &Path) -> Result<FilesystemStatsResponse, Status> {
-    let canonical = fs::canonicalize(path).map_err(|err| {
-        io_to_status(
-            format!("failed to resolve filesystem stats path {}", path.display()),
-            err,
-        )
-    })?;
-
-    // On Windows, fs::canonicalize returns extended-length paths with \\?\ prefix,
-    // but sysinfo::Disks returns mount points without this prefix. Strip it for comparison.
-    #[cfg(windows)]
-    let canonical = {
-        let s = canonical.to_string_lossy();
-        if let Some(stripped) = s.strip_prefix(r"\\?\") {
-            PathBuf::from(stripped)
-        } else {
-            canonical
-        }
-    };
-
-    let disks = Disks::new_with_refreshed_list();
-
-    let mut best_match = None;
-    let mut best_len = 0usize;
-    for disk in disks.iter() {
-        let mount = disk.mount_point();
-        if canonical.starts_with(mount) {
-            let depth = mount.components().count();
-            if depth >= best_len {
-                best_len = depth;
-                best_match = Some(disk);
-            }
+/// `df` for `path` (`docs/plan/UTILITY_VERBS_LOCAL_PARITY.md` slice 1):
+/// the operating system is asked about the filesystem that holds THIS
+/// path. It once matched the path against a list of mounts and took the
+/// longest match — a filesystem that list did not hold fell through to
+/// the mount above it, and a module on a 16 GiB filesystem was reported
+/// as another disk's 1.8 TiB.
+///
+/// A failure crosses with the operating system's words alone
+/// (`No such file or directory`): the asker prints them after the path
+/// it was given, as `df` does, and this daemon's own path stays here.
+pub(crate) fn filesystem_space_for_path(path: &Path) -> Result<DfReply, Status> {
+    match blit_core::disk_usage::filesystem_space(path) {
+        Ok(space) => Ok(DfReply {
+            total_bytes: space.total_bytes,
+            used_bytes: space.used_bytes,
+            available_bytes: space.available_bytes,
+        }),
+        Err(error) => {
+            let reason = os_reason(&error);
+            Err(match error.kind() {
+                std::io::ErrorKind::NotFound => Status::not_found(reason),
+                std::io::ErrorKind::PermissionDenied => Status::permission_denied(reason),
+                _ => Status::internal(reason),
+            })
         }
     }
-
-    let disk = best_match.ok_or_else(|| {
-        Status::internal(format!(
-            "no filesystem information available for {}",
-            path.display()
-        ))
-    })?;
-
-    Ok(FilesystemStatsResponse {
-        module: request_path_to_posix(path),
-        total_bytes: disk.total_space(),
-        used_bytes: disk.total_space().saturating_sub(disk.available_space()),
-        free_bytes: disk.available_space(),
-    })
 }
 
 #[cfg(test)]
-mod disk_usage_depth_tests {
-    //! d-41 R2: pins the `stream_disk_usage` depth contract the
-    //! TUI's F3 `u` hotkey relies on. The TUI requests a bounded
-    //! depth (`main::F3_DU_MAX_DEPTH = 1`) so a single Stats-line
-    //! aggregate doesn't pull the full descendant stream over
-    //! gRPC. This test fails if `max_depth = Some(1)` ever stops
-    //! bounding the emitted rows, or if the root entry stops
-    //! carrying the complete subtree total.
+mod disk_usage_tests {
+    //! The daemon's half of `du` (UTILITY_VERBS_LOCAL_PARITY slice 1): what
+    //! it SENDS. The walk itself is guarded in `blit_core::disk_usage`.
 
     use super::*;
-    use blit_core::generated::DiskUsageEntry;
     use std::fs;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
-    use tonic::Status;
 
-    #[test]
-    fn depth_one_bounds_stream_yet_root_total_is_complete() {
+    /// Everything `stream_disk_usage` sends for `start` under `root`.
+    fn sent(root: &Path, start: &str, options: UsageOptions) -> Vec<du_reply::Reply> {
+        // Drain on this thread while a worker sends: both ends block.
+        let (tx, mut rx) = mpsc::channel::<Result<DuReply, Status>>(4096);
+        let (module_root, start_rel) = (root.to_path_buf(), PathBuf::from(start));
+        let worker =
+            std::thread::spawn(move || stream_disk_usage(module_root, start_rel, options, &tx));
+        let mut replies = Vec::new();
+        while let Some(item) = rx.blocking_recv() {
+            replies.push(item.expect("a reply").reply.expect("a row or a failure"));
+        }
+        worker.join().unwrap().expect("the stream ends well");
+        replies
+    }
+
+    fn rows(replies: &[du_reply::Reply]) -> Vec<(String, u64)> {
+        replies
+            .iter()
+            .filter_map(|reply| match reply {
+                du_reply::Reply::Row(row) => Some((row.relative_path.clone(), row.allocated_bytes)),
+                du_reply::Reply::Failure(_) => None,
+            })
+            .collect()
+    }
+
+    /// 3 folders, each holding files 3 levels deep: 180 files.
+    fn tree() -> (tempfile::TempDir, PathBuf) {
         let tmp = tempdir().unwrap();
         // Canonicalize: on macOS the temp dir is under a /var →
-        // /private/var symlink, and `stream_disk_usage`'s
-        // containment check compares the canonical start path
-        // against `module_root`. The real daemon always passes a
-        // canonical module root.
+        // /private/var symlink, and the containment check compares the
+        // canonical start path against the module root. The real daemon
+        // always passes a canonical module root.
         let root = fs::canonicalize(tmp.path()).unwrap();
-
-        // 3 immediate child dirs, each holding files nested up to
-        // 3 levels deep. ~180 files / many descendant paths — an
-        // unbounded (depth 0 → None) query would stream a row for
-        // each. A depth-1 query must stream only root + the 3
-        // immediate children.
-        let mut total_files = 0u64;
         for child_name in ["alpha", "beta", "gamma"] {
             let child = root.join(child_name);
             fs::create_dir_all(child.join("deep/deeper")).unwrap();
@@ -531,90 +439,100 @@ mod disk_usage_depth_tests {
                     [0u8; 100],
                 )
                 .unwrap();
-                total_files += 3;
             }
         }
-
-        // Drain on a worker thread so `blocking_send` inside
-        // `stream_disk_usage` always has a receiver (no runtime
-        // needed — both ends are blocking).
-        let (tx, mut rx) = mpsc::channel::<Result<DiskUsageEntry, Status>>(4096);
-        let module_root = root.clone();
-        let handle = std::thread::spawn(move || {
-            stream_disk_usage(module_root, PathBuf::from("."), Some(1), &tx)
-        });
-        let mut entries = Vec::new();
-        while let Some(item) = rx.blocking_recv() {
-            entries.push(item.expect("du entry"));
-        }
-        handle.join().unwrap().expect("stream_disk_usage ok");
-
-        // Bounded: root + 3 immediate children = 4 rows, NOT one
-        // per descendant path (~180+).
-        assert_eq!(
-            entries.len(),
-            4,
-            "depth=1 must bound the stream to root + immediate children; got {} rows: {:?}",
-            entries.len(),
-            entries
-                .iter()
-                .map(|e| e.relative_path.clone())
-                .collect::<Vec<_>>(),
-        );
-
-        // The root aggregate (largest byte_total) still reflects
-        // the COMPLETE subtree despite the depth cap.
-        let root_entry = entries
-            .iter()
-            .max_by_key(|e| e.byte_total)
-            .expect("at least one entry");
-        assert_eq!(
-            root_entry.file_count, total_files,
-            "root must count every descendant file"
-        );
-        assert_eq!(
-            root_entry.byte_total,
-            total_files * 100,
-            "root must sum every descendant byte"
-        );
+        (tmp, root)
     }
 
+    /// AC-7: `du` without `-a` sends NO file rows — a row is a line that
+    /// will be printed, and nothing else crosses. 180 files, 10 rows: the
+    /// module, its 3 folders and their 6 sub-folders, the start LAST and
+    /// carrying everything. With `-a`, the 180 files are rows too.
     #[test]
-    fn depth_zero_is_unbounded_streaming_every_descendant() {
-        // Pins WHY the TUI must not request depth 0: the daemon
-        // (core.rs) maps request max_depth==0 to `None`, and this
-        // helper treats `None` as unbounded — every prefix path
-        // is emitted. This is the behavior d-41 R1 accidentally
-        // triggered.
-        let tmp = tempdir().unwrap();
-        // Canonicalize: on macOS the temp dir is under a /var →
-        // /private/var symlink, and `stream_disk_usage`'s
-        // containment check compares the canonical start path
-        // against `module_root`. The real daemon always passes a
-        // canonical module root.
-        let root = fs::canonicalize(tmp.path()).unwrap();
-        let child = root.join("alpha");
-        fs::create_dir_all(child.join("deep")).unwrap();
-        fs::write(child.join("a.bin"), [0u8; 10]).unwrap();
-        fs::write(child.join("deep/b.bin"), [0u8; 10]).unwrap();
-
-        let (tx, mut rx) = mpsc::channel::<Result<DiskUsageEntry, Status>>(4096);
-        let module_root = root.clone();
-        let handle = std::thread::spawn(move || {
-            stream_disk_usage(module_root, PathBuf::from("."), None, &tx)
-        });
-        let mut paths = Vec::new();
-        while let Some(item) = rx.blocking_recv() {
-            paths.push(item.expect("entry").relative_path);
-        }
-        handle.join().unwrap().expect("ok");
-
-        // Unbounded emits root + alpha + alpha/deep (every prefix),
-        // i.e. strictly more than the depth-1 root+children bound.
+    fn du_sends_a_row_for_each_line_it_prints_and_no_other() {
+        let (_tmp, root) = tree();
+        let every_level = UsageOptions::default();
+        let sent_rows = rows(&sent(&root, ".", every_level));
+        assert_eq!(sent_rows.len(), 10, "{sent_rows:?}");
         assert!(
-            paths.len() > 2,
-            "unbounded (None) must stream nested descendant paths; got {paths:?}"
+            sent_rows.iter().all(|(path, _)| !path.ends_with(".bin")),
+            "no file row without -a: {sent_rows:?}"
         );
+        let (start, total) = sent_rows.last().unwrap();
+        assert_eq!(
+            start, "",
+            "the start is the last row, with no path of its own"
+        );
+        assert!(
+            sent_rows.iter().all(|(_, bytes)| bytes <= total),
+            "the start carries every entry: {sent_rows:?}"
+        );
+        // An entry after everything below it.
+        let at = |path: &str| sent_rows.iter().position(|(p, _)| p == path).unwrap();
+        assert!(at("alpha/deep/deeper") < at("alpha/deep") && at("alpha/deep") < at("alpha"));
+
+        let all = rows(&sent(
+            &root,
+            ".",
+            UsageOptions {
+                all_files: true,
+                max_depth: None,
+            },
+        ));
+        assert_eq!(all.len(), 190, "10 directories and 180 files");
+    }
+
+    /// AC-2: `-d N` counts from the START path, not from the module, and
+    /// bounds the rows without changing a total. `-d 1` under `alpha` is
+    /// `alpha/deep` and `alpha` itself — the old request counted from the
+    /// module's root, so a depth of 1 on a sub-folder printed only that
+    /// folder — and `-d 0` (`-s`) is the start alone.
+    #[test]
+    fn du_depth_counts_from_the_start_and_bounds_rows_not_totals() {
+        let (_tmp, root) = tree();
+        let unbounded = rows(&sent(&root, "alpha", UsageOptions::default()));
+        let total = unbounded.last().unwrap().1;
+        let paths = |replies: &[(String, u64)]| -> Vec<String> {
+            replies.iter().map(|(path, _)| path.clone()).collect()
+        };
+        assert_eq!(paths(&unbounded), ["deep/deeper", "deep", ""]);
+
+        let depth = |max| UsageOptions {
+            all_files: false,
+            max_depth: Some(max),
+        };
+        let one = rows(&sent(&root, "alpha", depth(1)));
+        assert_eq!(paths(&one), ["deep", ""]);
+        assert_eq!(one.last().unwrap().1, total, "a bound changes no total");
+        let summary = rows(&sent(&root, "alpha", depth(0)));
+        assert_eq!(summary, [(String::new(), total)]);
+        let module = rows(&sent(&root, ".", depth(1)));
+        assert_eq!(module.len(), 4, "the module and its 3 folders: {module:?}");
+    }
+
+    /// AC-2, AC-12: a file given as the start is its own row; a start that
+    /// does not exist is one failure for the start, in `du`'s words, and
+    /// the stream still ends well.
+    #[test]
+    fn du_answers_for_a_file_and_for_a_start_that_is_not_there() {
+        let (_tmp, root) = tree();
+        let file = sent(&root, "alpha/f0.bin", UsageOptions::default());
+        assert_eq!(rows(&file).len(), 1);
+        assert_eq!(rows(&file)[0].0, "");
+
+        let missing = sent(&root, "no-such-entry", UsageOptions::default());
+        match missing.as_slice() {
+            [du_reply::Reply::Failure(failure)] => {
+                assert_eq!(failure.relative_path, "");
+                assert_eq!(failure.action, "cannot access");
+                assert!(
+                    !failure.reason.contains("os error") && !failure.reason.is_empty(),
+                    "the system's words alone: {}",
+                    failure.reason
+                );
+            }
+            other => panic!("one failure for the start, got {other:?}"),
+        }
     }
 }
 
@@ -633,9 +551,18 @@ mod status_mapping_tests {
             list_completions(&missing, "", "", true, true).expect_err("missing completion root");
         assert_eq!(completion_error.code(), Code::NotFound);
 
-        let stats_error =
-            filesystem_stats_for_path(&missing).expect_err("missing filesystem stats root");
-        assert_eq!(stats_error.code(), Code::NotFound);
+        let space_error =
+            filesystem_space_for_path(&missing).expect_err("a path that is not there");
+        assert_eq!(space_error.code(), Code::NotFound);
+        assert!(
+            !space_error.message().contains(&*missing.to_string_lossy())
+                && !space_error.message().contains("os error"),
+            "the system's words alone, and no path of this daemon's: {}",
+            space_error.message()
+        );
+        // The filesystem that holds a path that IS there has a size.
+        let space = filesystem_space_for_path(temp.path()).expect("the temp folder's filesystem");
+        assert!(space.total_bytes > 0 && space.used_bytes <= space.total_bytes);
     }
 
     #[test]
@@ -650,7 +577,7 @@ mod status_mapping_tests {
         let disk_error = stream_disk_usage(
             module_root.clone(),
             PathBuf::from("entry"),
-            None,
+            UsageOptions::default(),
             &disk_sender,
         )
         .expect_err("closed disk-usage stream");

@@ -1,64 +1,111 @@
-//! `du` — disk usage for a remote subtree (server-streaming RPC).
+//! `du` — the space allocated under a path on a daemon, streamed line by
+//! line (`docs/plan/UTILITY_VERBS_LOCAL_PARITY.md` slice 1).
 //!
-//! Moved from `crates/blit-cli/src/du.rs` in A.0. The streaming
-//! shape is preserved via a callback so a TUI can plug an event-
-//! channel forwarder while the CLI prints inline. Caller handles
-//! all formatting.
+//! The daemon walks its own disk and sends only the lines that will be
+//! printed, in `du`'s order: an entry after everything below it, the start
+//! last. This module speaks gRPC; a front end formats.
 
-use crate::generated::DiskUsageRequest;
+use crate::generated::{du_reply, DuRequest};
 use crate::remote::RemoteEndpoint;
 use eyre::Result;
-use serde::Serialize;
 
-/// One row of the streamed disk-usage report. JSON field names
-/// match the pre-A.0 CLI `--json` output exactly (`bytes` /
-/// `files` / `dirs`); A.0 is no-behavior-change.
-#[derive(Debug, Clone, Serialize)]
-pub struct DiskUsageEntry {
-    pub path: String,
-    pub bytes: u64,
-    pub files: u64,
-    pub dirs: u64,
+pub use crate::disk_usage::UsageOptions;
+
+/// One thing the daemon reported, in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DuEvent {
+    /// A line: the space allocated to an entry and everything below it.
+    Row {
+        path: EntryPath,
+        allocated_bytes: u64,
+    },
+    /// An entry the daemon could not read. Its walk went on; the command
+    /// that asked exits 1, as `du` does.
+    Failure {
+        path: EntryPath,
+        /// `cannot read directory` or `cannot access`.
+        action: String,
+        /// The operating system's words: `Permission denied`.
+        reason: String,
+    },
 }
 
-/// Stream disk-usage entries from `remote`, invoking `on_entry`
-/// per row. The closure decides what to do with each entry; the
-/// CLI's text mode prints, the CLI's JSON mode collects into a
-/// vec, the TUI forwards to an event channel.
+/// An entry's path below the start (`/`-separated, empty for the start
+/// itself), as text and — when the name is not valid UTF-8 — as the exact
+/// bytes the daemon's disk holds, so what is printed is the real name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryPath {
+    pub text: String,
+    pub raw: Option<Vec<u8>>,
+}
+
+impl EntryPath {
+    /// The path's bytes: the exact ones when it has them, its text's
+    /// otherwise.
+    pub fn bytes(&self) -> &[u8] {
+        self.raw.as_deref().unwrap_or(self.text.as_bytes())
+    }
+
+    /// Whether this is the start itself.
+    pub fn is_start(&self) -> bool {
+        self.bytes().is_empty()
+    }
+}
+
+/// Run `du` on `remote`'s daemon over `start_path` below `module`,
+/// handing each line and each failure to `on_event` as it arrives. The
+/// daemon answers only an asker of its own contract
+/// ([`super::same_build`]).
 pub async fn stream<F>(
     remote: &RemoteEndpoint,
     module: String,
     start_path: String,
-    max_depth: u32,
-    mut on_entry: F,
+    options: UsageOptions,
+    mut on_event: F,
 ) -> Result<()>
 where
-    F: FnMut(DiskUsageEntry) -> Result<()>,
+    F: FnMut(DuEvent) -> Result<()>,
 {
     let uri = remote.control_plane_uri();
     let mut client = crate::client::connect_with_timeout(uri.clone()).await?;
 
     let mut stream = client
-        .disk_usage(DiskUsageRequest {
+        .du(DuRequest {
+            contract_version: crate::transfer_session::CONTRACT_VERSION,
             module,
             start_path,
-            max_depth,
+            all_files: options.all_files,
+            max_depth: options.max_depth,
         })
         .await
-        .map_err(|status| eyre::eyre!(status.message().to_string()))?
+        .map_err(|status| super::same_build::refusal("du", status))?
         .into_inner();
 
-    while let Some(entry) = stream
+    while let Some(reply) = stream
         .message()
         .await
-        .map_err(|status| eyre::eyre!(status.message().to_string()))?
+        .map_err(|status| super::same_build::refusal("du", status))?
     {
-        on_entry(DiskUsageEntry {
-            path: entry.relative_path,
-            bytes: entry.byte_total,
-            files: entry.file_count,
-            dirs: entry.dir_count,
-        })?;
+        match reply.reply {
+            Some(du_reply::Reply::Row(row)) => on_event(DuEvent::Row {
+                path: EntryPath {
+                    text: row.relative_path,
+                    raw: row.raw_relative_path,
+                },
+                allocated_bytes: row.allocated_bytes,
+            })?,
+            Some(du_reply::Reply::Failure(failure)) => on_event(DuEvent::Failure {
+                path: EntryPath {
+                    text: failure.relative_path,
+                    raw: failure.raw_relative_path,
+                },
+                action: failure.action,
+                reason: failure.reason,
+            })?,
+            // A reply of a kind this build does not know: same contract,
+            // so there is none; nothing to print.
+            None => {}
+        }
     }
 
     Ok(())

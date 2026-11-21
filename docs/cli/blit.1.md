@@ -13,8 +13,8 @@ blit – local and hybrid-transport file transfer CLI
 `blit list <REMOTE> [--json]`
 `blit list-modules <REMOTE> [--json]`
 `blit ls <TARGET> [--json]`
-`blit du [--max-depth <N>] [--json] <REMOTE>`
-`blit df [--json] <REMOTE>`
+`blit du [-a] [-s] [-d <N>] [-h] [--json] <REMOTE>`
+`blit df [-h] [-k] [--json] <REMOTE>`
 `blit rm [--yes] <REMOTE>`
 `blit find [--pattern <GLOB>] [--case-insensitive] [--limit <N>] [--json] <REMOTE>`
 `blit completions shell <SHELL>`
@@ -84,8 +84,14 @@ path, then push it.
   or path (`server:/module/`) routes to `ls`.
 - `list-modules` lists modules exported by a daemon.
 - `ls` lists directory contents inside a module (or local path).
-- `du` shows disk usage for a remote path.
-- `df` shows filesystem statistics (total/used/free) for a remote module.
+- `du` reports disk usage for a remote path as the Unix `du` does, counted
+  on the daemon's own disk in one request: one line per directory,
+  deepest first and the path given last, `SIZE<TAB>PATH` in 1K blocks of
+  allocated space. A hard-linked file is counted once; a symbolic link is
+  not followed. Exit status 1 when something could not be read.
+- `df` reports the filesystem that holds a remote path as `df -k` does:
+  size, used and available space in 1K blocks, with the path as typed in
+  the first column.
 - `rm` removes a file or directory on a remote daemon.
 - `find` searches for files on a remote daemon (glob `--pattern`,
   e.g. `*.csv` or `**/*.log`; `*` does not cross `/`).
@@ -160,10 +166,24 @@ path, then push it.
 - `--wait <SECONDS>` (scan)  
   Duration to wait for mDNS responses (default: 2).
 
-- `--max-depth <N>` (du)  
-  Limit traversal depth (0 = unlimited).
+- `-a`, `--all` (du):
+  Print a line for every file, not only for directories.
 
-- `--json` (du, df)  
+- `-s`, `--summarize` (du):
+  Print only the total for the path given.
+
+- `-d <N>`, `--max-depth=<N>` (du):
+  Print lines only for entries at most N levels below the path given.
+  The total still counts everything.
+
+- `-h`, `--human-readable` (du, df):
+  Print sizes in powers of 1024 (`4.0K`, `12M`, `1.5G`). Help for these
+  two commands is `--help`.
+
+- `-k` (df):
+  Print sizes in 1K blocks (the default).
+
+- `--json` (du, df):
   Output results as JSON.
 
 - `--yes` (rm)  
