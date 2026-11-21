@@ -85,6 +85,39 @@ fn listed_names(inputs: &FilterInputs<'_>) -> Result<Option<std::collections::Ha
     }
 }
 
+/// cr-ecm7-1: the lines of a list of names, told apart — the ones that
+/// ARE a relative path of names, and the ones that are not (`/abs`,
+/// `../x`, `./x`), as written and in order.
+///
+/// A name reaches a peer by its COMPONENTS, joined with `/`
+/// ([`crate::path_posix::relative_path_to_posix`]). It went as the text
+/// this host writes a path in: a Windows `sub\name.txt`, a file in a
+/// folder there, reached a Linux peer as ONE name. That is a name a Linux
+/// file can have, and under a name list its deletion planner took the
+/// unrelated destination file called exactly that for the one listed.
+///
+/// A line of the other kind names no entry on any host — a walk gives no
+/// such path. It is kept APART from the names, here and on the wire, so
+/// that no host's path parser reads it as one; and it is kept at all
+/// because the source reports each as a listed name it did not find, as
+/// it does a name whose file is gone — on every route alike.
+fn split_listed(listed: &std::collections::HashSet<PathBuf>) -> (Vec<&PathBuf>, Vec<String>) {
+    let (mut names, mut unnamed) = (Vec::new(), Vec::new());
+    for line in listed {
+        let mut components = line.components().peekable();
+        let names_an_entry = components.peek().is_some()
+            && components.all(|c| matches!(c, std::path::Component::Normal(_)));
+        if names_an_entry {
+            names.push(line);
+        } else {
+            unnamed.push(line.to_string_lossy().into_owned());
+        }
+    }
+    unnamed.sort();
+    unnamed.dedup();
+    (names, unnamed)
+}
+
 /// The exclude patterns `inputs` describe: the caller's own resolution
 /// when it gave one (cr-ecm5-3), else resolved here.
 fn resolved_patterns(inputs: &FilterInputs<'_>) -> Vec<String> {
@@ -125,11 +158,15 @@ pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
         // helper, not by leaf code each time `allows_entry` is called.
         filter.reference_time = Some(SystemTime::now());
     }
-    if let Some(listed) = listed_names(inputs)? {
-        filter.files_from = Some(listed);
-    }
-    if let Some(set) = inputs.retry_only {
-        filter.files_from = Some(set.clone());
+    // cr-ecm7-1: in the one form a list has — the names, and apart from
+    // them the lines that name nothing — here as at a peer.
+    for listed in [listed_names(inputs)?.as_ref(), inputs.retry_only]
+        .into_iter()
+        .flatten()
+    {
+        let (names, unnamed) = split_listed(listed);
+        filter.files_from = Some(names.into_iter().cloned().collect());
+        filter.files_from_unnamed = unnamed;
     }
     if let Some(raw) = inputs.retry_only_raw {
         let listed = filter.files_from.get_or_insert_with(Default::default);
@@ -279,6 +316,7 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
         max_age_secs: None,
         files_from: Vec::new(),
         files_from_raw: Vec::new(),
+        files_from_unnamed: Vec::new(),
         // EXCLUDE_CASE_MATCHING slice 3 (contract 9): the case mode goes
         // with the patterns, so the peer reads them as this side does.
         ignore_case: inputs.ignore_case,
@@ -308,26 +346,27 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
                 .as_secs(),
         );
     }
-    if let Some(entries) = listed_names(inputs)? {
-        spec.files_from = entries
-            .into_iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect();
-    }
-    if let Some(set) = inputs.retry_only {
+    // cr-ecm7-1: a retry's list replaces the list it retries from.
+    for listed in [listed_names(inputs)?.as_ref(), inputs.retry_only]
+        .into_iter()
+        .flatten()
+    {
+        let (names, unnamed) = split_listed(listed);
         // JOB_LOGS review cr-jl4-2: a name that is not UTF-8 travels as its
         // exact bytes; its lossy text would name no file at the origin.
         let mut entries: Vec<String> = Vec::new();
         let mut raw_entries: Vec<Vec<u8>> = Vec::new();
-        for path in set {
+        for path in names {
             match crate::raw_name::raw_relative_bytes(path) {
                 Some(raw) => raw_entries.push(raw),
                 None => entries.push(crate::path_posix::relative_path_to_posix(path)),
             }
         }
         entries.sort();
+        entries.dedup();
         spec.files_from = entries;
         spec.files_from_raw = raw_entries;
+        spec.files_from_unnamed = unnamed;
     }
     if let Some(raw) = inputs.retry_only_raw {
         spec.files_from_raw.extend(raw.iter().cloned());
@@ -4623,5 +4662,91 @@ mod tests {
         given.files_from_read = Some(Ok("# nothing\n"));
         assert_eq!(build(&given).unwrap().files_from.map(|l| l.len()), Some(0));
         assert!(build_spec(&given).unwrap().files_from_set);
+    }
+
+    /// cr-ecm7-1: a listed name reaches a peer by its components, and
+    /// names there what it names here. It went as this host writes a
+    /// path: a Windows `sub\name.txt` reached a Linux peer as one name,
+    /// and that peer's deletion planner took the unrelated file called
+    /// exactly that for the one listed.
+    #[test]
+    fn a_listed_name_travels_by_its_components() {
+        use crate::remote::transfer::operation_spec::filter_from_spec;
+        let dir = tempfile::tempdir().unwrap();
+        let list = dir.path().join("list.txt");
+        // Each of the first four names one entry however its separators
+        // are written; the last three are no relative path of names.
+        std::fs::write(
+            &list,
+            "sub//a.txt\nsub/./b.txt\ndir/c.txt/\ntop.txt\n./dot.txt\n../up.txt\n/abs.txt\n",
+        )
+        .unwrap();
+        let mut given = inputs(&[], &[]);
+        given.files_from = Some(&list);
+        let spec = build_spec(&given).unwrap();
+        assert_eq!(
+            spec.files_from,
+            ["dir/c.txt", "sub/a.txt", "sub/b.txt", "top.txt"],
+            "each name's components, joined by `/`, in order"
+        );
+        assert_eq!(
+            spec.files_from_unnamed,
+            ["../up.txt", "./dot.txt", "/abs.txt"],
+            "the lines that name nothing, apart from the names, as written"
+        );
+        let passes = |filter: &FileFilter, rel: &str| {
+            filter.allows_entry(Some(Path::new(rel)), Path::new(rel), 1, None)
+        };
+        let (local, received) = (build(&given).unwrap(), filter_from_spec(spec).unwrap());
+        for (rel, listed) in [
+            ("sub/a.txt", true),
+            ("sub/b.txt", true),
+            ("dir/c.txt", true),
+            ("top.txt", true),
+            // A line kept apart names nothing, here or there.
+            ("dot.txt", false),
+            ("up.txt", false),
+            ("abs.txt", false),
+            ("a.txt", false),
+        ] {
+            assert_eq!(passes(&local, rel), listed, "here, {rel}");
+            assert_eq!(passes(&received, rel), listed, "at the peer, {rel}");
+        }
+        // One form, here and at the peer: four names, three lines apart —
+        // which the source reports as listed and not found.
+        for (place, filter) in [("here", &local), ("at the peer", &received)] {
+            assert_eq!(
+                filter.files_from.as_ref().map(|names| names.len()),
+                Some(4),
+                "{place}"
+            );
+            assert_eq!(
+                filter.files_from_unnamed,
+                ["../up.txt", "./dot.txt", "/abs.txt"],
+                "{place}"
+            );
+        }
+        // A retry's list is told apart the same way.
+        let retry: std::collections::HashSet<PathBuf> =
+            [PathBuf::from("sub/a.txt"), PathBuf::from("./dot.txt")].into();
+        let mut retried = inputs(&[], &[]);
+        retried.retry_only = Some(&retry);
+        let spec = build_spec(&retried).unwrap();
+        assert_eq!(spec.files_from, ["sub/a.txt"]);
+        assert_eq!(spec.files_from_unnamed, ["./dot.txt"]);
+        assert_eq!(build(&retried).unwrap().files_from_unnamed, ["./dot.txt"]);
+
+        // What a separator is goes by the host that read the list. Where
+        // `\` is a character of a name, it stays one, in one component;
+        // where it separates, the name is sent as the two it is.
+        let typed: std::collections::HashSet<PathBuf> = [PathBuf::from(r"sub\name.txt")].into();
+        let mut one = inputs(&[], &[]);
+        one.retry_only = Some(&typed);
+        let sent = build_spec(&one).unwrap().files_from;
+        if cfg!(windows) {
+            assert_eq!(sent, ["sub/name.txt"]);
+        } else {
+            assert_eq!(sent, [r"sub\name.txt"]);
+        }
     }
 }

@@ -132,7 +132,15 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// handed an empty list by this build, still removed a destination-only
 /// empty directory. A rule that decides what is deleted is part of the
 /// contract whether or not a field carries it.
-pub const CONTRACT_VERSION: u32 = 11;
+/// v12: no new field — what a `FilterSpec.files_from` entry IS (cr-ecm7-1):
+/// a name's components joined by `/`, read component by component. It was
+/// the text the sending host writes a path in, read as the text of a path
+/// on the receiving one: a Windows list's `sub\name.txt`, a file in a
+/// folder, was one name to a Linux peer — and under the name-list deletion
+/// rule of v11 that peer took the unrelated destination file called
+/// exactly that for the one listed. Two ends that read an entry
+/// differently select different files; the reading is part of the contract.
+pub const CONTRACT_VERSION: u32 = 12;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames
@@ -1394,8 +1402,13 @@ pub async fn run_source(
 /// the scan recorded as unreadable keeps that reason; one it never saw
 /// is missing. Bounded by the same encoded budget as the summary's
 /// failed-path list; the overflow is returned as a count.
+///
+/// cr-ecm7-1: and the lines of the list that name no entry at all
+/// (`unnamed`), which no scan can find — reported the same way, by the
+/// text they were written in.
 fn requested_but_unscanned(
     scope: Option<&HashSet<PathBuf>>,
+    unnamed: &[String],
     sent: &HashMap<String, FileHeader>,
     unreadable: &[String],
 ) -> (Vec<crate::generated::FileFailure>, u64) {
@@ -1406,13 +1419,15 @@ fn requested_but_unscanned(
     let mut dropped = 0u64;
     let mut budget = crate::remote::transfer::sink::MAX_WIRE_FAILED_PATHS_ENCODED_BYTES;
     // Deterministic report order, whatever the set's iteration order.
-    let mut requested: Vec<&PathBuf> = scope.iter().collect();
+    let mut requested: Vec<String> = scope
+        .iter()
+        .map(|requested| crate::path_posix::relative_path_to_posix(requested))
+        .filter(|rel| !sent.contains_key(rel))
+        .chain(unnamed.iter().cloned())
+        .collect();
     requested.sort();
-    for requested in requested {
-        let rel = crate::path_posix::relative_path_to_posix(requested);
-        if sent.contains_key(&rel) {
-            continue;
-        }
+    requested.dedup();
+    for rel in requested {
         let prefix = format!("{rel} (");
         let reason = match unreadable.iter().find(|entry| entry.starts_with(&prefix)) {
             Some(entry) => format!(
@@ -2122,6 +2137,7 @@ async fn source_send_half(
         // re-land. Unscoped scans report nothing here.
         let (scan_failures, scan_failures_dropped) = requested_but_unscanned(
             scan_source.files_from_scope().as_ref(),
+            &scan_source.files_from_unnamed(),
             &sent.lock().expect("sent-manifest lock poisoned"),
             &unreadable.lock().expect("unreadable list lock poisoned"),
         );
@@ -6866,6 +6882,53 @@ mod tests {
             "a peer that plans deletions under a name list by this rule is contract 11 or \
              later, not {contract}"
         );
+    }
+
+    /// cr-ecm7-1: a listed name is its components joined by `/`, read
+    /// component by component, only from contract 12 — an earlier peer
+    /// sends and reads the text of a path on its own host, and is refused
+    /// at HELLO like any other contract.
+    #[test]
+    fn a_listed_name_travels_by_its_components_only_under_contract_12_or_later() {
+        // Read at run time: the number is what a peer is told at HELLO.
+        let contract = std::hint::black_box(CONTRACT_VERSION);
+        assert!(
+            contract >= 12,
+            "a peer that sends and reads listed names by component is contract 12 or later, \
+             not {contract}"
+        );
+    }
+
+    /// cr-ecm7-1: a list line that names no entry is reported by the
+    /// source as a listed name it did not find — beside the names its
+    /// scan did not enumerate, by the text it was written in. Such a line
+    /// travels apart from the names; were it dropped on the way, a list
+    /// made of them would run, copy nothing and report success.
+    #[test]
+    fn a_list_line_that_names_nothing_is_reported_as_not_found() {
+        let scope: HashSet<PathBuf> = [PathBuf::from("sent.txt"), PathBuf::from("gone.txt")].into();
+        let sent: HashMap<String, FileHeader> =
+            [("sent.txt".to_string(), FileHeader::default())].into();
+        let unnamed = vec!["./dot.txt".to_string(), "/abs.txt".to_string()];
+        let (failures, dropped) = requested_but_unscanned(Some(&scope), &unnamed, &sent, &[]);
+        assert_eq!(dropped, 0);
+        let reported: Vec<(&str, &str)> = failures
+            .iter()
+            .map(|failure| (failure.relative_path.as_str(), failure.reason.as_str()))
+            .collect();
+        let missing = "source: missing at retry (not found by the retry scan)";
+        assert_eq!(
+            reported,
+            [
+                ("./dot.txt", missing),
+                ("/abs.txt", missing),
+                ("gone.txt", missing)
+            ]
+        );
+        // No list in force: nothing was requested.
+        assert!(requested_but_unscanned(None, &unnamed, &sent, &[])
+            .0
+            .is_empty());
     }
 
     /// EXCLUDE_CASE_MATCHING slice 3 (contract 9): an open's filter is

@@ -352,6 +352,161 @@ fn a_list_that_holds_no_name_overrides_the_patterns_at_a_daemon_too() {
     }
 }
 
+/// cr-ecm7-1: a listed name is the same folder and file between two local
+/// folders, pushed to a daemon and pulled from one — however the list
+/// writes its separators — and what the list does not name is neither
+/// copied nor, on a mirror, deleted. A name goes to a daemon by its
+/// components; it went as the text the listing machine writes a path in,
+/// which another kind of machine reads as another path.
+///
+/// Where a file may itself be called `sub\name.txt` (not on Windows), the
+/// listed `sub/name.txt` is never that file: it is kept.
+#[test]
+fn a_listed_name_is_the_same_file_at_a_daemon() {
+    let ctx = common::TestContext::new();
+    let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    let local = ctx.workspace.join("local");
+    let other = ctx.workspace.join("other");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&other).unwrap();
+    let list = ctx.workspace.join("list.txt");
+    fs::write(&list, "sub//name.txt\ndir/./deep/file.txt\n").unwrap();
+    let (here, there) = (with_slash(&local), with_slash(&other));
+
+    for (route, from, to, source, destination) in [
+        ("local", here.as_str(), there.as_str(), &local, &other),
+        (
+            "push",
+            here.as_str(),
+            remote.as_str(),
+            &local,
+            &ctx.module_dir,
+        ),
+        (
+            "pull",
+            remote.as_str(),
+            here.as_str(),
+            &ctx.module_dir,
+            &local,
+        ),
+    ] {
+        refill(
+            source,
+            &["sub/name.txt", "dir/deep/file.txt", "sub/other.txt"],
+        );
+        let mut theirs = vec!["gone/kept.txt"];
+        if cfg!(unix) {
+            theirs.push(r"sub\name.txt");
+        }
+        refill(destination, &theirs);
+        let (ok, said) = daemon_run(
+            &ctx,
+            &[
+                "mirror",
+                "--yes",
+                "--files-from",
+                list.to_str().unwrap(),
+                from,
+                to,
+            ],
+        );
+        assert!(ok, "{route}\n{said}");
+        assert!(
+            destination.join("sub/name.txt").exists()
+                && destination.join("dir/deep/file.txt").exists(),
+            "{route}: listed, and copied\n{said}"
+        );
+        assert!(
+            !destination.join("sub/other.txt").exists(),
+            "{route}: not listed\n{said}"
+        );
+        assert!(
+            destination.join("gone/kept.txt").exists(),
+            "{route}: not listed: kept\n{said}"
+        );
+        if cfg!(unix) {
+            assert!(
+                destination.join(r"sub\name.txt").exists(),
+                "{route}: a file of its own, not the one listed: kept\n{said}"
+            );
+        }
+    }
+}
+
+/// cr-ecm7-1: a list line that is no relative path of names (`./dot.txt`,
+/// `/abs.txt`, `sub/../up.txt`) names no file, and the run says so —
+/// between two local folders, pushed to a daemon and pulled from one
+/// alike: the line is reported as a listed name that was not found, the
+/// run ends unsuccessfully, and the names beside it are copied. Such a
+/// line goes to a daemon apart from the names; left out on the way, the
+/// same list ran clean through a daemon and failed locally.
+#[test]
+fn a_list_line_that_names_nothing_is_reported_on_every_route() {
+    let ctx = common::TestContext::new();
+    let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    let local = ctx.workspace.join("local");
+    let other = ctx.workspace.join("other");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&other).unwrap();
+    let list = ctx.workspace.join("list.txt");
+    let (here, there) = (with_slash(&local), with_slash(&other));
+
+    for line in ["./dot.txt", "/abs.txt", "sub/../up.txt"] {
+        fs::write(&list, format!("{line}\nplain.txt\n")).unwrap();
+        for (route, from, to, source, destination) in [
+            ("local", here.as_str(), there.as_str(), &local, &other),
+            (
+                "push",
+                here.as_str(),
+                remote.as_str(),
+                &local,
+                &ctx.module_dir,
+            ),
+            (
+                "pull",
+                remote.as_str(),
+                here.as_str(),
+                &ctx.module_dir,
+                &local,
+            ),
+        ] {
+            refill(source, &["dot.txt", "abs.txt", "up.txt", "plain.txt"]);
+            refill(destination, &[]);
+            let (ok, said) = daemon_run(
+                &ctx,
+                &[
+                    "copy",
+                    "--retries",
+                    "0",
+                    "--files-from",
+                    list.to_str().unwrap(),
+                    from,
+                    to,
+                ],
+            );
+            assert!(
+                !ok,
+                "{route}, {line}: the run must not report success\n{said}"
+            );
+            assert!(
+                said.contains("1 file(s) did not land at the destination")
+                    && said.contains(&format!("{line}: source: missing")),
+                "{route}, {line}: reported, by the text it was written in\n{said}"
+            );
+            assert!(
+                destination.join("plain.txt").exists(),
+                "{route}, {line}: the name beside it is copied\n{said}"
+            );
+            for unnamed in ["dot.txt", "abs.txt", "up.txt"] {
+                assert!(
+                    !destination.join(unnamed).exists(),
+                    "{route}, {line}: {unnamed} was not listed\n{said}"
+                );
+            }
+        }
+    }
+}
+
 /// cr-ecm6-1: an include means the same between two local folders and
 /// through a daemon. `{a\,**/x,b}` names `b`, and `x` under a folder whose
 /// name begins `a,` — the comma is escaped, so it is part of the name. A

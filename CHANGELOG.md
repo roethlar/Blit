@@ -15,9 +15,11 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `check_availability` was removed; `TransferSink` gained
 `begin_record`/`RecordWriter`, `can_store_raw_names` and `note_raw_name`;
 `TransferSummary` gained `failed_paths`/`failed_paths_truncated`;
-`transfers::filter::FilterInputs` gained `source_root` and `ignore_case`,
-and `fs_enum::FileFilter` gained `ignore_case`. The wire
-protocol is contract 11: a peer on any other contract version (every 0.1.x
+`transfers::filter::FilterInputs` gained `source_root`, `ignore_case`,
+`files_from_read` and `resolved`; `fs_enum::FileFilter` gained
+`ignore_case` and `files_from_unnamed`, and `TransferSource` a provided
+`files_from_unnamed`. The wire
+protocol is contract 12: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
 
@@ -114,7 +116,7 @@ part, and a job you can list, read, re-run and retry.
   be written the transfer still completes and the report says the log is
   incomplete.
 - A dry run or `--null` run is logged as what it planned, not as copies.
-- Wire protocol (contract 11): the job ID rides the session-open and
+- Wire protocol (contract 12): the job ID rides the session-open and
   delegated-pull requests; `GetJobLog` returns a daemon's log by ID; the
   finished-job record carries the failed-file count. In a filtered mirror,
   `ManifestPruned` tells the destination which source paths were excluded,
@@ -161,6 +163,13 @@ part, and a job you can list, read, re-run and retry.
 - A `--files-from` list that holds no name (a file of comments) selects
   nothing at a daemon, as it does locally. It used to reach the daemon as
   no list at all, and the daemon applied the patterns the list overrides.
+- A `--files-from` name reaches a daemon as the folders and file it names,
+  whichever way the machine that read the list writes a path. A list read
+  on Windows sent `sub\name.txt` as typed; a Linux or macOS daemon read
+  that as one file name, missed the file in `sub`, and on a mirror could
+  select an unrelated file called exactly that for deletion. A line that
+  is no relative path of names (`./x`, `../x`, `/abs`) still names
+  nothing and is still reported as a file that did not land.
 - A filter that cannot be used — a pattern that is no glob or cannot be
   compiled, an unreadable size or age, a pattern file that cannot be read —
   is refused before `mirror` asks its question; the question used to come

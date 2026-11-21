@@ -66,7 +66,13 @@ use crate::generated::{
 ///     name is no longer a candidate. A version-5 daemon, handed the same
 ///     request, still removes such a directory when it is empty; the
 ///     request names the version of the rule it expects.
-pub const SUPPORTED_SPEC_VERSION: u32 = 6;
+///   - 7: no new field — what a `FilterSpec.files_from` entry IS changed
+///     (cr-ecm7-1): a name's components joined by `/`, read component by
+///     component, where it was the text the sending host writes a path
+///     in. A version-6 daemon on Linux, handed a Windows list's
+///     `sub\name.txt`, reads one name; a version-6 daemon on Windows,
+///     handed a Linux name that holds a `\`, reads two.
+pub const SUPPORTED_SPEC_VERSION: u32 = 7;
 
 /// Normalized, internal-friendly view of a transfer operation. Folds
 /// proto-`Unspecified` into concrete defaults, converts `FilterSpec`
@@ -234,9 +240,25 @@ pub(crate) fn filter_from_spec(spec: ProtoFilterSpec) -> Result<FileFilter> {
     // cr-ecm4-2: a list that was given is a list, however many names it
     // holds — an empty one lets nothing pass, exactly as it does where it
     // was read. (The two lists alone cannot tell "empty" from "none".)
-    if spec.files_from_set || !spec.files_from.is_empty() || !spec.files_from_raw.is_empty() {
-        let mut listed: std::collections::HashSet<std::path::PathBuf> =
-            spec.files_from.into_iter().map(Into::into).collect();
+    if spec.files_from_set
+        || !spec.files_from.is_empty()
+        || !spec.files_from_raw.is_empty()
+        || !spec.files_from_unnamed.is_empty()
+    {
+        let mut listed = std::collections::HashSet::new();
+        let mut unnamed = spec.files_from_unnamed;
+        for name in spec.files_from {
+            match listed_name(&name, cfg!(windows))? {
+                Some(path) => {
+                    listed.insert(path);
+                }
+                // A name where it was listed, and no entry's name here.
+                None => unnamed.push(name),
+            }
+        }
+        unnamed.sort();
+        unnamed.dedup();
+        filter.files_from_unnamed = unnamed;
         listed.extend(raw_listed(
             &spec.files_from_raw,
             crate::raw_name::destination_can_store_raw_names(),
@@ -247,6 +269,56 @@ pub(crate) fn filter_from_spec(spec: ProtoFilterSpec) -> Result<FileFilter> {
         .validate_globs()
         .map_err(|refusal| eyre::eyre!(refusal))?;
     Ok(filter)
+}
+
+/// cr-ecm7-1: one listed name off the wire, as this host's path. The wire
+/// form is a name's components joined by `/` and nothing else, so each
+/// piece between two `/` is ONE component whatever characters it holds —
+/// it is never handed to this host's path parser to split again
+/// (`windows`: the path rule it is read under, this host's own outside
+/// tests):
+/// - a piece that is no name at all — empty, `.`, `..`, or holding a NUL —
+///   refuses the list: no sender of this contract writes one;
+/// - a piece that is a name where it was written and cannot be one here —
+///   it holds `\` where that separates components, or this host reads it
+///   as a drive — names no entry of this host (`None`). It is never read
+///   as the path its text would be here; the caller keeps it with the
+///   lines that name nothing (`FileFilter::files_from_unnamed`), and a
+///   source on this host reports it as listed and not found.
+fn listed_name(wire: &str, windows: bool) -> Result<Option<std::path::PathBuf>> {
+    let mut path = std::path::PathBuf::new();
+    let mut named_here = true;
+    for component in wire.split('/') {
+        if component.is_empty() || component == "." || component == ".." || component.contains('\0')
+        {
+            bail!(
+                "the listed name {wire:?} is not a relative path of names joined by `/`, which \
+                 is how a `--files-from` name travels"
+            );
+        }
+        named_here = named_here && one_name_here(component, windows);
+        if named_here {
+            path.push(component);
+        }
+    }
+    Ok(named_here.then_some(path))
+}
+
+/// Whether `component` — one piece of a wire name — is one entry's name
+/// under a platform's path rule. Under this host's own rule its path
+/// parser is asked too: it must read the piece as exactly one name.
+fn one_name_here(component: &str, windows: bool) -> bool {
+    if windows && component.contains('\\') {
+        return false;
+    }
+    if windows != cfg!(windows) {
+        return true;
+    }
+    let mut parts = std::path::Path::new(component).components();
+    matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(name)), None) if name == std::ffi::OsStr::new(component)
+    )
 }
 
 /// JOB_LOGS review cr-jl4-2: the listed paths a spec names by their exact
@@ -558,6 +630,7 @@ mod tests {
         let filter = filter_from_spec(ProtoFilterSpec {
             files_from: vec!["plain.txt".into()],
             files_from_raw: vec![b"bad\xff.txt".to_vec()],
+            files_from_unnamed: Vec::new(),
             ..ProtoFilterSpec::default()
         })
         .unwrap();
@@ -659,6 +732,7 @@ mod tests {
             max_age_secs: None,
             files_from: vec![],
             files_from_raw: Vec::new(),
+            files_from_unnamed: Vec::new(),
             ignore_case: false,
             files_from_set: false,
         });
@@ -682,6 +756,7 @@ mod tests {
             max_age_secs: None,
             files_from: vec![],
             files_from_raw: Vec::new(),
+            files_from_unnamed: Vec::new(),
             ignore_case: false,
             files_from_set: false,
         });
@@ -883,6 +958,7 @@ mod tests {
             max_age_secs: None,
             files_from: vec![],
             files_from_raw: Vec::new(),
+            files_from_unnamed: Vec::new(),
             ignore_case: false,
             files_from_set: false,
         });
@@ -904,5 +980,104 @@ mod tests {
         spec.drop_windows_metadata = true;
         let normalized = NormalizedTransferOperation::from_spec(spec).unwrap();
         assert!(normalized.drop_windows_metadata);
+    }
+
+    /// cr-ecm7-1: a listed name off the wire is read component by
+    /// component — each piece between two `/` one name, whatever it holds
+    /// — and never handed to this host's path parser to split again.
+    #[test]
+    fn a_listed_name_off_the_wire_is_read_by_its_components() {
+        use std::path::{Path, PathBuf};
+        // A file in a folder, under either platform's rule.
+        for windows in [false, true] {
+            let read = listed_name("sub/name.txt", windows).unwrap();
+            if windows == cfg!(windows) {
+                assert_eq!(read, Some(Path::new("sub").join("name.txt")));
+            } else {
+                assert!(read.is_some());
+            }
+        }
+        // One piece holding a `\`: one name where that is a character of
+        // names, and no entry at all where it separates components —
+        // never the two components its text would be there.
+        assert!(listed_name(r"sub\name.txt", false).unwrap().is_some());
+        assert_eq!(listed_name(r"sub\name.txt", true).unwrap(), None);
+        assert_eq!(listed_name(r"dir/sub\name.txt", true).unwrap(), None);
+        if !cfg!(windows) {
+            let one = listed_name(r"sub\name.txt", false).unwrap().unwrap();
+            assert_eq!(one.components().count(), 1, "{one:?}");
+        }
+        // No name at all: the list is refused, naming it.
+        for malformed in [
+            "", "a//b", "/abs", "a/", "./a", "a/./b", "a/../b", "..", "a/\0b",
+        ] {
+            for windows in [false, true] {
+                let error = listed_name(malformed, windows).unwrap_err();
+                assert!(
+                    error.to_string().contains("not a relative path of names"),
+                    "{malformed:?}: {error:#}"
+                );
+            }
+        }
+
+        // Through the filter a peer builds from the spec.
+        let received = |names: &[&str]| {
+            filter_from_spec(ProtoFilterSpec {
+                files_from: names.iter().map(|name| name.to_string()).collect(),
+                files_from_set: true,
+                ..ProtoFilterSpec::default()
+            })
+        };
+        let passes = |filter: &FileFilter, rel: &Path| filter.allows_entry(Some(rel), rel, 1, None);
+        let nested: PathBuf = Path::new("sub").join("name.txt");
+        let filter = received(&["sub/name.txt"]).unwrap();
+        assert!(passes(&filter, &nested));
+        assert!(filter.files_from_unnamed.is_empty());
+        // The lines that name nothing arrive apart, and stay apart: in
+        // force as a list, matched against nothing.
+        let apart = filter_from_spec(ProtoFilterSpec {
+            files_from_unnamed: vec!["./name.txt".to_string(), "name.txt".to_string()],
+            ..ProtoFilterSpec::default()
+        })
+        .unwrap();
+        assert_eq!(apart.files_from.as_ref().map(|names| names.len()), Some(0));
+        assert_eq!(apart.files_from_unnamed, ["./name.txt", "name.txt"]);
+        assert!(!passes(&apart, Path::new("name.txt")));
+        if !cfg!(windows) {
+            // The reviewer's case, on the host it was replayed on: the
+            // destination's own file called `sub\name.txt` is not the one
+            // listed — and is, when the wire holds a Windows list's text,
+            // which is what a sender no longer writes.
+            let literal = Path::new(r"sub\name.txt");
+            assert!(!passes(&filter, literal));
+            let as_it_went = received(&[r"sub\name.txt"]).unwrap();
+            assert!(passes(&as_it_went, literal) && !passes(&as_it_went, &nested));
+        }
+        let error = received(&["ok.txt", "a//b"]).unwrap_err();
+        assert!(format!("{error:#}").contains(r#""a//b""#), "{error:#}");
+    }
+
+    /// cr-ecm7-1: a request whose listed names are components joined by
+    /// `/` carries a version a daemon of spec version 6 refuses — that
+    /// daemon reads each as the text of a path on its own host — and this
+    /// build refuses a version-6 request in turn.
+    #[test]
+    fn a_request_with_names_listed_by_component_is_version_7_or_later() {
+        let mut spec = empty_spec();
+        spec.filter = Some(ProtoFilterSpec {
+            files_from: vec!["sub/name.txt".to_string()],
+            files_from_set: true,
+            ..ProtoFilterSpec::default()
+        });
+        NormalizedTransferOperation::from_spec(spec.clone()).expect("this build's own version");
+        spec.spec_version = 6;
+        let error = NormalizedTransferOperation::from_spec(spec).unwrap_err();
+        assert!(error.to_string().contains("spec_version 6"), "{error:#}");
+        // Read at run time: the number is what a daemon is told.
+        let version = std::hint::black_box(SUPPORTED_SPEC_VERSION);
+        assert!(
+            version >= 7,
+            "a request whose listed names travel by component is version 7 or later, not {version}"
+        );
     }
 }

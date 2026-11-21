@@ -53,6 +53,13 @@ pub struct FileFilter {
     /// Set by orchestrator when building the filter (calculated, not hardcoded).
     pub reference_time: Option<SystemTime>,
     pub files_from: Option<HashSet<PathBuf>>,
+    /// cr-ecm7-1: the lines of the `files_from` list that are not a
+    /// relative path of names (`./x`, `../x`, `/abs`), as written. They
+    /// name no entry and are never matched against one — which is why they
+    /// are kept out of `files_from`, where another host's path parser
+    /// could read one as a name. The source reports each as a listed name
+    /// it did not find.
+    pub files_from_unnamed: Vec<String>,
     /// EXCLUDE_CASE_MATCHING (D-2026-11-20-1): read every `include_files`
     /// and `exclude_files` pattern ignoring case. Each pattern is widened
     /// once, where it is compiled ([`crate::case_fold::widen_case`]); a
@@ -746,6 +753,7 @@ impl FileFilter {
             max_age: self.max_age,
             reference_time: self.reference_time,
             files_from: self.files_from.clone(),
+            files_from_unnamed: self.files_from_unnamed.clone(),
             ignore_case: self.ignore_case,
             destination: self.destination.clone(),
             pruned: self.pruned.clone(),
@@ -1187,6 +1195,7 @@ impl Default for FileFilter {
             max_age: None,
             reference_time: None,
             files_from: None,
+            files_from_unnamed: Vec::new(),
             ignore_case: false,
             destination: None,
             pruned: None,

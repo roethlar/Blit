@@ -666,6 +666,10 @@ impl TransferSource for DestSubtreeExcludedSource {
         self.inner.files_from_scope()
     }
 
+    fn files_from_unnamed(&self) -> Vec<String> {
+        self.inner.files_from_unnamed()
+    }
+
     fn root(&self) -> &Path {
         self.inner.root()
     }

@@ -815,6 +815,7 @@ mod tests {
             max_age_secs: None,
             files_from: vec![],
             files_from_raw: Vec::new(),
+            files_from_unnamed: Vec::new(),
             ignore_case: false,
             files_from_set: false,
         });

@@ -548,6 +548,11 @@ message FilterSpec {
   // pass — all other rules above are bypassed for the inclusion test.
   // Currently inline; may move to a streamed manifest if list sizes
   // become a concern.
+  // Contract 12 (cr-ecm7-1): each entry is a name's components joined by
+  // `/` — never the text the sending host writes a path in — and is read
+  // component by component. An empty component, `.` or `..` is refused.
+  // A line of the list that is no such name travels in
+  // `files_from_unnamed`, never here.
   repeated string files_from = 7;
   // Contract 7 (JOB_LOGS review cr-jl4-2): listed relative paths whose
   // names are not UTF-8, as their exact bytes (`/`-separated); they pass
@@ -567,6 +572,12 @@ message FilterSpec {
   // overrides. Set whenever a list is in force; with it set and both
   // lists empty, nothing passes.
   bool files_from_set = 10;
+  // Contract 12 (cr-ecm7-1): the lines of the list that are not a relative
+  // path of names (`./x`, `../x`, `/abs`), as written. They name no entry
+  // on any host and are never matched against one; they travel so that the
+  // source reports each as a listed name it did not find, as it does a
+  // name whose file is gone.
+  repeated string files_from_unnamed = 11;
 }
 
 // How the origin decides which files need transfer when both sides

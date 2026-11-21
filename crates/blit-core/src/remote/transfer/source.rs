@@ -206,6 +206,14 @@ pub trait TransferSource: Send + Sync {
     fn files_from_scope(&self) -> Option<std::collections::HashSet<PathBuf>> {
         None
     }
+
+    /// cr-ecm7-1: the lines of that list that name no entry
+    /// (`FileFilter.files_from_unnamed`). The scan cannot find them, and
+    /// the session's source half reports each as it does a requested path
+    /// the scan did not enumerate. Wrappers delegate.
+    fn files_from_unnamed(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// One opened source file (contract v7, SOURCE_SIDE_CONTAINMENT D-A):
@@ -907,6 +915,10 @@ impl TransferSource for WindowsMetadataDroppingSource {
         self.inner.files_from_scope()
     }
 
+    fn files_from_unnamed(&self) -> Vec<String> {
+        self.inner.files_from_unnamed()
+    }
+
     fn root(&self) -> &Path {
         self.inner.root()
     }
@@ -966,6 +978,14 @@ impl TransferSource for FilteredSource {
             .files_from
             .clone()
             .or_else(|| self.inner.files_from_scope())
+    }
+
+    fn files_from_unnamed(&self) -> Vec<String> {
+        if self.filter.files_from.is_some() {
+            self.filter.files_from_unnamed.clone()
+        } else {
+            self.inner.files_from_unnamed()
+        }
     }
 
     fn root(&self) -> &Path {
@@ -1075,6 +1095,10 @@ impl TransferSource for ChecksummingSource {
 
     fn files_from_scope(&self) -> Option<std::collections::HashSet<PathBuf>> {
         self.inner.files_from_scope()
+    }
+
+    fn files_from_unnamed(&self) -> Vec<String> {
+        self.inner.files_from_unnamed()
     }
 
     fn root(&self) -> &Path {

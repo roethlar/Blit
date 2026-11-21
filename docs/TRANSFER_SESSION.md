@@ -2,8 +2,11 @@
 
 **Status**: Active (contract; the session is the ONLY remote transfer
 path since cutover, otp-10c-2)
-**Contract version**: 11 (under a list of exact names a mirror deletes
-no directory the list does not name — a rule, no field; v10 = a list of
+**Contract version**: 12 (a listed name travels as its components joined
+by `/`; the lines of a list that name nothing travel apart,
+`FilterSpec.files_from_unnamed`; v11 = under a list of exact names a
+mirror deletes no directory the list does not name — a rule, no field;
+v10 = a list of
 exact names in force though it holds no name,
 `FilterSpec.files_from_set`; v9 = the case mode in the
 open's filter, `FilterSpec.ignore_case`; v8 = `ManifestPruned`, the paths a filtered
@@ -213,6 +216,19 @@ walk admitted was one, and an empty directory nobody listed was removed.
 The rule has a contract (and spec version 6) of its own because the end
 that plans the deletions depends on the route: two builds that plan them
 differently would give one command two results.
+
+Contract v12 changes what a `FilterSpec.files_from` entry is, and adds
+`files_from_unnamed`. An entry is a name's components joined by `/`, read
+component by component: the receiver refuses one with an empty component,
+`.` or `..`, and one whose component cannot be a single name on its host
+(one holding `\` on Windows) names no entry there. Before, an entry was
+the text the sending host writes a path in, read as the text of a path on
+the receiving one — a Windows list's `sub\name.txt` was one name to a
+Linux peer. A line of the list that is no relative path of names (`./x`,
+`../x`, `/abs`) travels in `files_from_unnamed`, as written: it is matched
+against nothing on any host, and the source reports it as a listed name it
+did not find, as it always has. Spec version 7 carries the same change to
+a daemon-to-daemon request.
 
 ## Frame set and field numbers
 
