@@ -192,7 +192,7 @@ fn case_note_on(
     resolved: &ResolvedExcludes,
     windows: bool,
 ) -> Option<String> {
-    use crate::case_fold::Noted;
+    use crate::case_fold::{Noted, Role};
     let mut noted: Vec<Noted> = Vec::with_capacity(exclude.len() + include.len());
     for (at, &(typed, file)) in exclude.iter().enumerate() {
         if resolved.unmatchable.iter().any(|pattern| pattern == typed) {
@@ -212,12 +212,14 @@ fn case_note_on(
             typed,
             read_as: became.unwrap_or(typed),
             file,
+            role: Role::Exclude,
         });
     }
     noted.extend(include.iter().map(|&(typed, file)| Noted {
         typed,
         read_as: typed,
         file,
+        role: Role::Include,
     }));
     crate::case_fold::case_note_of(&noted, windows)
 }

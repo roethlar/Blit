@@ -803,6 +803,94 @@ fn the_line_keeps_what_is_under_a_folder_apart_from_the_folder() {
     );
 }
 
+/// cr-ecm7-2, cr-ecm7-3, cr-ecm7-4: commands whose line claimed
+/// something the mirror then contradicted, each shown the line it gets
+/// now and run both ways.
+///
+/// - `{a,A}` and `*.Doc`: the line chose `{a,A}` and offered `{a,a}` and
+///   `{A,A}`, both matched already; what changes is that `x.doc` is kept.
+#[test]
+fn the_line_claims_only_what_the_mirror_then_does() {
+    struct Case {
+        excludes: &'static [&'static str],
+        line: &'static str,
+        /// Destination-only entries, with whether each is kept as typed
+        /// and whether it is kept with `--ignore-case`.
+        entries: &'static [(&'static str, bool, bool)],
+    }
+    for case in [Case {
+        excludes: &["{a,A}", "*.Doc"],
+        line: "\"*.Doc\" matches .Doc only; capital letters matter (--ignore-case would \
+                   also match .doc, .DOC).",
+        entries: &[
+            ("x.doc", false, true),
+            ("x.Doc", true, true),
+            ("a", true, true),
+        ],
+    }] {
+        let tmp = tempdir().unwrap();
+        let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+        write(&src, "keep.1");
+        let (from, to) = (with_slash(&src), with_slash(&dst));
+        let mut args = vec!["mirror"];
+        for exclude in case.excludes {
+            args.extend(["--exclude", exclude]);
+        }
+        let fill = || {
+            for (entry, _, _) in case.entries {
+                // On a filesystem that folds case, two spellings are one
+                // entry; the first written stands for both.
+                if !dst.join(entry).exists() {
+                    write(&dst, entry);
+                }
+            }
+        };
+
+        fill();
+        let asked = blit(
+            tmp.path(),
+            &[&args[..], &[&from, &to]].concat(),
+            Some("y\n"),
+        );
+        assert_eq!(asked.code, Some(0), "{:?}: {}", case.excludes, asked.all());
+        assert!(
+            asked.stdout.contains(&format!("{}\n{QUESTION}", case.line)),
+            "{:?}: {}",
+            case.excludes,
+            asked.all()
+        );
+        let folds = dst.join("KEEP.1").exists();
+        for (entry, kept_as_typed, _) in case.entries {
+            if !folds {
+                assert_eq!(
+                    dst.join(entry).exists(),
+                    *kept_as_typed,
+                    "{:?}, as typed: {entry}",
+                    case.excludes
+                );
+            }
+        }
+
+        fill();
+        let ignoring = blit(
+            tmp.path(),
+            &[&args[..], &["-y", "--ignore-case", &from, &to]].concat(),
+            None,
+        );
+        assert_eq!(ignoring.code, Some(0), "{}", ignoring.all());
+        for (entry, _, kept_ignoring_case) in case.entries {
+            if !folds {
+                assert_eq!(
+                    dst.join(entry).exists(),
+                    *kept_ignoring_case,
+                    "{:?}, with --ignore-case: {entry}",
+                    case.excludes
+                );
+            }
+        }
+    }
+}
+
 /// `blit <args>` with a question in it: once the question is on the
 /// screen, `meanwhile` runs (it is given everything shown so far); then
 /// the answer is "y".

@@ -76,9 +76,17 @@ pub(crate) fn case_note(patterns: &[(&str, Option<&str>)], windows: bool) -> Opt
             typed: pattern,
             read_as: pattern,
             file,
+            role: Role::Exclude,
         })
         .collect();
     case_note_of(&noted, windows)
+}
+
+/// What a pattern is in the filter: it leaves entries out, or lets them in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Role {
+    Exclude,
+    Include,
 }
 
 /// One pattern for [`case_note_of`]: as the operator typed it, as the
@@ -92,6 +100,8 @@ pub(crate) struct Noted<'a> {
     /// `/srv`).
     pub read_as: &'a str,
     pub file: Option<&'a str>,
+    /// How the filter uses it — what each claim about it is checked as.
+    pub role: Role,
 }
 
 /// cr-ecm4-3: [`case_note`] built from the EFFECTIVE patterns. What the
@@ -108,15 +118,67 @@ pub(crate) struct Noted<'a> {
 /// says what the class would stop matching:
 ///
 /// `"photo[!x].jpg" matches exactly as typed; capital letters matter (--ignore-case changes what it matches: [!x] would stop matching X).`
+///
+/// cr-ecm7-4: every claim the line makes is CHECKED against the filter
+/// before it is made ([`Spellings::of_role`]), and the pattern it is made
+/// about is the first there is something to say of:
+/// - the first pattern with a spelling that really is matched only with
+///   the option, or with a class the option narrows — for `{a,A}` the
+///   line offered `{a,a}` and `{A,A}`, both matched already;
+/// - a pattern whose reading the option does not change at all is neither
+///   shown nor counted.
 pub(crate) fn case_note_of(patterns: &[Noted], windows: bool) -> Option<String> {
-    let mut noted = patterns.iter().filter_map(|noted| {
-        Some((
-            noted.typed,
-            noted.file,
-            Spellings::of(noted.read_as, windows)?,
-        ))
-    });
-    let (pattern, file, spellings) = noted.next()?;
+    // By the text alone, and cheaply, for every pattern: the ones the
+    // option could read otherwise. Only the ones looked at for showing are
+    // checked against the filter.
+    let candidates: Vec<&Noted> = patterns
+        .iter()
+        .filter(|noted| widen_case(noted.read_as, windows) != noted.read_as)
+        .collect();
+    let mut unchanged: Vec<usize> = Vec::new();
+    let mut shown: Option<(usize, Spellings)> = None;
+    if shown.is_none() {
+        let mut in_words: Option<(usize, Spellings)> = None;
+        for (at, noted) in candidates.iter().enumerate() {
+            match Spellings::of_role(noted.read_as, noted.role, windows) {
+                None => unchanged.push(at),
+                Some(spellings) if !spellings.others.is_empty() || spellings.narrowed.is_some() => {
+                    shown = Some((at, spellings));
+                    break;
+                }
+                Some(spellings) => {
+                    in_words.get_or_insert((at, spellings));
+                }
+            }
+        }
+        shown = shown.or(in_words);
+    }
+    let (shown_at, spellings) = shown?;
+    let (pattern, file) = (candidates[shown_at].typed, candidates[shown_at].file);
+    // The patterns that are only counted. One the option reads no
+    // differently is not counted — and only a pattern that spells out its
+    // own alternatives, in braces or a class, can be such a one (`{a,A}`,
+    // `[Jj]`): those are asked about, the first few of them; plain text
+    // and wildcards always read otherwise, and are counted unasked. A long
+    // list is not compiled pattern by pattern for one line.
+    let mut asked = 0;
+    for (at, noted) in candidates.iter().enumerate() {
+        if at <= shown_at || unchanged.contains(&at) || !noted.read_as.contains(['{', '[']) {
+            continue;
+        }
+        if asked == MOST_PATTERNS_ASKED {
+            break;
+        }
+        asked += 1;
+        if Spellings::of_role(noted.read_as, noted.role, windows).is_none() {
+            unchanged.push(at);
+        }
+    }
+    let noted = candidates
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| *at != shown_at && !unchanged.contains(at))
+        .map(|(_, noted)| (noted.typed, noted.file, ()));
     let shown_from = file.map_or(String::new(), |file| format!(" (from {file})"));
     let others: Vec<Option<&str>> = noted.map(|(_, file, _)| file).collect();
     let more = if others.is_empty() {
@@ -214,11 +276,48 @@ impl<'a> Spellings<'a> {
     /// beside letters in their other case, and `photo[!x].jpg` was shown
     /// as `PHOTO[!x].JPG` — which reads as a glob admitting `PHOTOX.JPG`,
     /// a name the option does not match (a mirror deleted it).
+    #[cfg(test)]
     fn of(pattern: &'a str, windows: bool) -> Option<Self> {
+        Self::of_role(pattern, Role::Exclude, windows)
+    }
+
+    /// [`Self::of`] for a pattern in `role`, with every claim CHECKED
+    /// against the filter (cr-ecm7-2, cr-ecm7-4). The spellings are made
+    /// by rule from the pattern's text, and five rounds of review each
+    /// found a text the rules got wrong — a level trimmed that the pattern
+    /// requires, a spelling the option does not match, one it matches
+    /// already. So nothing made by rule is shown on trust:
+    /// - the text shown for the pattern (its end wildcards trimmed) must
+    ///   name nothing the pattern does not; else the pattern is shown whole;
+    /// - each other spelling must name only what the option would match,
+    ///   and something the pattern as typed does NOT — else it is dropped;
+    /// - a class said to stop matching a letter must really stop;
+    /// - and a pattern left with nothing to say is spoken of only when the
+    ///   option does change what it names, `None` when it does not
+    ///   (`{a,A}` already takes both).
+    ///
+    /// Checked with the filter itself ([`FileFilter::probing`]), over
+    /// names read off each text's own syntax ([`samples`]). Under the
+    /// other platform's path rule nothing can be asked of this machine's
+    /// filter, and the rules stand unchecked.
+    fn of_role(pattern: &'a str, role: Role, windows: bool) -> Option<Self> {
+        let asked = (windows == cfg!(windows))
+            .then(|| Asked::about(pattern, role))
+            .flatten();
+        Self::with(pattern, windows, asked.as_ref())
+    }
+
+    fn with(pattern: &'a str, windows: bool, asked: Option<&Asked>) -> Option<Self> {
         if widen_case(pattern, windows) == pattern {
             return None;
         }
-        let typed = without_end_wildcards(pattern, windows);
+        let trimmed = without_end_wildcards(pattern, windows);
+        let typed = match asked {
+            Some(asked) if trimmed != pattern && !asked.shown_is_faithful(trimmed, windows) => {
+                pattern
+            }
+            _ => trimmed,
+        };
         let mut narrowed: Option<(&'a str, String)> = None;
         let (mut lower, mut upper) = (String::new(), String::new());
         let mut rest = typed;
@@ -257,12 +356,26 @@ impl<'a> Spellings<'a> {
             };
             rest = &rest[len..];
         }
+        if let (Some(asked), Some((class, lost))) = (asked, &narrowed) {
+            if !asked.stops_matching(pattern, class, lost, windows) {
+                narrowed = None;
+            }
+        }
         let mut others = Vec::new();
         if narrowed.is_none() {
             for other in [lower, upper] {
-                if other != typed && !others.contains(&other) {
+                let shows = match asked {
+                    Some(asked) => asked.matched_only_ignoring_case(&other, windows),
+                    None => true,
+                };
+                if other != typed && !others.contains(&other) && shows {
                     others.push(other);
                 }
+            }
+        }
+        if let Some(asked) = asked {
+            if others.is_empty() && narrowed.is_none() && !asked.reads_otherwise(pattern, windows) {
+                return None;
             }
         }
         Some(Self {
@@ -271,6 +384,377 @@ impl<'a> Spellings<'a> {
             narrowed,
         })
     }
+}
+
+/// How many of a run's counted patterns are asked about (the ones holding
+/// braces or a class), beyond the one shown.
+const MOST_PATTERNS_ASKED: usize = 16;
+
+/// One pattern as the filter holds it, to ask what it names: as typed,
+/// and as `--ignore-case` would read it.
+struct Asked {
+    role: Role,
+    as_typed: crate::fs_enum::FileFilter,
+    ignoring_case: crate::fs_enum::FileFilter,
+}
+
+/// What a filter of one pattern says of one name: taken as a file, and
+/// taken as a folder.
+type Named = (bool, bool);
+
+impl Asked {
+    fn about(pattern: &str, role: Role) -> Option<Self> {
+        let probing = |ignore_case| {
+            crate::fs_enum::FileFilter::probing(pattern, role == Role::Exclude, ignore_case)
+        };
+        Some(Self {
+            role,
+            as_typed: probing(false)?,
+            ignoring_case: probing(true)?,
+        })
+    }
+
+    fn named(role: Role, filter: &crate::fs_enum::FileFilter, name: &str) -> Named {
+        let path = std::path::Path::new(name);
+        match role {
+            Role::Exclude => (
+                !filter.allows_entry(Some(path), path, 1, None),
+                !filter.allows_dir(path, path),
+            ),
+            // A folder is walked whatever an include says.
+            Role::Include => (filter.allows_entry(Some(path), path, 1, None), false),
+        }
+    }
+
+    /// `text`, alone in a filter as this pattern is, and the names read
+    /// off its syntax; `None` when either cannot be had.
+    fn text(&self, text: &str, windows: bool) -> Option<(crate::fs_enum::FileFilter, Vec<String>)> {
+        let filter = crate::fs_enum::FileFilter::probing(text, self.role == Role::Exclude, false)?;
+        Some((filter, samples(text, windows, None)?))
+    }
+
+    /// The text shown for the pattern names something, and nothing the
+    /// pattern as typed does not.
+    fn shown_is_faithful(&self, shown: &str, windows: bool) -> bool {
+        let Some((filter, names)) = self.text(shown, windows) else {
+            return false;
+        };
+        let mut names_something = false;
+        for name in &names {
+            let (by_shown, by_pattern) = (
+                Self::named(self.role, &filter, name),
+                Self::named(self.role, &self.as_typed, name),
+            );
+            if (by_shown.0 && !by_pattern.0) || (by_shown.1 && !by_pattern.1) {
+                return false;
+            }
+            names_something |= by_shown.0 || by_shown.1;
+        }
+        names_something
+    }
+
+    /// `spelling` names only what the option would match, and something
+    /// the pattern as typed does not.
+    fn matched_only_ignoring_case(&self, spelling: &str, windows: bool) -> bool {
+        let Some((filter, names)) = self.text(spelling, windows) else {
+            return false;
+        };
+        let mut shows_a_difference = false;
+        for name in &names {
+            let by_spelling = Self::named(self.role, &filter, name);
+            let (typed, ignoring) = (
+                Self::named(self.role, &self.as_typed, name),
+                Self::named(self.role, &self.ignoring_case, name),
+            );
+            if (by_spelling.0 && !ignoring.0) || (by_spelling.1 && !ignoring.1) {
+                return false;
+            }
+            shows_a_difference |= (by_spelling.0 && !typed.0) || (by_spelling.1 && !typed.1);
+        }
+        shows_a_difference
+    }
+
+    /// The pattern as typed names a name with one of `lost`'s letters
+    /// where `class` stands, and with the option it does not.
+    fn stops_matching(&self, pattern: &str, class: &str, lost: &str, windows: bool) -> bool {
+        let Some(letter) = lost.chars().next() else {
+            return false;
+        };
+        let Some(names) = samples(pattern, windows, Some((class, letter))) else {
+            return false;
+        };
+        names.iter().any(|name| {
+            let (typed, ignoring) = (
+                Self::named(self.role, &self.as_typed, name),
+                Self::named(self.role, &self.ignoring_case, name),
+            );
+            (typed.0 && !ignoring.0) || (typed.1 && !ignoring.1)
+        })
+    }
+
+    /// The option changes what the pattern names at all: some name read
+    /// off the pattern, in another case — all lower, all upper, or one
+    /// letter changed — is named with the option and not without, or the
+    /// other way round. Every name read off it, and every letter of each:
+    /// the names a pattern takes in one sequence of letters are joined by
+    /// single changes of case, so if it does not take them all, one change
+    /// away from a name it takes is a name it does not.
+    ///
+    /// What cannot be asked — more alternatives than are tried, or a
+    /// pattern no name can be read off — counts as changed: a line too
+    /// many is the safe mistake.
+    fn reads_otherwise(&self, pattern: &str, windows: bool) -> bool {
+        let Some(names) = samples(pattern, windows, None).filter(|names| !names.is_empty()) else {
+            return true;
+        };
+        let differs = |name: &String| {
+            Self::named(self.role, &self.as_typed, name)
+                != Self::named(self.role, &self.ignoring_case, name)
+        };
+        // A class that gains a letter with the option (`[A-c]` gains
+        // `d`): a name with that letter where the class stands.
+        let mut rest = pattern;
+        while let Some(c) = rest.chars().next() {
+            let len = match c {
+                '[' => match bracket_class_len(rest) {
+                    Some(len) => {
+                        let class = &rest[..len];
+                        if let Some((_, ranges)) = parse_class(class) {
+                            let holds = |c: char| ranges.iter().any(|&(lo, hi)| lo <= c && c <= hi);
+                            for (lo, hi) in other_cases(&ranges) {
+                                let Some(gained) = (lo..=hi).find(|&c| !holds(c)) else {
+                                    continue;
+                                };
+                                match samples(pattern, windows, Some((class, gained))) {
+                                    Some(with_it) if !with_it.iter().any(differs) => {}
+                                    _ => return true,
+                                }
+                            }
+                        }
+                        len
+                    }
+                    None => 1,
+                },
+                '\\' if !windows => 1 + rest[1..].chars().next().map_or(0, char::len_utf8),
+                c => c.len_utf8(),
+            };
+            rest = &rest[len..];
+        }
+        names.iter().any(|name| {
+            let letters: Vec<usize> = name
+                .char_indices()
+                .filter(|(_, c)| case_variants(*c).len() > 1)
+                .map(|(at, _)| at)
+                .collect();
+            let in_case = |upper: bool, only: Option<usize>| -> String {
+                name.char_indices()
+                    .map(|(at, c)| {
+                        if only.is_none_or(|only| only == at) {
+                            in_case(c, upper)
+                        } else {
+                            c
+                        }
+                    })
+                    .collect()
+            };
+            let mut variants = vec![in_case(false, None), in_case(true, None)];
+            for at in letters {
+                variants.push(in_case(false, Some(at)));
+                variants.push(in_case(true, Some(at)));
+            }
+            variants.iter().any(|variant| {
+                Self::named(self.role, &self.as_typed, variant)
+                    != Self::named(self.role, &self.ignoring_case, variant)
+            })
+        })
+    }
+}
+
+/// The most names [`samples`] reads off one text.
+const MOST_SAMPLES: usize = 16;
+
+/// Names `text` matches, read off its own syntax — the names a claim
+/// about `text` is checked with: a wildcard run stands for `x`, a class
+/// for one of its members, an alternation for each of its alternatives in
+/// turn. `pick` puts a chosen character where the first class written
+/// exactly so stands. `None` when the text holds more alternatives than
+/// [`MOST_SAMPLES`] names can cover, or a class no member can be read off.
+///
+/// Only names a walk can give ([`walked`]): what a pattern says of any
+/// other text is nothing a run will ever see, and a claim resting on it
+/// would be about no file. `**//Cache` read off as `/Cache` — the text
+/// matches, and no entry is ever called that — leaves no name at all.
+fn samples(text: &str, windows: bool, pick: Option<(&str, char)>) -> Option<Vec<String>> {
+    let mut pick = pick;
+    let mut names: Vec<String> = Vec::new();
+    for name in expand(text, windows, &mut pick)? {
+        if let Some(name) = walked(&name) {
+            if !names.iter().any(|kept| kept == name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    Some(names)
+}
+
+/// `name` as a walk gives an entry's path under the root: no `./` before
+/// it and no separator after it (a pattern may be written with either),
+/// every component a name. `None` for a text no entry is called — an empty
+/// component (`/x`, `a//b`), `.` or `..`.
+fn walked(name: &str) -> Option<&str> {
+    let mut name = name.trim_end_matches('/');
+    while let Some(rest) = name.strip_prefix("./") {
+        name = rest;
+    }
+    let every_component_names = !name.is_empty()
+        && name
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..");
+    every_component_names.then_some(name)
+}
+
+fn expand(text: &str, windows: bool, pick: &mut Option<(&str, char)>) -> Option<Vec<String>> {
+    let mut names = vec![String::new()];
+    let mut rest = text;
+    let push = |names: &mut Vec<String>, c: char| names.iter_mut().for_each(|name| name.push(c));
+    while let Some(c) = rest.chars().next() {
+        let len = match c {
+            '[' => match bracket_class_len(rest) {
+                Some(len) => {
+                    let class = &rest[..len];
+                    let members = match *pick {
+                        Some((picked, letter)) if picked == class => {
+                            *pick = None;
+                            vec![letter]
+                        }
+                        _ => class_members(class)?,
+                    };
+                    names = names
+                        .iter()
+                        .flat_map(|name| {
+                            members.iter().map(move |member| format!("{name}{member}"))
+                        })
+                        .collect();
+                    if names.len() > MOST_SAMPLES {
+                        return None;
+                    }
+                    len
+                }
+                None => {
+                    push(&mut names, '[');
+                    1
+                }
+            },
+            '\\' if !windows => match rest[1..].chars().next() {
+                Some(escaped) => {
+                    push(&mut names, escaped);
+                    1 + escaped.len_utf8()
+                }
+                None => {
+                    push(&mut names, '\\');
+                    1
+                }
+            },
+            '\\' => {
+                push(&mut names, '/');
+                1
+            }
+            '*' => {
+                push(&mut names, 'x');
+                rest.len() - rest.trim_start_matches('*').len()
+            }
+            '?' => {
+                push(&mut names, 'x');
+                1
+            }
+            '{' => match alternatives(rest, windows) {
+                Some((alternatives, len)) => {
+                    let mut next = Vec::new();
+                    for alternative in alternatives {
+                        for ending in expand(alternative, windows, pick)? {
+                            for name in &names {
+                                next.push(format!("{name}{ending}"));
+                            }
+                        }
+                        if next.len() > MOST_SAMPLES {
+                            return None;
+                        }
+                    }
+                    names = next;
+                    len
+                }
+                None => {
+                    push(&mut names, '{');
+                    1
+                }
+            },
+            c => {
+                push(&mut names, c);
+                c.len_utf8()
+            }
+        };
+        rest = &rest[len..];
+    }
+    Some(names)
+}
+
+/// The members of a bracket class a claim is checked with: its first —
+/// and for a negated class a character it does not hold, together with
+/// the OTHER case of a letter it does hold, when the class as written
+/// lets that through. That last one is the name a spelling goes wrong on:
+/// `[!x]` written in a spelling admits `X`, which the option refuses.
+fn class_members(class: &str) -> Option<Vec<char>> {
+    let (negated, ranges) = parse_class(class)?;
+    if !negated {
+        return ranges.first().map(|&(lo, _)| vec![lo]);
+    }
+    let holds = |c: char| ranges.iter().any(|&(lo, hi)| lo <= c && c <= hi);
+    let mut members: Vec<char> = ['x', 'q', '7', '_', 'X', 'Q', '~']
+        .into_iter()
+        .find(|c| !holds(*c))
+        .into_iter()
+        .collect();
+    let other_case = other_cases(&ranges)
+        .into_iter()
+        .flat_map(|(lo, hi)| lo..=hi)
+        .find(|c| !holds(*c));
+    members.extend(other_case.filter(|c| !members.contains(c)));
+    (!members.is_empty()).then_some(members)
+}
+
+/// The alternatives of the `{…}` that `text` begins with, and its length;
+/// `None` when the brace never closes. Split at the commas of its own
+/// level: one inside a class, inside a nested brace, or after an escape
+/// is part of an alternative.
+fn alternatives(text: &str, windows: bool) -> Option<(Vec<&str>, usize)> {
+    let mut found = Vec::new();
+    let (mut depth, mut from, mut at) = (0usize, 1usize, 0usize);
+    while let Some(c) = text[at..].chars().next() {
+        let len = match c {
+            '[' => bracket_class_len(&text[at..]).unwrap_or(1),
+            '\\' if !windows => 1 + text[at + 1..].chars().next().map_or(0, char::len_utf8),
+            '{' => {
+                depth += 1;
+                1
+            }
+            ',' if depth == 1 => {
+                found.push(&text[from..at]);
+                from = at + 1;
+                1
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    found.push(&text[from..at]);
+                    return Some((found, at + 1));
+                }
+                1
+            }
+            c => c.len_utf8(),
+        };
+        at += len;
+    }
+    None
 }
 
 /// cr-ecm4-3: for a negated class that `--ignore-case` would make take
@@ -1470,6 +1954,7 @@ mod tests {
             typed: "/srv/Data",
             read_as: "Data",
             file: None,
+            role: Role::Exclude,
         };
         assert_eq!(
             case_note_of(&[absolute], false).as_deref(),
@@ -1483,6 +1968,7 @@ mod tests {
             typed: "/srv/Data/2024",
             read_as: "2024",
             file: Some("skip.txt"),
+            role: Role::Exclude,
         };
         assert_eq!(case_note_of(&[digits], false), None);
     }
@@ -1582,5 +2068,163 @@ mod tests {
             shown_patterns > 150,
             "{shown_patterns} patterns were checked"
         );
+    }
+
+    /// cr-ecm7-2, cr-ecm7-3, cr-ecm7-4: the line, to the letter, for the
+    /// patterns where it claimed something the filter does not bear out.
+    #[test]
+    fn the_case_note_claims_only_what_the_filter_bears_out() {
+        // Under this machine's own path rule, the one a claim can be
+        // checked under; none of these patterns reads otherwise under the
+        // other.
+        let note = |patterns: &[&str]| {
+            let typed: Vec<(&str, Option<&str>)> = patterns.iter().map(|p| (*p, None)).collect();
+            case_note(&typed, cfg!(windows))
+        };
+        // cr-ecm7-4: a pattern the option reads no differently is neither
+        // shown nor counted. For `{a,A}` the line offered `{a,a}` and
+        // `{A,A}`, both matched already; what changes is `*.Doc`.
+        let doc = "\"*.Doc\" matches .Doc only; capital letters matter (--ignore-case would \
+                   also match .doc, .DOC).";
+        assert_eq!(note(&["{a,A}", "*.Doc"]).as_deref(), Some(doc));
+        assert_eq!(note(&["*.Doc", "{a,A}"]).as_deref(), Some(doc));
+        for unchanged in [&["{a,A}"][..], &["{a,A}", "{b,B}"], &["*.[Jj][Pp][Gg]"]] {
+            assert_eq!(note(unchanged), None, "{unchanged:?}");
+        }
+        // A spelling the pattern matches already is not offered; one it
+        // does not is.
+        assert_eq!(
+            note(&["{a,A}b"]).as_deref(),
+            Some(
+                "\"{a,A}b\" matches {a,A}b only; capital letters matter (--ignore-case would \
+                 also match {A,A}B)."
+            )
+        );
+        // Every alternative is tried: the letters are in the second.
+        assert_eq!(
+            note(&["{1,Cache}"]).as_deref(),
+            Some(
+                "\"{1,Cache}\" matches {1,Cache} only; capital letters matter (--ignore-case \
+                 would also match {1,cache}, {1,CACHE})."
+            )
+        );
+        // The option does change it, in a way neither spelling shows
+        // (`Ab`): said in words.
+        assert_eq!(
+            note(&["{ab,AB}"]).as_deref(),
+            Some(
+                "\"{ab,AB}\" matches exactly as typed; capital letters matter (--ignore-case \
+                 reads it otherwise)."
+            )
+        );
+    }
+
+    /// Each check the line rests on, asked directly: the filter is what
+    /// answers, whatever the text rules produced.
+    #[test]
+    fn each_claim_is_checked_against_the_filter() {
+        let asked = |pattern: &str| Asked::about(pattern, Role::Exclude).expect("a pattern");
+        // The text shown names nothing the pattern does not.
+        for (pattern, shown, faithful) in [
+            ("**/Cache", "Cache", true),
+            ("*Cache", "Cache", true),
+            ("Cache*", "Cache", true),
+            ("*/Cache", "Cache", false),
+            ("Cache/**", "Cache", false),
+            ("Cache/*", "Cache", false),
+            ("**//Cache", "Cache", false),
+            // No entry is called `/Cache`: a text that names nothing is
+            // not shown for a pattern either.
+            ("**//Cache", "/Cache", false),
+            ("sub/Cache", "Cache", false),
+        ] {
+            assert_eq!(
+                asked(pattern).shown_is_faithful(shown, false),
+                faithful,
+                "\"{pattern}\" shown as {shown}"
+            );
+        }
+        // A spelling is offered only when the option matches it and the
+        // pattern as typed does not.
+        for (pattern, spelling, offered) in [
+            ("*Cache", "cache", true),
+            ("*Cache", "CACHE", true),
+            ("*Cache", "Cache", false),
+            ("{a,A}", "{a,a}", false),
+            ("{a,A}", "{A,A}", false),
+            ("*/Cache", "cache", false),
+            ("photo[!x].jpg", "PHOTO[!x].JPG", false),
+            ("photo[!0-9].jpg", "PHOTO[!0-9].JPG", true),
+        ] {
+            assert_eq!(
+                asked(pattern).matched_only_ignoring_case(spelling, false),
+                offered,
+                "\"{pattern}\" offering {spelling}"
+            );
+        }
+        // A class is said to stop matching a letter only when it does.
+        assert!(asked("[!a].dat").stops_matching("[!a].dat", "[!a]", "A", false));
+        assert!(asked("photo[!x].jpg").stops_matching("photo[!x].jpg", "[!x]", "X", false));
+        assert!(!asked("Keep").stops_matching("Keep", "[!a]", "A", false));
+        assert!(!asked("[!0-9]a").stops_matching("[!0-9]a", "[!0-9]", "A", false));
+        // And a pattern is spoken of only when the option changes it.
+        for (pattern, changes) in [
+            ("{a,A}", false),
+            ("*.[Jj][Pp][Gg]", false),
+            ("{ab,AB}", true),
+            ("[A-c]1", true),
+            ("Keep", true),
+            // However far along the letter that changes stands.
+            ("[xX][xX][xX][xX][xX][xX][xX][xX]{ij,IJ}", true),
+            ("[xX][xX][xX][xX][xX][xX][xX][xX]{ij,IJ,iJ,Ij}", false),
+            // No name to ask with: counted as changed.
+            ("**//Cache", true),
+        ] {
+            assert_eq!(
+                asked(pattern).reads_otherwise(pattern, false),
+                changes,
+                "{pattern}"
+            );
+        }
+        // Names are read off a text's own syntax.
+        assert_eq!(
+            samples("a{b,{c,D}}*?", false, None).unwrap(),
+            ["abxx", "acxx", "aDxx"]
+        );
+        // A negated class is tried with the other case of a letter it
+        // holds as well: the name a spelling goes wrong on.
+        assert_eq!(
+            samples(r"[!x]\*[q-s]", false, None).unwrap(),
+            ["q*q", "X*q"]
+        );
+        assert_eq!(
+            samples("p[!x]q[!x]", false, Some(("[!x]", 'X'))).unwrap(),
+            ["pXqq", "pXqX"],
+            "the chosen letter, at the first such class"
+        );
+        assert_eq!(
+            samples("{a,b}{c,d}{e,f}{g,h}{i,j}", false, None),
+            None,
+            "more names than are tried"
+        );
+        // Only names a walk gives: as a pattern may be written, with `./`
+        // before it or a separator after it — and none where a component
+        // is empty, `.` or `..`.
+        assert_eq!(samples("./Cache/", false, None).unwrap(), ["Cache"]);
+        assert_eq!(samples("{/,x}Cache", false, None).unwrap(), ["xCache"]);
+        for unwalked in [
+            "**//Cache",
+            "/Cache",
+            "Cache//**",
+            "../Cache",
+            "a/./b",
+            "./",
+        ] {
+            assert_eq!(
+                samples(unwalked, false, None).unwrap(),
+                Vec::<String>::new(),
+                "{unwalked}"
+            );
+        }
     }
 }

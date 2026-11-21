@@ -964,6 +964,42 @@ impl FileFilter {
         Ok(())
     }
 
+    /// A filter holding `pattern` alone — as an `--exclude`, or as an
+    /// `--include` — for ASKING what that pattern names
+    /// ([`crate::case_fold`] checks each thing it is about to say against
+    /// one of these). Compiled on its own and kept nowhere: the
+    /// process-wide store is for the filters a run uses, and a question
+    /// about one pattern must not push those out of it. `None` when the
+    /// pattern cannot be compiled so.
+    pub(crate) fn probing(pattern: &str, as_exclude: bool, ignore_case: bool) -> Option<Self> {
+        let patterns = vec![pattern.to_string()];
+        let widen = ignore_case.then_some(cfg!(windows));
+        let whole = |patterns: &[String]| {
+            CompiledPatterns::build(patterns, widen)
+                .ok()
+                .filter(|built| built.refused.is_empty())
+                .map(std::sync::Arc::new)
+        };
+        let mut filter = Self {
+            ignore_case,
+            ..Self::default()
+        };
+        if as_exclude {
+            let (names, paths) = ExcludeRules::bodies(&patterns, cfg!(windows));
+            let rules = ExcludeRules {
+                names: whole(&names)?,
+                paths: whole(&paths)?,
+            };
+            let _ = filter.compiled_files.set(whole(&patterns)?);
+            let _ = filter.compiled_subtrees.set(rules);
+            filter.exclude_files = patterns;
+        } else {
+            let _ = filter.compiled_includes.set(whole(&patterns)?);
+            filter.include_files = patterns;
+        }
+        Some(filter)
+    }
+
     fn include_globs(&self) -> &CompiledPatterns {
         self.compiled_includes.get_or_init(|| {
             CompiledPatterns::compile(
