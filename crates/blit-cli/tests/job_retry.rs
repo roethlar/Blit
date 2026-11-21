@@ -490,3 +490,77 @@ fn an_ignore_existing_retry_replaces_only_its_own_incomplete_copies() {
         text(&refused.stderr)
     );
 }
+
+/// cr-ecm11-2: the same for a source that is ONE FILE. Its failure is
+/// recorded under no name, and so is the copy its failed write left; the
+/// retry sends that copy's file with `--ignore-existing` off and replaces
+/// it. One of the two sets had the file's name put in place of the empty
+/// path and the other had not (cr-ecm10-3), so they were split as two
+/// different files: the pass that repairs looked for a line naming
+/// nothing, the other skipped `Report.txt` as a file to keep, and the
+/// retry exited 2 with the partial bytes in place.
+#[test]
+fn an_ignore_existing_retry_of_a_single_file_replaces_its_own_incomplete_copy() {
+    for own_copy in [true, false] {
+        let ctx = TestContext::new();
+        let src = ctx.workspace.join("Report.txt");
+        let out = ctx.workspace.join("out");
+        let dst = out.join("Report.txt");
+        fs::write(&src, b"the whole file").unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        let first = blit(
+            &ctx,
+            &[
+                "copy",
+                "--ignore-existing",
+                "--retries",
+                "0",
+                &src.display().to_string(),
+                &arg(&out),
+            ],
+        );
+        assert_eq!(
+            first.status.code(),
+            Some(EXIT_PARTIAL_FAILURE),
+            "{}",
+            text(&first.stderr)
+        );
+        let job = &jobs(&ctx)[0];
+        let run_id = job["run_id"].as_str().unwrap().to_string();
+        let record_file = PathBuf::from(job["record_file"].as_str().unwrap());
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&record_file).unwrap()).unwrap();
+        assert_eq!(record["files_failed"], 1, "{record}");
+        assert_eq!(
+            record["failures"][0]["path"], "",
+            "the source itself has no name: {record}"
+        );
+        fs::remove_dir_all(&dst).unwrap();
+        if own_copy {
+            // As a run whose write left its own incomplete copy.
+            record["left_in_place"] = serde_json::json!([""]);
+            fs::write(&record_file, serde_json::to_vec(&record).unwrap()).unwrap();
+            fs::write(&dst, b"the whole").unwrap();
+        } else {
+            // A file someone put there since: theirs to keep.
+            fs::write(&dst, b"mine").unwrap();
+        }
+
+        let retried = blit(&ctx, &["jobs", "retry", &run_id]);
+        let said = format!("{}{}", text(&retried.stdout), text(&retried.stderr));
+        assert!(retried.status.success(), "own copy {own_copy}: {said}");
+        assert_eq!(
+            fs::read(&dst).unwrap(),
+            if own_copy {
+                &b"the whole file"[..]
+            } else {
+                &b"mine"[..]
+            },
+            "own copy {own_copy}: {said}"
+        );
+        assert!(
+            !said.contains("missing at retry"),
+            "own copy {own_copy}: {said}"
+        );
+    }
+}
