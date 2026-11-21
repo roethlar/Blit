@@ -163,8 +163,9 @@ fn rm_treats_each_operand_as_the_unix_command_does() {
 /// prints (its own name before them), ends with the same status and
 /// leaves the same entries on disk — a directory with and without `-r`,
 /// missing operands with and without `-f`, a link to a directory (removed
-/// as the link, its target untouched), and a tree holding a directory
-/// that cannot be written, which both go on past.
+/// as the link, its target untouched), a tree holding a directory that
+/// cannot be written, which both go on past, and an operand below a
+/// directory that cannot be searched, which stops neither (cr-uv1-3).
 #[cfg(target_os = "linux")]
 #[test]
 fn rm_equals_the_system_rm() {
@@ -188,11 +189,16 @@ fn rm_equals_the_system_rm() {
         write(root, "t/locked/sub/deep.txt");
         write(root, "t/open/a.txt");
         fs::set_permissions(root.join("t/locked"), fs::Permissions::from_mode(0o555)).unwrap();
+        // A directory that cannot even be searched, and an entry in it.
+        write(root, "t/sealed/entry");
+        fs::set_permissions(root.join("t/sealed"), fs::Permissions::from_mode(0o000)).unwrap();
     };
     let unlock = |root: &Path| {
-        let locked = root.join("t/locked");
-        if locked.exists() {
-            fs::set_permissions(locked, fs::Permissions::from_mode(0o755)).unwrap();
+        for dir in ["t/locked", "t/sealed"] {
+            let dir = root.join(dir);
+            if dir.exists() {
+                fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+            }
         }
     };
     let left = |root: &Path| -> Vec<String> {
@@ -234,6 +240,10 @@ fn rm_equals_the_system_rm() {
     } else {
         cases.push((&["-r"], &["t/locked", "t/open"]));
         cases.push((&["-r", "-f"], &["t/locked/sub", "t/open"]));
+        // cr-uv1-3: an operand that cannot be reached is its own failure;
+        // the operands before and after it go.
+        cases.push((&[], &["t/file.txt", "t/sealed/entry", "t/other.txt"]));
+        cases.push((&["-r", "-f"], &["t/sealed/entry", "t/dir", "t/sealed"]));
     }
 
     for (options, operands) in cases {
@@ -480,7 +490,7 @@ fn rm_refuses_what_it_cannot_do_before_removing_anything() {
 /// AC-11, an asker of another contract against this daemon: the removal
 /// is refused before anything is removed — an older asker and a newer one
 /// alike — with both versions named; a whole module is refused by the
-/// daemon itself, whoever asks. (A daemon too old to know the request at
+/// daemon itself, whoever asks, as a failure of that operand. (A daemon too old to know the request at
 /// all is `remote_remote.rs`'s fake.)
 #[test]
 fn a_daemon_refuses_rm_from_another_contract() {
@@ -521,12 +531,22 @@ fn a_daemon_refuses_rm_from_another_contract() {
                 "nothing removed"
             );
         }
+        // The module's root is refused by the daemon itself, whoever asks
+        // — as that operand's failure (cr-uv1-3), with nothing removed.
         for root in ["", ".", "./"] {
-            let status = client
+            let reply = client
                 .rm(request(CONTRACT_VERSION, root))
                 .await
-                .expect_err("the module's root");
-            assert_eq!(status.code(), tonic::Code::InvalidArgument, "{root:?}");
+                .expect("an answer about the operand")
+                .into_inner();
+            assert_eq!(reply.entries_removed, 0, "{root:?}");
+            assert_eq!(reply.failures.len(), 1, "{root:?} {reply:?}");
+            assert!(
+                reply.failures[0].operand == 0
+                    && reply.failures[0].relative_path.is_empty()
+                    && reply.failures[0].reason.contains("the module's root"),
+                "{root:?} {reply:?}"
+            );
             assert!(ctx.module_dir.join("t/file.txt").exists(), "{root:?}");
         }
         // The same request from this contract is answered.

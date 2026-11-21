@@ -13,23 +13,28 @@ use tonic::Status;
 use super::util::{internal_err, io_to_status, resolve_relative_path, response_channel_closed};
 use blit_core::path_posix::request_path_to_posix;
 
-pub(crate) fn sanitize_request_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, Status> {
-    let mut sanitized = Vec::new();
-    for raw in paths {
-        if raw.trim().is_empty() {
-            return Err(Status::invalid_argument(
-                "an operand to remove cannot be empty",
-            ));
-        }
-        let rel = resolve_relative_path(&raw)?;
-        if rel.as_os_str().is_empty() || rel == Path::new(".") {
-            return Err(Status::invalid_argument(
-                "refusing to remove the module's root; name a path inside it",
-            ));
-        }
-        sanitized.push(rel);
-    }
-    Ok(sanitized)
+/// One operand of a removal as the request names it: its path below the
+/// module, or why it cannot be removed at all.
+pub(crate) type RmOperand = Result<PathBuf, String>;
+
+/// Why the module's own root is not removed.
+const THE_MODULE_ROOT: &str = "refusing to remove the module's root; name a path inside it";
+
+/// Read a removal's operands. One that cannot be an operand — the
+/// module's root, a path with `..` in it — is THAT operand's failure and
+/// no more (cr-uv1-3): it used to refuse the request whole, where `rm`
+/// goes on to the operands it can remove.
+pub(crate) fn read_operands(paths: Vec<String>) -> Vec<RmOperand> {
+    paths
+        .into_iter()
+        .map(|raw| {
+            let rel = resolve_relative_path(&raw).map_err(|status| status.message().to_string())?;
+            if rel.as_os_str().is_empty() || rel == Path::new(".") {
+                return Err(THE_MODULE_ROOT.to_string());
+            }
+            Ok(rel)
+        })
+        .collect()
 }
 
 /// `rm`'s operands, each removed as the command removes it
@@ -39,7 +44,7 @@ pub(crate) fn sanitize_request_paths(paths: Vec<String>) -> Result<Vec<PathBuf>,
 pub(crate) async fn remove_operands(
     module_path: PathBuf,
     canonical_root: PathBuf,
-    operands: Vec<PathBuf>,
+    operands: Vec<RmOperand>,
     options: blit_core::deletion::RmOptions,
 ) -> Result<RmReply, Status> {
     task::spawn_blocking(move || {
@@ -52,11 +57,23 @@ pub(crate) async fn remove_operands(
 fn remove_operands_sync(
     module_path: &Path,
     canonical_root: &Path,
-    operands: &[PathBuf],
+    operands: &[RmOperand],
     options: blit_core::deletion::RmOptions,
 ) -> Result<RmReply, Status> {
     let mut reply = RmReply::default();
     for (operand, rel) in operands.iter().enumerate() {
+        let rel = match rel {
+            Ok(rel) => rel,
+            Err(reason) => {
+                reply.failures.push(RmFailure {
+                    operand: operand as u32,
+                    relative_path: String::new(),
+                    raw_relative_path: None,
+                    reason: reason.clone(),
+                });
+                continue;
+            }
+        };
         let removal = blit_core::deletion::remove_as_rm(
             &module_path.join(rel),
             Some(canonical_root),
@@ -360,6 +377,113 @@ pub(crate) fn filesystem_space_for_path(path: &Path) -> Result<DfReply, Status> 
                 std::io::ErrorKind::PermissionDenied => Status::permission_denied(reason),
                 _ => Status::internal(reason),
             })
+        }
+    }
+}
+
+#[cfg(test)]
+mod rm_tests {
+    //! The daemon's half of `rm`: what goes wrong with one operand is that
+    //! operand's failure (cr-uv1-3). The removal itself is guarded in
+    //! `blit_core::deletion`.
+
+    use super::*;
+    use std::fs;
+
+    fn removed(root: &Path, paths: &[&str], recursive: bool) -> RmReply {
+        let operands = read_operands(paths.iter().map(|path| path.to_string()).collect());
+        remove_operands_sync(
+            root,
+            root,
+            &operands,
+            blit_core::deletion::RmOptions {
+                recursive,
+                force: false,
+            },
+        )
+        .expect("an answer for the request")
+    }
+
+    fn failures(reply: &RmReply) -> Vec<(u32, &str, &str)> {
+        reply
+            .failures
+            .iter()
+            .map(|failure| {
+                (
+                    failure.operand,
+                    failure.relative_path.as_str(),
+                    failure.reason.as_str(),
+                )
+            })
+            .collect()
+    }
+
+    /// The reviewer's command: `first`, an entry below a directory that
+    /// cannot be searched, `last`. The request used to end at the second
+    /// with nothing reported — `first` deleted, `last` left, all three
+    /// charged with the failure. Each operand now has its own answer.
+    #[cfg(unix)]
+    #[test]
+    fn an_operand_that_cannot_be_reached_does_not_end_the_request() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        fs::create_dir_all(root.join("blocked")).unwrap();
+        for file in ["first", "blocked/entry", "last"] {
+            fs::write(root.join(file), b"x").unwrap();
+        }
+        fs::set_permissions(root.join("blocked"), fs::Permissions::from_mode(0o000)).unwrap();
+        let privileged = fs::read_dir(root.join("blocked")).is_ok();
+        let reply = removed(&root, &["first", "blocked/entry", "last"], false);
+        fs::set_permissions(root.join("blocked"), fs::Permissions::from_mode(0o755)).unwrap();
+        if privileged {
+            eprintln!("skipping: running privileged, mode 000 stops nothing");
+            return;
+        }
+        assert_eq!(failures(&reply), [(1, "", "Permission denied")]);
+        assert_eq!(reply.entries_removed, 2);
+        assert!(!root.join("first").exists() && !root.join("last").exists());
+        assert!(root.join("blocked/entry").exists());
+    }
+
+    /// An operand that cannot be one, and one that leaves the module
+    /// through a link, are each a failure of their own; the operands
+    /// around them are removed.
+    #[test]
+    fn an_operand_that_cannot_be_one_is_its_own_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let elsewhere = fs::canonicalize(outside.path()).unwrap();
+        fs::write(elsewhere.join("victim"), b"x").unwrap();
+        for file in ["first", "last"] {
+            fs::write(root.join(file), b"x").unwrap();
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&elsewhere, root.join("way-out")).unwrap();
+
+        let reply = removed(&root, &["first", "../victim", "", ".", "last"], true);
+        let found = failures(&reply);
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(
+            found[0].0 == 1 && found[0].2.contains("path not allowed"),
+            "{found:?}"
+        );
+        assert_eq!(
+            found[1..],
+            [(2, "", THE_MODULE_ROOT), (3, "", THE_MODULE_ROOT)]
+        );
+        assert_eq!(reply.entries_removed, 2);
+        assert!(!root.join("first").exists() && !root.join("last").exists());
+        assert!(root.is_dir(), "the module's root stands");
+
+        #[cfg(unix)]
+        {
+            fs::write(root.join("first"), b"x").unwrap();
+            let reply = removed(&root, &["way-out/victim", "first"], true);
+            assert_eq!(failures(&reply), [(0, "", "the path leaves the module")]);
+            assert_eq!(reply.entries_removed, 1);
+            assert!(elsewhere.join("victim").exists() && !root.join("first").exists());
         }
     }
 }

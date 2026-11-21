@@ -317,9 +317,12 @@ impl Removal {
 ///   `rm -r` leaves it. ([`execute_deletion_plan`] stops at the first
 ///   failure; a mirror's delete pass wants that, a user's `rm` does not.)
 ///
-/// `target` is checked against `canonical_root` before anything is read.
-/// `Err` is for what is not about one entry: a target outside the root, a
-/// cancelled operation.
+/// `target` must lie in `canonical_root`, and that is found out before
+/// anything is removed. One that does not — or whose place cannot be found
+/// out, below a directory that cannot be searched — is a FAILURE OF THAT
+/// OPERAND, like any other (cr-uv1-3): `rm a blocked/b c` removes `a` and
+/// `c` and says why `blocked/b` stays. `Err` is for what is not about one
+/// operand: a cancelled operation.
 ///
 /// # Anchoring (cr-uv1-2)
 ///
@@ -344,21 +347,20 @@ pub fn remove_as_rm(
     options: RmOptions,
     abort: Option<&AtomicBool>,
 ) -> Result<Removal, DeletionError> {
-    if let Some(root) = canonical_root {
-        crate::path_safety::verify_contained(root, target).map_err(|source| {
-            DeletionError::Containment {
-                operation: RM_OPERATION,
-                target: target.to_path_buf(),
-                source,
-            }
-        })?;
-    }
     let mut removal = Removal::default();
     remove_operand(target, canonical_root, options, abort, &mut removal)?;
     Ok(removal)
 }
 
 const RM_OPERATION: &str = "rm";
+
+/// Why an operand that leaves the root is not removed.
+fn leaves_the_root() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "the path leaves the module",
+    )
+}
 
 /// `rm`'s words for a directory without `-r`, on every platform.
 fn is_a_directory() -> std::io::Error {
@@ -551,11 +553,19 @@ fn remove_operand(
 #[cfg(not(unix))]
 fn remove_operand(
     target: &Path,
-    _canonical_root: Option<&Path>,
+    canonical_root: Option<&Path>,
     options: RmOptions,
     abort: Option<&AtomicBool>,
     removal: &mut Removal,
 ) -> Result<(), DeletionError> {
+    // Where the operand lies is checked by its path here, and what the
+    // check finds is this operand's failure (cr-uv1-3).
+    if let Some(root) = canonical_root {
+        if crate::path_safety::verify_contained(root, target).is_err() {
+            removal.fail(PathBuf::new(), leaves_the_root());
+            return Ok(());
+        }
+    }
     let metadata = match std::fs::symlink_metadata(target) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && options.force => {
@@ -669,12 +679,9 @@ mod anchored {
             let Some(root) = root else {
                 return Self::open_path(canonical);
             };
-            let below = canonical.strip_prefix(root).map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "the path leaves the module",
-                )
-            })?;
+            let below = canonical
+                .strip_prefix(root)
+                .map_err(|_| super::leaves_the_root())?;
             let mut dir = Self::open_path(root)?;
             for component in below.components() {
                 let Component::Normal(name) = component else {
@@ -1037,28 +1044,73 @@ mod rm_tests {
         assert_eq!(removal.removed, 5);
     }
 
-    /// A target outside the root is refused before anything is read, and a
-    /// cancelled removal stops.
+    /// A target outside the root is that operand's failure — `-f` or not,
+    /// by its own path or through a link that leaves — and nothing of it
+    /// is touched (cr-uv1-3: it used to end the whole request, with what
+    /// the operands before it had done unreported). A cancelled removal
+    /// stops.
     #[test]
-    fn a_target_outside_the_root_is_refused_whole() {
+    fn a_target_outside_the_root_is_a_failure_of_that_operand() {
         let (_tmp, root) = tree();
         let outside = tempfile::tempdir().unwrap();
-        fs::write(outside.path().join("victim.txt"), b"x").unwrap();
-        let error = remove_as_rm(
-            &outside.path().join("victim.txt"),
-            Some(&root),
-            RmOptions {
-                recursive: true,
-                force: true,
-            },
-            None,
-        )
-        .unwrap_err();
-        assert!(
-            matches!(error, DeletionError::Containment { .. }),
-            "{error}"
-        );
-        assert!(outside.path().join("victim.txt").exists());
+        let elsewhere = fs::canonicalize(outside.path()).unwrap();
+        fs::write(elsewhere.join("victim.txt"), b"x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&elsewhere, root.join("way-out")).unwrap();
+        let mut targets = vec![elsewhere.join("victim.txt")];
+        if cfg!(unix) {
+            targets.push(root.join("way-out/victim.txt"));
+        }
+        for target in targets {
+            for force in [false, true] {
+                let removal = remove_as_rm(
+                    &target,
+                    Some(&root),
+                    RmOptions {
+                        recursive: true,
+                        force,
+                    },
+                    None,
+                )
+                .expect("an answer about the operand");
+                assert_eq!(removal.removed, 0, "{}", target.display());
+                assert_eq!(
+                    reasons(&removal),
+                    [(String::new(), std::io::ErrorKind::PermissionDenied)],
+                    "{}",
+                    target.display()
+                );
+                assert_eq!(
+                    crate::disk_usage::os_reason(&removal.failures[0].error),
+                    "the path leaves the module"
+                );
+            }
+        }
+        assert!(elsewhere.join("victim.txt").exists());
+
+        // Below a directory that cannot be searched: the system's own
+        // words for it, as `rm` gives them, and still one operand's.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::create_dir_all(root.join("blocked")).unwrap();
+            fs::write(root.join("blocked/entry"), b"x").unwrap();
+            fs::set_permissions(root.join("blocked"), fs::Permissions::from_mode(0o000)).unwrap();
+            let privileged = fs::read_dir(root.join("blocked")).is_ok();
+            let removal = rm(&root, "blocked/entry", false, false);
+            fs::set_permissions(root.join("blocked"), fs::Permissions::from_mode(0o755)).unwrap();
+            if !privileged {
+                assert_eq!(
+                    reasons(&removal),
+                    [(String::new(), std::io::ErrorKind::PermissionDenied)]
+                );
+                assert_eq!(
+                    crate::disk_usage::os_reason(&removal.failures[0].error),
+                    "Permission denied"
+                );
+                assert!(root.join("blocked/entry").exists());
+            }
+        }
 
         let abort = AtomicBool::new(true);
         let error = remove_as_rm(

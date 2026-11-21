@@ -264,7 +264,10 @@ asks before it deletes.
   being told to. A path that is not there is an error unless `-f` — it
   used to exit 0 ("path may already be absent"). Any number of paths may
   be given, each processed whatever became of the others — two used to be
-  a usage error. The exit status is 0 only when every path is gone.
+  a usage error. A path the daemon cannot reach (below a directory it may
+  not search) or will not remove (the module's root, a path that leaves
+  the module) is that path's failure and no more. The exit status is 0
+  only when every path is gone.
 - It prints what `rm` prints: nothing for what was removed, and
   `cannot remove 'PATH': REASON` for each entry that could not be, with
   the path as typed. A removal goes on past an entry it cannot remove and

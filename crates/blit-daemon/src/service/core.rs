@@ -1,5 +1,5 @@
 use super::admin::{
-    filesystem_space_for_path, list_completions, remove_operands, sanitize_request_paths,
+    filesystem_space_for_path, list_completions, read_operands, remove_operands,
     split_completion_prefix, stream_disk_usage, stream_find,
 };
 use super::util::{
@@ -162,7 +162,7 @@ impl BlitService {
                 module.name
             )));
         }
-        let operands = sanitize_request_paths(req.paths)?;
+        let operands = read_operands(req.paths);
         let reply = remove_operands(
             module.path.clone(),
             module.canonical_root.clone(),
