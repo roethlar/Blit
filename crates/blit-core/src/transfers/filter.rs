@@ -312,6 +312,10 @@ fn case_note_on(
         crate::case_fold::Whole {
             excludes: &resolved.patterns,
             includes: &includes,
+            // cr-ecm13-6: as [`validate`] holds the command to it — the
+            // excludes that can match nothing are in no list, and are
+            // patterns all the same.
+            refused_with_the_option: refuse_unreadable(resolved.unmatchable.clone(), true).is_err(),
         },
         windows,
     )
@@ -4667,6 +4671,76 @@ mod tests {
         assert!(spec.files_from_set);
         let received = filter_from_spec(spec).unwrap();
         assert!(passes(&received, "a.jpg") && !passes(&received, "b.jpg"));
+    }
+
+    /// cr-ecm13-6: the line validates what the command validates. An
+    /// absolute exclude that lies outside the source is in no filter — it
+    /// can match nothing — and is still held to being a pattern: with an
+    /// `s` inside 249 pairs of braces in one, the command with
+    /// `--ignore-case` is refused, and beside it `*Cache` was offered
+    /// `cache, CACHE`. The same pattern under the source, or none, and the
+    /// line is as it was.
+    #[test]
+    fn the_case_note_offers_nothing_of_a_command_that_would_be_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let deep = format!(
+            "/nowhere-under-the-source/{}s{}",
+            "{".repeat(249),
+            "}".repeat(249)
+        );
+        let note = |exclude: &[String]| {
+            let resolved = resolve_excludes(exclude, Some(&root));
+            let typed: Vec<(&str, Option<&str>)> = exclude
+                .iter()
+                .map(|pattern| (pattern.as_str(), None))
+                .collect();
+            case_note(&typed, &[], &resolved)
+        };
+        let command = |exclude: &[String], ignore_case: bool| {
+            let mut inputs = inputs(&[], exclude);
+            inputs.source_root = Some(&root);
+            inputs.ignore_case = ignore_case;
+            validate(&inputs)
+        };
+
+        let both = ["*Cache".to_string(), deep.clone()];
+        assert_eq!(
+            resolve_excludes(&both, Some(&root)).unmatchable,
+            std::slice::from_ref(&deep)
+        );
+        assert!(command(&both, false).is_ok(), "as typed the command runs");
+        assert!(
+            command(&both, true).is_err(),
+            "with the option it is refused"
+        );
+        assert_eq!(
+            note(&both).as_deref(),
+            Some(
+                "\"*Cache\" matches exactly as typed; capital letters matter (--ignore-case \
+                 ignores them)."
+            )
+        );
+        // Without that pattern the command runs either way, and the line
+        // has its example.
+        let alone = ["*Cache".to_string()];
+        assert!(command(&alone, true).is_ok());
+        assert_eq!(
+            note(&alone).as_deref(),
+            Some(
+                "\"*Cache\" matches Cache only; capital letters matter (--ignore-case would also \
+                 match cache, CACHE)."
+            )
+        );
+        // And beside an outside pattern the option CAN read.
+        let harmless = [
+            "*Cache".to_string(),
+            "/nowhere-under-the-source/Thing".to_string(),
+        ];
+        assert!(command(&harmless, true).is_ok());
+        assert!(
+            note(&harmless).is_some_and(|line| line.ends_with("would also match cache, CACHE)."))
+        );
     }
 
     /// cr-ecm4-3: the line about capital letters is derived from the

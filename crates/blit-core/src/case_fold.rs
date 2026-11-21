@@ -88,6 +88,7 @@ pub(crate) fn case_note(patterns: &[(&str, Option<&str>)], windows: bool) -> Opt
         Whole {
             excludes: &all,
             includes: &[],
+            refused_with_the_option: false,
         },
         windows,
     )
@@ -105,6 +106,12 @@ pub(crate) struct Whole<'a> {
     pub excludes: &'a [String],
     /// The includes it applies.
     pub includes: &'a [String],
+    /// cr-ecm13-6: the command WITH the option is refused for a pattern
+    /// that is in neither list — an absolute exclude that lies outside the
+    /// source matches nothing and is in no filter, and is still held to
+    /// being a pattern when the command is read. What the two lists make
+    /// of the option says nothing of a command that could not run.
+    pub refused_with_the_option: bool,
 }
 
 /// The run's COMPLETE filter — both lists in one, as the run applies
@@ -122,6 +129,8 @@ pub(crate) struct Whole<'a> {
 struct Complete {
     excludes: Vec<String>,
     includes: Vec<String>,
+    /// [`Whole::refused_with_the_option`].
+    refused_elsewhere: bool,
     typed: crate::fs_enum::FileFilter,
     ignoring: std::cell::OnceCell<crate::fs_enum::FileFilter>,
 }
@@ -131,6 +140,7 @@ impl Complete {
         std::rc::Rc::new(Self {
             excludes: whole.excludes.to_vec(),
             includes: whole.includes.to_vec(),
+            refused_elsewhere: whole.refused_with_the_option,
             typed: Self::filter(whole.excludes, whole.includes, false),
             ignoring: std::cell::OnceCell::new(),
         })
@@ -143,6 +153,7 @@ impl Complete {
         Self::of(Whole {
             excludes: &[pattern.to_string()],
             includes: &[],
+            refused_with_the_option: false,
         })
     }
 
@@ -184,7 +195,13 @@ impl Complete {
     /// with `--ignore-case` is refused whole. Where it cannot be told —
     /// past the bound — nothing concrete is said either; a class that
     /// could take less is still named, as one that MAY.
+    ///
+    /// cr-ecm13-6: nor where the command would be refused for a pattern
+    /// that is in neither list.
     fn with_the_option(&self) -> WithTheOption {
+        if self.refused_elsewhere {
+            return WithTheOption::Refused;
+        }
         match self.ignoring() {
             None => WithTheOption::NotKnown,
             Some(filter) if filter.validate_globs().is_ok() => WithTheOption::Reads,
@@ -2589,6 +2606,7 @@ mod tests {
         let whole = |excludes| Whole {
             excludes,
             includes: &[],
+            refused_with_the_option: false,
         };
         assert_eq!(
             case_note_of(&[absolute], whole(&data), false).as_deref(),
@@ -3007,6 +3025,7 @@ mod tests {
                 Whole {
                     excludes: &excluded,
                     includes: &included,
+                    refused_with_the_option: false,
                 },
                 cfg!(windows),
             )
@@ -3096,7 +3115,15 @@ mod tests {
                 })
                 .collect();
             WIDENED.with(|built| built.set(0));
-            let line = case_note_of(&noted, Whole { excludes, includes }, cfg!(windows));
+            let line = case_note_of(
+                &noted,
+                Whole {
+                    excludes,
+                    includes,
+                    refused_with_the_option: false,
+                },
+                cfg!(windows),
+            );
             (line, WIDENED.with(|built| built.get()))
         };
         // The reviewer's command: 10,000 includes. The rule, and a count.
@@ -3155,6 +3182,34 @@ mod tests {
                 ))
             );
         }
+        // cr-ecm13-6: and where the pattern that refuses the option is in
+        // NEITHER list — an absolute exclude outside the source — the line
+        // is the rule just the same.
+        let cache = ["*Cache".to_string()];
+        let said = |refused_with_the_option| {
+            case_note_of(
+                &[Noted {
+                    typed: "*Cache",
+                    read_as: "*Cache",
+                    file: None,
+                    role: Role::Exclude,
+                }],
+                Whole {
+                    excludes: &cache,
+                    includes: &[],
+                    refused_with_the_option,
+                },
+                cfg!(windows),
+            )
+        };
+        assert_eq!(
+            said(true).as_deref(),
+            Some(
+                "\"*Cache\" matches exactly as typed; capital letters matter (--ignore-case \
+                 ignores them)."
+            )
+        );
+        assert!(said(false).is_some_and(|line| line.ends_with("would also match cache, CACHE).")));
         // Alone, `*Cache` has its example.
         assert!(case_note(&[("*Cache", None)], cfg!(windows))
             .is_some_and(|line| line.ends_with("(--ignore-case would also match cache, CACHE).")));
@@ -3227,6 +3282,7 @@ mod tests {
             let whole = Complete::of(Whole {
                 excludes: &owned(excludes),
                 includes: &owned(includes),
+                refused_with_the_option: false,
             });
             Asked::about(pattern, role, &whole).expect("a pattern")
         };
