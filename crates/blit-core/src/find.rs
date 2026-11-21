@@ -99,16 +99,31 @@ impl SizeTest {
 /// `-mtime 0` is "in the last 24 hours" and `-mtime +0` "more than one
 /// day ago". A time still to come is less than none (`-mtime -1` holds,
 /// `-mtime 0` does not; same run).
+///
+/// The two moments are subtracted as they are, to the nanosecond, and
+/// what has ELAPSED is cut to whole periods (cr-uv4-4). Each cut to a
+/// whole second first, a file 86,399.12 seconds old could count as a day
+/// old — and go, with `-delete`, before its day was up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgeTest {
     pub compare: Compare,
     pub days: u64,
 }
 
+/// A moment as nanoseconds since 1970 began; before it, less than none.
+pub fn nanos_of(moment: std::time::SystemTime) -> i128 {
+    match moment.duration_since(std::time::UNIX_EPOCH) {
+        Ok(since) => since.as_nanos() as i128,
+        Err(before) => -(before.duration().as_nanos() as i128),
+    }
+}
+
 impl AgeTest {
-    pub fn holds(&self, now_seconds: i64, written_seconds: i64) -> bool {
-        let periods =
-            (i128::from(now_seconds) - i128::from(written_seconds)).div_euclid(24 * 60 * 60);
+    /// Whether an entry written at `written_nanos` passes at `now_nanos`
+    /// ([`nanos_of`]).
+    pub fn holds(&self, now_nanos: i128, written_nanos: i128) -> bool {
+        const A_DAY_NANOS: i128 = 24 * 60 * 60 * 1_000_000_000;
+        let periods = (now_nanos - written_nanos).div_euclid(A_DAY_NANOS);
         self.compare.holds(periods, i128::from(self.days))
     }
 }
@@ -130,9 +145,9 @@ pub struct FindOptions {
     pub sizes: Vec<SizeTest>,
     /// `-mtime`, every one of which must hold.
     pub ages: Vec<AgeTest>,
-    /// The moment ages are counted from, in seconds since 1970: when the
-    /// walk was asked for, on the clock of the machine that walks.
-    pub now_seconds: i64,
+    /// The moment ages are counted from ([`nanos_of`]): when the walk was
+    /// asked for, on the clock of the machine that walks.
+    pub now_nanos: i128,
     /// An entry is given after everything below it — `find`'s `-depth`,
     /// which `-delete` turns on: what is in a directory goes before the
     /// directory can.
@@ -154,12 +169,14 @@ impl FindOptions {
 
     /// The tests the entry itself answers — a link as the link it is.
     fn facts_hold(&self, metadata: &fs::Metadata) -> bool {
-        let written = crate::wire_metadata::mtime_seconds(metadata).unwrap_or(0);
         self.sizes.iter().all(|test| test.holds(metadata.len()))
-            && self
-                .ages
-                .iter()
-                .all(|test| test.holds(self.now_seconds, written))
+            && (self.ages.is_empty() || {
+                // The time as the filesystem keeps it, every digit.
+                let written = metadata.modified().map_or(0, nanos_of);
+                self.ages
+                    .iter()
+                    .all(|test| test.holds(self.now_nanos, written))
+            })
     }
 }
 
@@ -589,13 +606,97 @@ mod tests {
             (Exactly, 10, "d10"),
         ] {
             let test = AgeTest { compare, days };
+            let second = 1_000_000_000i128;
             let holds: Vec<&str> = ages
                 .iter()
-                .filter(|(_, ago)| test.holds(now, now - ago))
+                .filter(|(_, ago)| {
+                    test.holds(i128::from(now) * second, i128::from(now - ago) * second)
+                })
                 .map(|(name, _)| *name)
                 .collect();
             assert_eq!(holds.join(" "), found, "{test:?}");
         }
+    }
+
+    /// cr-uv4-4: an age is what has ELAPSED, cut to whole days — not the
+    /// difference of two times each cut to a whole second. The reviewer's
+    /// case: a file 86,399.12 seconds old is not yet a day old, whatever
+    /// part of a second the clock stands at; GNU find leaves it out of
+    /// `-mtime +0`, and so `-delete` leaves it.
+    #[test]
+    fn an_age_is_counted_from_the_whole_of_both_times() {
+        let second = 1_000_000_000i128;
+        let day = 24 * 60 * 60 * second;
+        let over_a_day = AgeTest {
+            compare: Compare::More,
+            days: 0,
+        };
+        let today = AgeTest {
+            compare: Compare::Exactly,
+            days: 0,
+        };
+        // Written at .88 of a second, looked at 86,399.12 seconds later —
+        // on the second: the two whole seconds are 86,400 apart.
+        let written = 1_800_000_000 * second + 880_000_000;
+        let now = written + 86_399 * second + 120_000_000;
+        assert_eq!(now % second, 0, "the clock stands on the second");
+        assert_eq!((now / second) - (written / second), 86_400);
+        assert!(!over_a_day.holds(now, written), "not a day old yet");
+        assert!(today.holds(now, written));
+        // One nanosecond short of a day, and the day itself.
+        assert!(!over_a_day.holds(written + day - 1, written));
+        assert!(over_a_day.holds(written + day, written));
+        assert!(!today.holds(written + day, written));
+        // A time to come, by less than a second, is less than no age.
+        let ahead = AgeTest {
+            compare: Compare::Less,
+            days: 0,
+        };
+        assert!(ahead.holds(written, written + 1));
+        assert!(!today.holds(written, written + 1));
+        // Before 1970 a moment is less than none, and still a moment.
+        let before = std::time::UNIX_EPOCH - std::time::Duration::from_nanos(1_500_000_000);
+        assert_eq!(nanos_of(before), -1_500_000_000);
+        assert_eq!(nanos_of(std::time::UNIX_EPOCH), 0);
+    }
+
+    /// cr-uv4-4, at the walk: the time is the one the filesystem keeps,
+    /// to the part of a second it keeps.
+    #[test]
+    fn the_walk_reads_an_entrys_time_whole() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let start = tmp.path().join("t");
+        fs::create_dir(&start).unwrap();
+        let file = start.join("f");
+        fs::write(&file, b"x").unwrap();
+        let second = 1_000_000_000i128;
+        // Written at .88 of a second.
+        let written = filetime::FileTime::from_unix_time(1_800_000_000, 880_000_000);
+        filetime::set_file_mtime(&file, written).unwrap();
+        let kept = fs::metadata(&file)
+            .unwrap()
+            .modified()
+            .map(nanos_of)
+            .unwrap();
+        if kept % second == 0 {
+            // A filesystem that keeps whole seconds cannot show this.
+            return;
+        }
+        let found = |now_nanos: i128| {
+            let options = FindOptions {
+                kinds: vec![Kind::File],
+                ages: vec![AgeTest {
+                    compare: Compare::More,
+                    days: 0,
+                }],
+                now_nanos,
+                ..FindOptions::default()
+            };
+            walk(&start, "t", &options).0
+        };
+        let on_the_second = 1_800_000_000 * second + 86_400 * second;
+        assert!(found(on_the_second).is_empty(), "86,399.12 seconds old");
+        assert_eq!(found(on_the_second + 880_000_000), ["f"], "a day old");
     }
 
     /// Slice 4: with `contents_first` an entry is given after everything

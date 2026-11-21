@@ -1235,9 +1235,7 @@ impl Blit for BlitService {
             max_depth: req.max_depth,
             follow_start: req.follow_start,
             // Ages are counted from this machine's clock, now.
-            now_seconds: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |since| since.as_secs() as i64),
+            now_nanos: blit_core::find::nanos_of(std::time::SystemTime::now()),
             // What is in a directory goes before the directory can.
             contents_first: req.delete,
             ..Default::default()
