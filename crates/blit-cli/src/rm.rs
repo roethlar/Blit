@@ -226,10 +226,11 @@ impl Said {
     fn say(&mut self, failed: Failed) {
         self.any = true;
         if self.json {
-            self.listed.push(serde_json::json!({
-                "path": String::from_utf8_lossy(&failed.path),
-                "reason": failed.reason,
-            }));
+            // cr-uv3-7: with its bytes, where it is not text.
+            self.listed.push(quote::in_json(
+                &failed.path,
+                serde_json::json!({ "reason": failed.reason }),
+            ));
             return;
         }
         let name = quote::for_shell(&failed.path, true);

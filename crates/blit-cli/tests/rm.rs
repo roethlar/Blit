@@ -720,6 +720,131 @@ fn a_name_that_is_not_text_is_printed_as_one_these_commands_take() {
     the_line_find_prints_is_taken(&ctx, "bad*", name);
 }
 
+/// cr-uv3-7: `--json` holds text, and a name need not be text. `find
+/// --json` gave one string twice for two names — one holding a byte that
+/// is no text, the other the character shown in its place — and `rm
+/// --json` two failures that read alike. A name that is not text has its
+/// bytes beside the text, and they read back; a name that is text has
+/// nothing added.
+#[cfg(unix)]
+#[test]
+fn json_tells_a_name_that_is_not_text_from_the_text_shown_for_it() {
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let ctx = TestContext::new();
+    write(&ctx.module_dir, "t/plain.txt");
+    let json = |args: &[&OsStr]| -> (Option<i32>, serde_json::Value) {
+        let mut cmd = Command::new(&ctx.cli_bin);
+        cmd.arg("--config-dir")
+            .arg(&ctx.config_dir)
+            .args(args)
+            .stdin(Stdio::null());
+        let ran = run_with_timeout(cmd, Duration::from_secs(60));
+        let said = serde_json::from_slice(&ran.stdout).unwrap_or_else(|error| {
+            panic!(
+                "{error}: {}{}",
+                String::from_utf8_lossy(&ran.stdout),
+                String::from_utf8_lossy(&ran.stderr)
+            )
+        });
+        (ran.status.code(), said)
+    };
+    let below = |name: &[u8]| -> OsString {
+        let mut typed = remote(&ctx, "t/").into_bytes();
+        typed.extend_from_slice(name);
+        OsString::from_vec(typed)
+    };
+    // The bytes an entry gives for its name, if it gives any.
+    let bytes_of = |entry: &serde_json::Value| -> Option<Vec<u8>> {
+        entry.get("raw").map(|raw| {
+            blit_core::raw_name::unescape_raw(raw.as_str().expect("text")).expect("reads back")
+        })
+    };
+    let (not_text, alike) = (&b"bad\xff.dat"[..], "bad\u{fffd}.dat".as_bytes());
+    let shown_alike = |entry: &&serde_json::Value| {
+        entry["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("bad\u{fffd}.dat"))
+    };
+
+    // `rm`, of two operands that are not there: nothing need hold them.
+    let (code, said) = json(&[
+        OsStr::new("rm"),
+        OsStr::new("-y"),
+        OsStr::new("--json"),
+        &below(not_text),
+        &below(alike),
+    ]);
+    assert_eq!(code, Some(1), "{said}");
+    let failures = said["failures"].as_array().expect("failures");
+    assert_eq!(failures.len(), 2, "{said}");
+    assert_eq!(failures[0]["path"], failures[1]["path"], "one text: {said}");
+    assert!(
+        bytes_of(&failures[0]).is_some_and(|bytes| bytes.ends_with(not_text)),
+        "{said}"
+    );
+    assert!(
+        failures[1].get("raw").is_none(),
+        "a name that is text is its text: {said}"
+    );
+
+    // `find` and `du`, where the filesystem takes such a name.
+    let t = ctx.module_dir.join("t");
+    if fs::create_dir(t.join(OsStr::from_bytes(not_text))).is_err() {
+        eprintln!("this filesystem refuses a name that is not text: `rm` alone was asked");
+        return;
+    }
+    fs::create_dir(t.join(OsStr::from_bytes(alike))).unwrap();
+
+    let (code, found) = json(&[
+        OsStr::new("find"),
+        OsStr::new(&remote(&ctx, "t")),
+        OsStr::new("-name"),
+        OsStr::new("bad*"),
+        OsStr::new("--json"),
+    ]);
+    assert_eq!(code, Some(0), "{found}");
+    let paths = found["paths"].as_array().expect("paths");
+    assert_eq!(paths.len(), 2, "{found}");
+    assert_eq!(paths[0], paths[1], "one text, twice: {found}");
+    let raw_paths = found["raw_paths"].as_array().expect("raw_paths");
+    assert_eq!(raw_paths.len(), 1, "one of them is not text: {found}");
+    let at = raw_paths[0]["index"].as_u64().expect("a place in `paths`") as usize;
+    assert!(at < 2, "{found}");
+    assert!(
+        bytes_of(&raw_paths[0]).is_some_and(|bytes| bytes.ends_with(not_text)),
+        "{found}"
+    );
+    // The line `find` prints for it is those bytes.
+    let mut printed = Command::new(&ctx.cli_bin);
+    printed
+        .arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .args(["find", &remote(&ctx, "t"), "-name", "bad*"])
+        .stdin(Stdio::null());
+    let printed = run_with_timeout(printed, Duration::from_secs(60)).stdout;
+    let line = printed.split(|byte| *byte == b'\n').nth(at).expect("line");
+    assert_eq!(bytes_of(&raw_paths[0]).as_deref(), Some(line), "{found}");
+
+    let (code, usage) = json(&[
+        OsStr::new("du"),
+        OsStr::new("--json"),
+        OsStr::new(&remote(&ctx, "t")),
+    ]);
+    assert_eq!(code, Some(0), "{usage}");
+    let rows: Vec<&serde_json::Value> = usage["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .filter(shown_alike)
+        .collect();
+    assert_eq!(rows.len(), 2, "{usage}");
+    let given: Vec<Vec<u8>> = rows.iter().filter_map(|row| bytes_of(row)).collect();
+    assert_eq!(given.len(), 1, "one of them is not text: {usage}");
+    assert!(given[0].ends_with(not_text), "{usage}");
+}
+
 /// cr-uv3-3: a name another system would read as a PATH is a name here.
 /// `find` printed the module-root entries `\notes` and `C:receipt`, and
 /// `du` refused both printed operands as "Windows paths": the daemon read

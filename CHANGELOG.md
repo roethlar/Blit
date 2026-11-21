@@ -439,9 +439,13 @@ none of the options it had.**
   from `find`. A name that is not text used to be shown with a
   replacement character — the name of another file. `rm`'s question
   quotes its paths the same way, and `df`'s table prints the path by its
-  own bytes. (`--json` holds text: there such a name is still the text
-  nearest it.) `HOST:/module`, with no `/` after the module, now says
-  that it wants one.
+  own bytes. `--json` holds text, so there a name that is not text has
+  its bytes beside it: `raw`, next to `path`, in a row or a failure of
+  `du` and a failure of `rm` or `find` — printable ASCII as itself, any
+  other byte and `\` as `\xNN`. `find --json` keeps `paths` a list of
+  strings and lists each path that is not text in `raw_paths`, by its
+  place in `paths`. `HOST:/module`, with no `/` after the module, now
+  says that it wants one.
 - **`[:class:]` in a `-name` pattern is the reference locale's**, by its
   own tables: the classes of `C.UTF-8` as the C library has them (glibc
   2.44), for every code point. A code point no character is assigned to
@@ -466,7 +470,7 @@ none of the options it had.**
   words (`blit find: ‘PATH’: Permission denied`) and makes the exit status
   1; the walk goes on. It used to be left out without a word. A name that
   is not valid UTF-8 is printed, and matched, by its own bytes. `--json`
-  gives `paths` and `failures`.
+  gives `paths`, `raw_paths` and `failures`.
 - The walk asks the filesystem nothing no test needs: an entry's kind
   comes with its directory's listing, and paths travel in batches. When
   the reader goes away (`blit find … | head -1`) the command stops

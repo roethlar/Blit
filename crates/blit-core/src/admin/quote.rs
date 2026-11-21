@@ -191,6 +191,29 @@ pub fn for_find(name: &[u8]) -> String {
     out
 }
 
+/// cr-uv3-7: a name in an output that holds only text — `--json`. `entry`
+/// gains `path`, the name as text, and — for a name that is NOT text —
+/// `raw`, every byte of it: printable ASCII as itself, any other byte and
+/// `\` as `\xNN` ([`crate::raw_name::escape_raw`], which
+/// [`crate::raw_name::unescape_raw`] reads back). The text alone lost the
+/// name: `bad\xff.dat` and the file really called `bad\u{fffd}.dat` were
+/// the same string, twice.
+pub fn in_json(name: &[u8], mut entry: serde_json::Value) -> serde_json::Value {
+    entry["path"] = String::from_utf8_lossy(name).into_owned().into();
+    if let Some(raw) = exact(name) {
+        entry["raw"] = raw.into();
+    }
+    entry
+}
+
+/// The bytes of a name that is not text, as [`in_json`] writes them;
+/// `None` for a name that is text, whose text is the name.
+pub fn exact(name: &[u8]) -> Option<String> {
+    std::str::from_utf8(name)
+        .is_err()
+        .then(|| crate::raw_name::escape_raw(name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,5 +342,54 @@ mod tests {
         assert_eq!(for_shell(b"#x", false), "'#x'");
         assert_eq!(for_shell(b"x#~", false), "x#~");
         assert_eq!(for_shell(b"a=b", false), "'a=b'");
+    }
+}
+
+#[cfg(test)]
+mod json_tests {
+    use super::*;
+
+    /// cr-uv3-7: a name that is text is its text and nothing more; one
+    /// that is not has its bytes beside the text, and they read back.
+    #[test]
+    fn a_name_that_is_not_text_has_its_bytes_beside_it() {
+        for text in [
+            "plain.txt",
+            "caf\u{e9}",
+            "bad\u{fffd}.dat",
+            "back\\slash",
+            "",
+        ] {
+            assert_eq!(exact(text.as_bytes()), None, "{text:?}");
+            assert_eq!(
+                in_json(text.as_bytes(), serde_json::json!({ "n": 1 })),
+                serde_json::json!({ "n": 1, "path": text })
+            );
+        }
+        for (name, raw) in [
+            (&b"bad\xff.dat"[..], r"bad\xff.dat"),
+            (b"\xff", r"\xff"),
+            // What is text in it is written byte by byte too: the whole
+            // name is there, and one rule reads it back.
+            (b"caf\xc3\xa9\xfe", r"caf\xc3\xa9\xfe"),
+            (b"a\\b\xff", r"a\x5cb\xff"),
+        ] {
+            assert_eq!(exact(name).as_deref(), Some(raw));
+            assert_eq!(
+                crate::raw_name::unescape_raw(raw).as_deref(),
+                Some(name),
+                "{raw} reads back"
+            );
+            let entry = in_json(name, serde_json::json!({}));
+            assert_eq!(entry["path"], String::from_utf8_lossy(name).as_ref());
+            assert_eq!(entry["raw"], raw);
+        }
+        // The two names the text cannot tell apart.
+        let (one, other) = (
+            in_json(b"bad\xff.dat", serde_json::json!({})),
+            in_json("bad\u{fffd}.dat".as_bytes(), serde_json::json!({})),
+        );
+        assert_eq!(one["path"], other["path"]);
+        assert_ne!(one, other);
     }
 }

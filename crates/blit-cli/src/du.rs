@@ -49,19 +49,19 @@ pub async fn run_du(args: DuArgs) -> Result<ExitCode> {
                 DuEvent::Row {
                     path,
                     allocated_bytes,
-                } => rows.push(serde_json::json!({
-                    "path": String::from_utf8_lossy(&operand.below(&path)),
-                    "allocated_bytes": allocated_bytes,
-                })),
+                } => rows.push(blit_core::admin::quote::in_json(
+                    // cr-uv3-7: with its bytes, where it is not text.
+                    &operand.below(&path),
+                    serde_json::json!({ "allocated_bytes": allocated_bytes }),
+                )),
                 DuEvent::Failure {
                     path,
                     action,
                     reason,
-                } => failures.push(serde_json::json!({
-                    "path": String::from_utf8_lossy(&operand.below(&path)),
-                    "action": action,
-                    "reason": reason,
-                })),
+                } => failures.push(blit_core::admin::quote::in_json(
+                    &operand.below(&path),
+                    serde_json::json!({ "action": action, "reason": reason }),
+                )),
             }
             Ok(())
         })

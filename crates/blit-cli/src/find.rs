@@ -148,16 +148,27 @@ pub async fn run_find(args: FindArgs) -> Result<ExitCode> {
 
     let mut failed = false;
     if args.json || expression.json {
-        let (mut paths, mut failures) = (Vec::new(), Vec::new());
+        // cr-uv3-7: `paths` holds text, and a name need not be text: two
+        // names came out as one string, twice. Each path that is not text
+        // is listed in `raw_paths` by its place in `paths`, with its bytes.
+        let (mut paths, mut raw_paths, mut failures) = (Vec::new(), Vec::new(), Vec::new());
         find::stream(&remote, query, |event| {
             match event {
-                FindEvent::Found(path) => paths.push(serde_json::Value::String(
-                    String::from_utf8_lossy(&shown(&path)).into_owned(),
-                )),
-                FindEvent::Failure { path, reason } => failures.push(serde_json::json!({
-                    "path": String::from_utf8_lossy(&shown(&path)),
-                    "reason": reason,
-                })),
+                FindEvent::Found(path) => {
+                    let printed = shown(&path);
+                    if let Some(raw) = blit_core::admin::quote::exact(&printed) {
+                        raw_paths.push(serde_json::json!({ "index": paths.len(), "raw": raw }));
+                    }
+                    paths.push(serde_json::Value::String(
+                        String::from_utf8_lossy(&printed).into_owned(),
+                    ));
+                }
+                FindEvent::Failure { path, reason } => {
+                    failures.push(blit_core::admin::quote::in_json(
+                        &shown(&path),
+                        serde_json::json!({ "reason": reason }),
+                    ));
+                }
             }
             Ok(())
         })
@@ -165,9 +176,11 @@ pub async fn run_find(args: FindArgs) -> Result<ExitCode> {
         failed = !failures.is_empty();
         println!(
             "{}",
-            serde_json::to_string_pretty(
-                &serde_json::json!({ "paths": paths, "failures": failures })
-            )?
+            serde_json::to_string_pretty(&serde_json::json!({
+                "paths": paths,
+                "raw_paths": raw_paths,
+                "failures": failures,
+            }))?
         );
     } else {
         let mut out = std::io::BufWriter::new(std::io::stdout().lock());
