@@ -21,7 +21,7 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `files_from_unnamed`; `client::connect_with_timeout` and
 `connect_transfer_client` return a `BlitClient<client::BlitChannel>`
 (the channel behind `client::BoundedResponses`). The wire
-protocol is contract 28: a peer on any other contract version (every 0.1.x
+protocol is contract 29: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
 
@@ -118,7 +118,7 @@ part, and a job you can list, read, re-run and retry.
   be written the transfer still completes and the report says the log is
   incomplete.
 - A dry run or `--null` run is logged as what it planned, not as copies.
-- Wire protocol (contract 28): the job ID rides the session-open and
+- Wire protocol (contract 29): the job ID rides the session-open and
   delegated-pull requests; `GetJobLog` returns a daemon's log by ID; the
   finished-job record carries the failed-file count. In a filtered mirror,
   `ManifestPruned` tells the destination which source paths were excluded,
@@ -361,8 +361,14 @@ asks before it deletes.
   move HOST:/m/incoming/. …` exited 0 with the link gone and never
   copied — and so would a file that arrived after the source had been
   read. The daemon now keeps an account of what each of the move's
-  sessions sent and removes that: each file, if it is still as it was
-  sent, and each directory this leaves empty. Anything else stays
+  sessions sent and removes that: each file, if it is still THE FILE IT
+  WAS — its size, the time it was last written to the nanosecond, the
+  time it was last changed in any way and which file it is, so that one
+  rewritten with as many bytes in the same second, or put back under an
+  older time, stays — and each directory this leaves empty. An account
+  is of the path its session read and answers for no other, and it
+  answers only once that session has ended well, with whatever the
+  receiving end says did not land struck from it. Anything else stays
   where it is and is named (`cannot remove 'incoming/link': it is a
   symbolic link, which a move does not carry`), and the move exits 1.
   A daemon restarted between the copy and the removal refuses the

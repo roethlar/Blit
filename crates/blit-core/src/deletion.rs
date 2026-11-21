@@ -281,10 +281,9 @@ pub struct Removal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Met {
     pub kind: MetKind,
-    pub size: u64,
-    /// Its modification time as a transfer's manifest writes one
-    /// (`wire_metadata::mtime_seconds`).
-    pub mtime_seconds: i64,
+    /// The entry as it stands, whole (cr-uv4-1): what a move's account
+    /// must have held for it to go.
+    pub version: crate::moved::Version,
 }
 
 /// What kind of entry [`Met`] is: the entry itself, a link being a link.
@@ -950,8 +949,7 @@ fn met_by_path(metadata: &std::fs::Metadata) -> Met {
     };
     Met {
         kind,
-        size: metadata.len(),
-        mtime_seconds: crate::wire_metadata::mtime_seconds(metadata).unwrap_or(0),
+        version: crate::moved::Version::of(metadata),
     }
 }
 
@@ -1163,21 +1161,19 @@ mod anchored {
                 libc::S_IFLNK => super::MetKind::Link,
                 _ => super::MetKind::Other,
             };
-            // A time before 1970 is counted toward zero, as
-            // `wire_metadata::mtime_seconds` counts it.
-            #[allow(clippy::useless_conversion)]
-            let (seconds, nanoseconds) =
-                (i64::from(found.st_mtime), i64::from(found.st_mtime_nsec));
-            let mtime_seconds = if seconds < 0 && nanoseconds > 0 {
-                seconds + 1
-            } else {
-                seconds
-            };
-            Ok(super::Met {
-                kind,
+            // The entry whole, as `moved::Version::of` reads one from
+            // the standard library's record of the same call (cr-uv4-1).
+            #[allow(clippy::useless_conversion, clippy::unnecessary_cast)]
+            let version = crate::moved::Version {
                 size: u64::try_from(found.st_size).unwrap_or(0),
-                mtime_seconds,
-            })
+                mtime_nanos: i128::from(found.st_mtime) * 1_000_000_000
+                    + i128::from(found.st_mtime_nsec),
+                ctime_nanos: i128::from(found.st_ctime) * 1_000_000_000
+                    + i128::from(found.st_ctime_nsec),
+                device: found.st_dev as u64,
+                inode: found.st_ino as u64,
+            };
+            Ok(super::Met { kind, version })
         }
 
         /// Whether the entry called `name` here is a directory once a link

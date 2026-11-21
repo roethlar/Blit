@@ -28,6 +28,10 @@ pub(crate) struct TypedOperand {
 /// Why the module's own root is not removed.
 const THE_MODULE_ROOT: &str = "refusing to remove the module's root; name a path inside it";
 
+/// A move's removal of a path no ticket it presents is for (cr-uv4-1).
+const NOT_THE_PATH_THAT_WAS_SENT: &str =
+    "the account of what was sent is of another path: nothing here was sent by that transfer";
+
 /// `rm`'s own words for an operand whose last name is `.` or `..`.
 const DOT_OR_DOT_DOT: &str = "refusing to remove '.' or '..' directory";
 
@@ -198,30 +202,6 @@ fn remove_each(
     failed: &mut dyn FnMut(RmFailure) -> Result<(), Stopped>,
 ) -> Result<u64, Status> {
     let closed = || response_channel_closed("sending removal result");
-    // cr-uv3-1: a move's removal takes what its sessions sent. An entry
-    // that is no directory goes only if it is a regular file one of the
-    // accounts holds — this path, at this size and time; anything else
-    // stays and is told, in words that say which it is.
-    let unsent = |relative_path: &Path, met: &blit_core::deletion::Met| {
-        use blit_core::deletion::MetKind;
-        let accounts = sent?;
-        let why = match met.kind {
-            MetKind::Link => "it is a symbolic link, which a move does not carry",
-            MetKind::Other => "it is not a regular file, and a move carries only those",
-            MetKind::File
-                if accounts.iter().any(|account| {
-                    account.holds(&sent_path(relative_path), met.size, met.mtime_seconds)
-                }) =>
-            {
-                return None;
-            }
-            MetKind::File => {
-                "it is not a file the move sent: it is new, or has changed since it was read"
-            }
-        };
-        Some(std::io::Error::other(why))
-    };
-    let keep: Option<blit_core::deletion::Keep<'_>> = sent.is_some().then_some(&unsent);
     let mut entries_removed = 0u64;
     for (operand, rel) in operands.iter().enumerate() {
         let rel = match rel {
@@ -237,8 +217,55 @@ fn remove_each(
                 continue;
             }
         };
+        let place = module_path.join(&rel.rel);
+        // cr-uv4-1: an account is of the path its session read, and
+        // answers for that path alone. Tickets presented for another
+        // path say nothing of what was sent from this one.
+        let here: Option<Vec<&blit_core::moved::Closed>> = sent.map(|accounts| {
+            accounts
+                .iter()
+                .map(std::sync::Arc::as_ref)
+                .filter(|account| account.is_of(&place))
+                .collect()
+        });
+        if here.as_ref().is_some_and(Vec::is_empty) {
+            failed(RmFailure {
+                operand: operand as u32,
+                relative_path: String::new(),
+                raw_relative_path: None,
+                reason: NOT_THE_PATH_THAT_WAS_SENT.to_string(),
+            })
+            .map_err(|Stopped| closed())?;
+            continue;
+        }
+        // cr-uv3-1: a move's removal takes what its sessions sent. An
+        // entry that is no directory goes only if it is a regular file
+        // one of the accounts holds — this path, as the file it was when
+        // the account was written (cr-uv4-1: its size, its time to the
+        // nanosecond, when it was last changed, which file it is);
+        // anything else stays and is told, in words that say which it is.
+        let unsent = |relative_path: &Path, met: &blit_core::deletion::Met| {
+            use blit_core::deletion::MetKind;
+            let accounts = here.as_ref()?;
+            let why = match met.kind {
+                MetKind::Link => "it is a symbolic link, which a move does not carry",
+                MetKind::Other => "it is not a regular file, and a move carries only those",
+                MetKind::File
+                    if accounts
+                        .iter()
+                        .any(|account| account.holds(&sent_path(relative_path), &met.version)) =>
+                {
+                    return None;
+                }
+                MetKind::File => {
+                    "it is not a file the move sent: it is new, or has changed since it was read"
+                }
+            };
+            Some(std::io::Error::other(why))
+        };
+        let keep: Option<blit_core::deletion::Keep<'_>> = here.is_some().then_some(&unsent);
         let removed = blit_core::deletion::remove_what_may_go(
-            &module_path.join(&rel.rel),
+            &place,
             rel.as_directory,
             Some(canonical_root),
             options,
@@ -949,12 +976,17 @@ mod rm_tests {
     }
 
     /// cr-uv3-1: a move's removal takes what its sessions sent, by the
-    /// accounts they kept — this path, at this size and time — and the
+    /// accounts they kept — this path, as the file it was — and the
     /// directories that leaves empty. A file no account holds (it came
     /// after the source was read), one that has changed since, a link and
     /// a file that is no regular file all stay, each told in the words
     /// for what it is; the directories that hold them stay untold. A
     /// plain removal — no account — takes everything, as it did.
+    ///
+    /// cr-uv4-1: "changed since" is the reviewer's case too — other
+    /// contents of the same length, written 800 ms later in the same
+    /// second (`same.txt`). And the accounts are of the path the sessions
+    /// read: presented for another path, they let nothing go.
     #[cfg(unix)]
     #[test]
     fn a_moves_removal_takes_what_its_sessions_sent() {
@@ -970,6 +1002,7 @@ mod rm_tests {
                 ("a.txt", "sent"),
                 ("b.txt", "came after the source was read"),
                 ("grown.txt", "sent, then written to"),
+                ("same.txt", "sent, as these very bytes"),
                 ("sub/c.txt", "sent"),
                 ("sub/deep/d.txt", "sent in another session"),
                 ("late/new.txt", "came after"),
@@ -985,28 +1018,41 @@ mod rm_tests {
         };
         let (src, piped) = build();
         let as_it_is = |name: &str| {
-            let meta = fs::metadata(src.join(name)).unwrap();
-            (
-                meta.len(),
-                blit_core::wire_metadata::mtime_seconds(&meta).unwrap(),
-            )
+            blit_core::moved::Version::of(&fs::symlink_metadata(src.join(name)).unwrap())
         };
-        let mut first = Account::default();
-        for name in ["a.txt", "sub/c.txt"] {
-            let (size, mtime) = as_it_is(name);
-            first.record(name.as_bytes(), size, mtime);
+        let kept = |account: Account| {
+            let ticket = blit_core::moved::keep(account);
+            blit_core::moved::confirm(&ticket, &[]);
+            ticket
+        };
+        // Written at a tenth of a second, and sent so.
+        let tenth = filetime::FileTime::from_unix_time(1_800_000_000, 100_000_000);
+        filetime::set_file_mtime(src.join("same.txt"), tenth).unwrap();
+        let mut first = Account::of(&src);
+        for name in ["a.txt", "sub/c.txt", "same.txt"] {
+            first.record(name.as_bytes(), &as_it_is(name));
         }
         // Sent five bytes shorter than it now is.
-        let (size, mtime) = as_it_is("grown.txt");
-        first.record(b"grown.txt", size - 5, mtime);
-        let mut second = Account::default();
-        let (size, mtime) = as_it_is("sub/deep/d.txt");
-        second.record(b"sub/deep/d.txt", size, mtime);
-        let accounts = blit_core::moved::held(&[
-            blit_core::moved::keep(first),
-            blit_core::moved::keep(second),
-        ])
-        .expect("both kept");
+        let grown = as_it_is("grown.txt");
+        first.record(
+            b"grown.txt",
+            &blit_core::moved::Version {
+                size: grown.size - 5,
+                ..grown
+            },
+        );
+        let mut second = Account::of(&src);
+        second.record(b"sub/deep/d.txt", &as_it_is("sub/deep/d.txt"));
+        let accounts = blit_core::moved::held(&[kept(first), kept(second)]).expect("both kept");
+        // The reviewer's case: other bytes, as many, 800 ms later in the
+        // same second.
+        fs::write(src.join("same.txt"), "other bytes, just as many").unwrap();
+        assert_eq!(
+            fs::metadata(src.join("same.txt")).unwrap().len(),
+            "sent, as these very bytes".len() as u64
+        );
+        let later = filetime::FileTime::from_unix_time(1_800_000_000, 900_000_000);
+        filetime::set_file_mtime(src.join("same.txt"), later).unwrap();
 
         let remove = |sent: Option<&[std::sync::Arc<blit_core::moved::Closed>]>| {
             let operands = read_operands(vec!["src".to_string()], Vec::new()).expect("operands");
@@ -1049,11 +1095,12 @@ mod rm_tests {
                 "it is not a regular file, and a move carries only those".to_string(),
             ));
         }
+        expected.push(("same.txt".to_string(), unsent.to_string()));
         assert_eq!(failures, expected);
         for gone in ["a.txt", "sub", "empty"] {
             assert!(!src.join(gone).exists(), "{gone}");
         }
-        for stays in ["b.txt", "grown.txt", "late/new.txt"] {
+        for stays in ["b.txt", "grown.txt", "late/new.txt", "same.txt"] {
             assert!(src.join(stays).is_file(), "{stays}");
         }
         assert!(src.join("link").is_symlink());
@@ -1062,13 +1109,9 @@ mod rm_tests {
         let one = root.join("one.txt");
         fs::write(&one, "the source itself").unwrap();
         let meta = fs::metadata(&one).unwrap();
-        let mut sole = Account::default();
-        sole.record(
-            b"",
-            meta.len(),
-            blit_core::wire_metadata::mtime_seconds(&meta).unwrap(),
-        );
-        let sole = blit_core::moved::held(&[blit_core::moved::keep(sole)]).unwrap();
+        let mut sole = Account::of(&one);
+        sole.record(b"", &blit_core::moved::Version::of(&meta));
+        let sole = blit_core::moved::held(&[kept(sole)]).unwrap();
         let alone = |name: &str| {
             let operands = read_operands(vec![name.to_string()], Vec::new()).expect("operands");
             let mut failures = Vec::new();
@@ -1090,18 +1133,56 @@ mod rm_tests {
             .expect("an answer");
             (removed, failures)
         };
-        fs::write(root.join("two.txt"), "another file altogether").unwrap();
-        assert_eq!(alone("two.txt"), (0, vec![unsent.to_string()]));
+        // cr-uv4-1: an account of `one.txt` says nothing of `two.txt`,
+        // though it is this very file by another name — the same bytes,
+        // times and file, linked there.
+        fs::hard_link(&one, root.join("two.txt")).unwrap();
+        assert_eq!(
+            alone("two.txt"),
+            (0, vec![NOT_THE_PATH_THAT_WAS_SENT.to_string()])
+        );
+        assert!(one.exists() && root.join("two.txt").exists());
+        fs::remove_file(root.join("two.txt")).unwrap();
+        // (A link made and unmade changes when the file was last changed:
+        // it is told of again, as it now stands.)
+        let mut again = Account::of(&one);
+        again.record(
+            b"",
+            &blit_core::moved::Version::of(&fs::metadata(&one).unwrap()),
+        );
+        let sole = blit_core::moved::held(&[kept(again)]).unwrap();
+        let alone = |name: &str| {
+            let operands = read_operands(vec![name.to_string()], Vec::new()).expect("operands");
+            let mut failures = Vec::new();
+            let removed = remove_each(
+                &root,
+                &root,
+                &operands,
+                blit_core::deletion::RmOptions {
+                    recursive: true,
+                    force: true,
+                },
+                Some(&sole),
+                &|| false,
+                &mut |failure| {
+                    failures.push(failure.reason);
+                    Ok(())
+                },
+            )
+            .expect("an answer");
+            (removed, failures)
+        };
         assert_eq!(alone("one.txt"), (1, Vec::new()));
-        assert!(!one.exists() && root.join("two.txt").exists());
+        assert!(!one.exists());
+        let _ = unsent;
 
         // A plain removal takes all of it.
         fs::remove_dir_all(&src).unwrap();
         let (src, piped) = build();
         let (removed, failures) = remove(None);
         assert!(failures.is_empty(), "{failures:?}");
-        // Six files, the link and the pipe, and six directories.
-        assert_eq!(removed, 13 + u64::from(piped));
+        // Seven files, the link and the pipe, and six directories.
+        assert_eq!(removed, 14 + u64::from(piped));
         assert!(!src.exists());
     }
 

@@ -1434,7 +1434,7 @@ fn a_removal_for_a_move_is_refused_without_the_account_of_what_was_sent() {
             assert!(
                 status
                     .message()
-                    .contains("no longer holds the account of what that transfer sent"),
+                    .contains("holds no account of what that transfer sent that it may act on"),
                 "{}",
                 status.message()
             );

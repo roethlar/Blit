@@ -2,8 +2,10 @@
 
 **Status**: Active (contract; the session is the ONLY remote transfer
 path since cutover, otp-10c-2)
-**Contract version**: 28 (`Ls` replaces `List`: a listing that says what
-its path is; v27 = `FindPaths` carries `-size`, `-mtime` and
+**Contract version**: 29 (a move's account holds each file as the file it
+was, is of the path its session read, and answers a removal only once the
+destination's summary has reached the source — no message changed; v28 =
+`Ls` replaces `List`: a listing that says what its path is; v27 = `FindPaths` carries `-size`, `-mtime` and
 `-delete`; v16 to v26 are told one by one where the number is defined,
 `CONTRACT_VERSION` in `crates/blit-core/src/transfer_session/mod.rs`, and
 this header had stopped at 15; v15 = the search request `FindPaths`, which carries

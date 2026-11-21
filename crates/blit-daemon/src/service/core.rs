@@ -4,6 +4,13 @@ use super::admin::{
 };
 use super::util::{internal_err, resolve_contained_path, resolve_module};
 use super::{DiskUsageSender, FindSender};
+
+/// How long a removal for a move waits for its sessions' accounts to be
+/// confirmed (cr-uv4-1): the session's last word and the removal are
+/// sent one after the other on two streams, and may land either way
+/// round.
+const ACCOUNT_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+const ACCOUNT_WAITS: usize = 50;
 use crate::active_jobs::{ActiveJobKind, ActiveJobs, CancelOutcome};
 use crate::metrics::TransferMetrics;
 use crate::runtime::{ModuleConfig, RootExport};
@@ -172,11 +179,24 @@ impl BlitService {
         let sent = if req.sent_tickets.is_empty() {
             None
         } else {
-            Some(blit_core::moved::held(&req.sent_tickets).ok_or_else(|| {
+            // cr-uv4-1: an account answers once its session has ended
+            // well, and the word that ends a session travels beside this
+            // request, not before it: a moment is given for it to land.
+            let mut accounts = blit_core::moved::held(&req.sent_tickets);
+            for _ in 0..ACCOUNT_WAITS {
+                // Waited for only while it may come: every ticket known,
+                // a session of theirs not ended yet.
+                if accounts.is_some() || !blit_core::moved::pending(&req.sent_tickets) {
+                    break;
+                }
+                tokio::time::sleep(ACCOUNT_WAIT).await;
+                accounts = blit_core::moved::held(&req.sent_tickets);
+            }
+            Some(accounts.ok_or_else(|| {
                 Status::failed_precondition(
-                    "this daemon no longer holds the account of what that transfer sent (it has \
-                     been restarted since, or the transfer is more than a day old); nothing was \
-                     removed",
+                    "this daemon holds no account of what that transfer sent that it may act on \
+                     (the transfer did not end well, the daemon has been restarted since, or the \
+                     transfer is more than a day old); nothing was removed",
                 )
             })?)
         };

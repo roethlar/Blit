@@ -229,7 +229,14 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// listing says what its path is, gives a link as a link with where it
 /// points, and is asked for names alone or for facts. A daemon of
 /// contract 27 does not serve the name; one of 28 does not serve `List`.
-pub const CONTRACT_VERSION: u32 = 28;
+/// v29: the account behind `ManifestComplete.sent_ticket` means more
+/// (cr-uv4-1) — it holds each file as the file it was (to the nanosecond,
+/// with its change time and which file it is), it is of the path its
+/// session read, and it answers a removal only once the destination's
+/// summary has reached the source and what did not land is struck from
+/// it. No message changed. A daemon of contract 28 would let a removal
+/// take a file rewritten within the second it was sent in.
+pub const CONTRACT_VERSION: u32 = 29;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames
@@ -1872,6 +1879,52 @@ async fn source_recv_half(
     }
 }
 
+/// The paths a destination's summary says did not land, as a move's
+/// account is told of them (cr-uv4-1): each failed path's text, and the
+/// exact bytes of each that is not text. `None` when the summary's list
+/// is not whole — there is then no saying what landed.
+fn not_landed(summary: &TransferSummary) -> Option<Vec<Vec<u8>>> {
+    if summary.failed_paths_truncated {
+        return None;
+    }
+    Some(
+        summary
+            .failed_paths
+            .iter()
+            .map(|path| path.clone().into_bytes())
+            .chain(summary.failed_paths_raw.iter().cloned())
+            .collect(),
+    )
+}
+
+/// A move's account of what a session read from `root` (cr-uv3-1,
+/// cr-uv4-1): each file on the manifest as it stands on this disk NOW —
+/// but only while it is still the regular file the manifest wrote, of
+/// that size and that second. One written to since the walk read it, one
+/// that has gone, a link put in its place: none is in the account, and
+/// the removal that ends the move leaves it where it is.
+fn account_of(root: &Path, headers: &[FileHeader]) -> crate::moved::Account {
+    let mut account = crate::moved::Account::of(root);
+    for header in headers {
+        let at = crate::raw_name::source_path(root, header);
+        let Ok(metadata) = std::fs::symlink_metadata(&at) else {
+            continue;
+        };
+        if !metadata.is_file()
+            || metadata.len() != header.size
+            || crate::wire_metadata::mtime_seconds(&metadata) != Some(header.mtime_seconds)
+        {
+            continue;
+        }
+        let path = match header.raw_relative_path.as_deref() {
+            Some(raw) if !raw.is_empty() => raw,
+            _ => header.relative_path.as_bytes(),
+        };
+        account.record(path, &crate::moved::Version::of(&metadata));
+    }
+    account
+}
+
 /// otp-7a: the send half's resume bookkeeping. A resume-flagged need is
 /// HELD until its `BlockHashList` arrives (the contract's strict
 /// ordering — the source must not send a byte of that file first); the
@@ -2272,21 +2325,31 @@ async fn source_send_half(
         // What it may then remove is what this manifest holds, and this
         // end keeps the account of it — the removal used to take whatever
         // stood at the source by then.
+        //
+        // cr-uv4-1: each file goes into the account as THE FILE IT IS
+        // NOW, read from this end's own disk — and only if it is still
+        // the regular file the manifest wrote, of that size and second.
+        // The account answers nothing until this session has ended well
+        // (below, where the destination's summary arrives).
         let sent_ticket = if negotiated.open.source_removed_after
             && negotiated.open.initiator_role() == TransferRole::Destination
         {
-            let mut account = crate::moved::Account::default();
-            for (text, header) in sent.lock().expect("sent-manifest lock poisoned").iter() {
-                let path = match header.raw_relative_path.as_deref() {
-                    Some(raw) if !raw.is_empty() => raw,
-                    _ => text.as_bytes(),
-                };
-                account.record(path, header.size, header.mtime_seconds);
-            }
+            let root = scan_source.root().to_path_buf();
+            let headers: Vec<FileHeader> = sent
+                .lock()
+                .expect("sent-manifest lock poisoned")
+                .values()
+                .cloned()
+                .collect();
+            // One look at each file: off the runtime's own threads.
+            let account = tokio::task::spawn_blocking(move || account_of(&root, &headers))
+                .await
+                .map_err(|join| eyre::eyre!("writing the move's account: {join}"))?;
             crate::moved::keep(account)
         } else {
             Vec::new()
         };
+        let move_ticket = sent_ticket.clone();
         tx.send(frame(Frame::ManifestComplete(ManifestComplete {
             scan_complete,
             scan_failures,
@@ -2558,6 +2621,17 @@ async fn source_send_half(
                 }
                 if let Some(trace) = &phase_trace {
                     trace.event("summary_received", SessionPhaseFields::default());
+                }
+                // cr-uv4-1: the session has ended well, and the end that
+                // received has said what it does not hold. Those paths
+                // are struck from the move's account, which answers a
+                // removal from now on — and never, if the list of them is
+                // not whole.
+                if !move_ticket.is_empty() {
+                    match not_landed(&summary) {
+                        Some(not_landed) => crate::moved::confirm(&move_ticket, &not_landed),
+                        None => crate::moved::forget(&move_ticket),
+                    }
                 }
                 // cr-pfc2-2: this end completed every file it SENT and
                 // reported that file's PLANNED size —
@@ -10532,5 +10606,125 @@ mod own_incomplete_copy_tests {
             NeedVerdict::Transfer { .. }
         ));
         assert!(kept(&asked).is_empty());
+    }
+
+    /// cr-uv4-1: a move's account is written from this end's own disk —
+    /// each file on the manifest as it stands, and only while it is still
+    /// the regular file the manifest wrote. One written to since (another
+    /// size, another second), one that has gone and one with a link in
+    /// its place are not in it; a name that is not text is held by its
+    /// bytes.
+    #[cfg(unix)]
+    #[test]
+    fn a_moves_account_holds_each_file_as_it_stands_on_this_disk() {
+        use crate::moved::Version;
+        use std::os::unix::ffi::OsStrExt as _;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("src");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let raw_name = std::ffi::OsStr::from_bytes(b"bad\xff.bin");
+        for name in ["same", "grown", "touched", "gone", "linked", "sub/deep"] {
+            std::fs::write(root.join(name), b"1234").unwrap();
+        }
+        std::fs::write(root.join(raw_name), b"1234").unwrap();
+        let header = |name: &str, raw: Option<&[u8]>| {
+            let at = match raw {
+                Some(raw) => root.join(std::ffi::OsStr::from_bytes(raw)),
+                None => root.join(name),
+            };
+            let metadata = std::fs::metadata(at).unwrap();
+            FileHeader {
+                relative_path: name.to_string(),
+                size: metadata.len(),
+                mtime_seconds: crate::wire_metadata::mtime_seconds(&metadata).unwrap(),
+                raw_relative_path: raw.map(<[u8]>::to_vec),
+                ..FileHeader::default()
+            }
+        };
+        let headers = vec![
+            header("same", None),
+            header("grown", None),
+            header("touched", None),
+            header("gone", None),
+            header("linked", None),
+            header("sub/deep", None),
+            header("bad\u{fffd}.bin", Some(b"bad\xff.bin")),
+        ];
+        // Since the manifest was written:
+        std::fs::write(root.join("grown"), b"12345").unwrap();
+        filetime::set_file_mtime(
+            root.join("touched"),
+            filetime::FileTime::from_unix_time(1_000_000_000, 0),
+        )
+        .unwrap();
+        std::fs::remove_file(root.join("gone")).unwrap();
+        std::fs::remove_file(root.join("linked")).unwrap();
+        std::os::unix::fs::symlink("same", root.join("linked")).unwrap();
+
+        let account = account_of(&root, &headers);
+        assert_eq!(
+            account.len(),
+            3,
+            "same, sub/deep and the name that is not text"
+        );
+        let ticket = crate::moved::keep(account);
+        crate::moved::confirm(&ticket, &[]);
+        let accounts = crate::moved::held(&[ticket]).expect("kept");
+        let account = &accounts[0];
+        assert!(account.is_of(&root));
+        let now = |at: &Path| Version::of(&std::fs::symlink_metadata(at).unwrap());
+        assert!(account.holds(b"same", &now(&root.join("same"))));
+        assert!(account.holds(b"sub/deep", &now(&root.join("sub/deep"))));
+        assert!(account.holds(b"bad\xff.bin", &now(&root.join(raw_name))));
+        assert!(!account.holds("bad\u{fffd}.bin".as_bytes(), &now(&root.join(raw_name))));
+        for changed in ["grown", "touched", "linked"] {
+            assert!(
+                !account.holds(changed.as_bytes(), &now(&root.join(changed))),
+                "{changed}"
+            );
+        }
+
+        // A source that is itself the file is held under no name.
+        let one = tmp.path().join("one.txt");
+        std::fs::write(&one, b"x").unwrap();
+        let metadata = std::fs::metadata(&one).unwrap();
+        let sole = account_of(
+            &one,
+            &[FileHeader {
+                size: 1,
+                mtime_seconds: crate::wire_metadata::mtime_seconds(&metadata).unwrap(),
+                ..FileHeader::default()
+            }],
+        );
+        assert_eq!(sole.len(), 1);
+    }
+
+    /// cr-uv4-1: what a destination's summary says did not land — every
+    /// failed path's text and the bytes of each that is not text — and
+    /// nothing at all when its list is not whole.
+    #[test]
+    fn what_did_not_land_is_the_summarys_whole_list_or_nothing() {
+        let summary = TransferSummary {
+            files_failed: 2,
+            failed_paths: vec!["a.txt".into(), "bad\u{fffd}.bin".into()],
+            failed_paths_raw: vec![b"bad\xff.bin".to_vec()],
+            ..TransferSummary::default()
+        };
+        assert_eq!(
+            not_landed(&summary),
+            Some(vec![
+                b"a.txt".to_vec(),
+                "bad\u{fffd}.bin".as_bytes().to_vec(),
+                b"bad\xff.bin".to_vec(),
+            ])
+        );
+        assert_eq!(not_landed(&TransferSummary::default()), Some(Vec::new()));
+        assert_eq!(
+            not_landed(&TransferSummary {
+                failed_paths_truncated: true,
+                ..summary
+            }),
+            None
+        );
     }
 }

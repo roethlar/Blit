@@ -1,5 +1,5 @@
 //! What a move's session sent, kept by the end that sent it (cr-uv3-1,
-//! `docs/plan/UTILITY_VERBS_LOCAL_PARITY.md`).
+//! cr-uv4-1, `docs/plan/UTILITY_VERBS_LOCAL_PARITY.md`).
 //!
 //! A move from a daemon copies, and then asks the daemon to remove the
 //! source. That removal was a recursive `rm` of whatever stood at the
@@ -7,19 +7,35 @@
 //! the files that were copied, and so would a file that arrived after the
 //! source had been read. Nothing tied the removal to the transfer.
 //!
-//! The end that is read from now keeps an ACCOUNT of every file a session
-//! put on its manifest, when the session was opened as one whose source
-//! will be removed, and hands the other end a TICKET for it. The removal
+//! The end that is read from keeps an ACCOUNT of the files a session put
+//! on its manifest, when the session was opened as one whose source will
+//! be removed, and hands the other end a TICKET for it. The removal
 //! presents the tickets of the move's sessions, and takes a file only if
-//! one of those accounts holds it — by its path, its size and its
-//! modification time, as the manifest wrote them. Whatever no account
-//! holds is left where it is.
+//! one of those accounts holds it.
 //!
-//! An account is a sorted list of 128-bit digests, sixteen bytes a file,
-//! held in this process: a daemon that restarts forgets them, and the
-//! removal is then refused whole, with the source as it was.
+//! An account holds a file as THE FILE IT WAS ([`Version`]): its size, the
+//! time it was last written to the nanosecond, and — where the system
+//! keeps them — the time it was last changed in any way and which file it
+//! is. The removal finds that again, whole, or leaves the file (cr-uv4-1:
+//! held by its size and whole second, a file rewritten with as many bytes
+//! within the same second passed for the one that was sent).
+//!
+//! An account is for ONE PLACE — the path its session read — and answers
+//! a removal of that path alone.
+//!
+//! And an account answers nothing until the session it was written in has
+//! ENDED WELL: the end that received says what did not land, those paths
+//! are struck from the account, and only then is it [`confirm`]ed. The
+//! ticket is given when the manifest is complete, before a byte of any
+//! file has gone; a session that faults, is cancelled, or ends without
+//! that word leaves an account no removal can use.
+//!
+//! An account is a sorted list of 128-bit digests, held in this process: a
+//! daemon that restarts forgets them, and the removal is then refused
+//! whole, with the source as it was.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -30,58 +46,113 @@ pub const TICKET_BYTES: usize = 16;
 /// well inside it.
 const KEPT_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// The most files all kept accounts hold between them — a gibibyte of
-/// digests. Past it the oldest account goes, and a removal that presents
-/// its ticket is refused.
+/// The most files all kept accounts hold between them. Past it the oldest
+/// account goes, and a removal that presents its ticket is refused.
 const MOST_FILES_KEPT: usize = 64 * 1024 * 1024;
 
-fn digest(path: &[u8], size: u64, mtime_seconds: i64) -> u128 {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&(path.len() as u64).to_le_bytes());
-    hasher.update(path);
-    hasher.update(&size.to_le_bytes());
-    hasher.update(&mtime_seconds.to_le_bytes());
+/// A file as it stood when it was looked at: what a removal must find
+/// again, unchanged, to take it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Version {
+    pub size: u64,
+    /// When it was last written: nanoseconds since 1970 (before it, less
+    /// than none), as the filesystem keeps it.
+    pub mtime_nanos: i128,
+    /// When it was last changed in any way — written, renamed over, its
+    /// attributes set — where the system keeps that (Unix); 0 elsewhere.
+    /// No program sets this one: it moves with every change.
+    pub ctime_nanos: i128,
+    /// Which file it is, where the system says (Unix: its device and its
+    /// number there); 0 elsewhere.
+    pub device: u64,
+    pub inode: u64,
+}
+
+impl Version {
+    /// The version `metadata` describes — the entry itself, never what a
+    /// link points to.
+    pub fn of(metadata: &std::fs::Metadata) -> Self {
+        let mtime_nanos = metadata.modified().map_or(0, crate::find::nanos_of);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            Self {
+                size: metadata.len(),
+                mtime_nanos,
+                ctime_nanos: i128::from(metadata.ctime()) * 1_000_000_000
+                    + i128::from(metadata.ctime_nsec()),
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {
+                size: metadata.len(),
+                mtime_nanos,
+                ctime_nanos: 0,
+                device: 0,
+                inode: 0,
+            }
+        }
+    }
+}
+
+fn first_sixteen(hasher: &blake3::Hasher) -> u128 {
     let mut first = [0u8; 16];
     first.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
     u128::from_le_bytes(first)
 }
 
+fn path_digest(path: &[u8]) -> u128 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"path");
+    hasher.update(path);
+    first_sixteen(&hasher)
+}
+
+fn digest(path: &[u8], version: &Version) -> u128 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&(path.len() as u64).to_le_bytes());
+    hasher.update(path);
+    hasher.update(&version.size.to_le_bytes());
+    hasher.update(&version.mtime_nanos.to_le_bytes());
+    hasher.update(&version.ctime_nanos.to_le_bytes());
+    hasher.update(&version.device.to_le_bytes());
+    hasher.update(&version.inode.to_le_bytes());
+    first_sixteen(&hasher)
+}
+
+/// A path with nothing after its last name and no `.` in it: two
+/// spellings of one place compare equal. Nothing is resolved.
+fn place(path: &Path) -> PathBuf {
+    path.components().collect()
+}
+
 /// One session's account, as it is written.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Account {
-    sent: Vec<u128>,
+    root: PathBuf,
+    /// Each file: its path's digest, to strike it by, and the digest of
+    /// the path with its version, which is what the account holds.
+    sent: Vec<(u128, u128)>,
 }
 
 impl Account {
+    /// An account of what a session read from `root` — the path the
+    /// session was opened on, on this machine.
+    pub fn of(root: &Path) -> Self {
+        Self {
+            root: place(root),
+            sent: Vec::new(),
+        }
+    }
+
     /// A file the session put on its manifest: its path below the source
     /// (`/` between names, the exact bytes of a name that is not text;
-    /// empty for a source that is itself the file), and the size and
-    /// modification time the manifest gave it.
-    pub fn record(&mut self, path: &[u8], size: u64, mtime_seconds: i64) {
-        self.sent.push(digest(path, size, mtime_seconds));
-    }
-
-    /// The account, closed: nothing more is written to it.
-    pub fn close(mut self) -> Closed {
-        self.sent.sort_unstable();
-        self.sent.dedup();
-        Closed { sent: self.sent }
-    }
-}
-
-/// A session's account, closed.
-#[derive(Debug)]
-pub struct Closed {
-    sent: Vec<u128>,
-}
-
-impl Closed {
-    /// Whether the session sent this file: this path, at this size and
-    /// time. A file written to since, or put there since, is another.
-    pub fn holds(&self, path: &[u8], size: u64, mtime_seconds: i64) -> bool {
-        self.sent
-            .binary_search(&digest(path, size, mtime_seconds))
-            .is_ok()
+    /// empty for a source that is itself the file), as it stood.
+    pub fn record(&mut self, path: &[u8], version: &Version) {
+        self.sent.push((path_digest(path), digest(path, version)));
     }
 
     pub fn len(&self) -> usize {
@@ -93,8 +164,52 @@ impl Closed {
     }
 }
 
+/// A session's account, closed: the session ended well, and what did not
+/// land has been struck from it.
+#[derive(Debug)]
+pub struct Closed {
+    root: PathBuf,
+    sent: Vec<u128>,
+}
+
+impl Closed {
+    /// The place this account is of: the path its session read.
+    pub fn is_of(&self, root: &Path) -> bool {
+        self.root == place(root)
+    }
+
+    /// Whether the session sent this file: this path, as this version. A
+    /// file written to since, or put there since, is another.
+    pub fn holds(&self, path: &[u8], version: &Version) -> bool {
+        self.sent.binary_search(&digest(path, version)).is_ok()
+    }
+
+    pub fn len(&self) -> usize {
+        self.sent.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sent.is_empty()
+    }
+}
+
+enum State {
+    /// Written, and its session not yet ended: it answers nothing.
+    Open(Account),
+    Confirmed(Arc<Closed>),
+}
+
+impl State {
+    fn len(&self) -> usize {
+        match self {
+            Self::Open(account) => account.len(),
+            Self::Confirmed(account) => account.len(),
+        }
+    }
+}
+
 struct Kept {
-    account: Arc<Closed>,
+    state: State,
     since: Instant,
 }
 
@@ -133,38 +248,104 @@ fn new_ticket() -> [u8; TICKET_BYTES] {
     ticket
 }
 
-/// Keep a session's account, and give the ticket that asks for it.
-/// Accounts kept too long go first, then the oldest while there are more
-/// files held than [`MOST_FILES_KEPT`].
+/// Keep a session's account, and give the ticket that asks for it. It
+/// answers nothing until it is [`confirm`]ed. Accounts kept too long go
+/// first, then the oldest while there are more files held than
+/// [`MOST_FILES_KEPT`].
 pub fn keep(account: Account) -> Vec<u8> {
-    let account = Arc::new(account.close());
     let mut kept = kept()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     kept.retain(|_, held| held.since.elapsed() < KEPT_FOR);
-    let mut files: usize = kept.values().map(|held| held.account.len()).sum();
+    let mut files: usize = kept.values().map(|held| held.state.len()).sum();
     while files + account.len() > MOST_FILES_KEPT && !kept.is_empty() {
         let oldest = *kept
             .iter()
             .min_by_key(|(_, held)| held.since)
             .map(|(ticket, _)| ticket)
             .expect("not empty");
-        files -= kept.remove(&oldest).map_or(0, |held| held.account.len());
+        files -= kept.remove(&oldest).map_or(0, |held| held.state.len());
     }
     let ticket = new_ticket();
     kept.insert(
         ticket,
         Kept {
-            account,
+            state: State::Open(account),
             since: Instant::now(),
         },
     );
     ticket.to_vec()
 }
 
-/// The accounts these tickets ask for: every one of them, or `None` when
-/// any is not held — never some. They stay kept: a removal that was cut
-/// short may be asked again.
+/// The session the account under `ticket` was written in has ended well,
+/// and `not_landed` are the paths the receiving end says it does not hold
+/// — each as the account was told it (the exact bytes of a name that is
+/// not text). They are struck from the account, and from now on it
+/// answers a removal. A ticket nothing answers to, or one confirmed
+/// already, is left as it is.
+pub fn confirm(ticket: &[u8], not_landed: &[Vec<u8>]) {
+    let Ok(ticket) = <[u8; TICKET_BYTES]>::try_from(ticket) else {
+        return;
+    };
+    let mut kept = kept()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(held) = kept.get_mut(&ticket) else {
+        return;
+    };
+    let State::Open(account) = &mut held.state else {
+        return;
+    };
+    let struck: std::collections::HashSet<u128> =
+        not_landed.iter().map(|path| path_digest(path)).collect();
+    let mut sent: Vec<u128> = std::mem::take(&mut account.sent)
+        .into_iter()
+        .filter(|(path, _)| !struck.contains(path))
+        .map(|(_, whole)| whole)
+        .collect();
+    sent.sort_unstable();
+    sent.dedup();
+    held.state = State::Confirmed(Arc::new(Closed {
+        root: std::mem::take(&mut account.root),
+        sent,
+    }));
+}
+
+/// The account under `ticket` is to answer nothing, ever: its session
+/// ended without a whole word on what landed.
+pub fn forget(ticket: &[u8]) {
+    let Ok(ticket) = <[u8; TICKET_BYTES]>::try_from(ticket) else {
+        return;
+    };
+    kept()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&ticket);
+}
+
+/// Whether these tickets are all known here and at least one of their
+/// sessions has not ended yet: an answer may come, if it is waited for. A
+/// ticket nothing answers to is never worth the wait.
+pub fn pending(tickets: &[Vec<u8>]) -> bool {
+    let kept = kept()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut open = false;
+    for ticket in tickets {
+        let Ok(ticket) = <[u8; TICKET_BYTES]>::try_from(ticket.as_slice()) else {
+            return false;
+        };
+        match kept.get(&ticket) {
+            Some(held) => open |= matches!(held.state, State::Open(_)),
+            None => return false,
+        }
+    }
+    open
+}
+
+/// The accounts these tickets ask for: every one of them, confirmed, or
+/// `None` when any is not held or its session has not ended well — never
+/// some. They stay kept: a removal that was cut short may be asked again.
 pub fn held(tickets: &[Vec<u8>]) -> Option<Vec<Arc<Closed>>> {
     let kept = kept()
         .lock()
@@ -174,7 +355,12 @@ pub fn held(tickets: &[Vec<u8>]) -> Option<Vec<Arc<Closed>>> {
         .map(|ticket| {
             let ticket: [u8; TICKET_BYTES] = ticket.as_slice().try_into().ok()?;
             let held = kept.get(&ticket)?;
-            (held.since.elapsed() < KEPT_FOR).then(|| Arc::clone(&held.account))
+            match &held.state {
+                State::Confirmed(account) if held.since.elapsed() < KEPT_FOR => {
+                    Some(Arc::clone(account))
+                }
+                _ => None,
+            }
         })
         .collect()
 }
@@ -183,44 +369,58 @@ pub fn held(tickets: &[Vec<u8>]) -> Option<Vec<Arc<Closed>>> {
 mod tests {
     use super::*;
 
-    /// An account holds a file by its path, size and time together, and
+    const SECOND: i128 = 1_000_000_000;
+
+    fn version(size: u64, mtime_nanos: i128) -> Version {
+        Version {
+            size,
+            mtime_nanos,
+            ctime_nanos: mtime_nanos + 5,
+            device: 7,
+            inode: 42,
+        }
+    }
+
+    /// An account holds a file by its path and everything it was, and
     /// nothing it was not told of; a ticket asks for its own account, and
     /// tickets are answered all together or not at all.
     #[test]
     fn an_account_holds_what_was_sent_and_a_ticket_asks_for_it() {
-        let mut account = Account::default();
-        account.record(b"a.txt", 5, 1_700_000_000);
-        account.record(b"sub/b\xff.bin", 0, -3);
-        account.record(b"", 9, 1);
-        account.record(b"a.txt", 5, 1_700_000_000);
+        let at = 1_700_000_000 * SECOND + 120_000_000;
+        let mut account = Account::of(Path::new("/srv/m/src"));
+        account.record(b"a.txt", &version(5, at));
+        account.record(b"sub/b\xff.bin", &version(0, -3));
+        account.record(b"", &version(9, 1));
+        account.record(b"a.txt", &version(5, at));
         let ticket = keep(account);
         assert_eq!(ticket.len(), TICKET_BYTES);
+        confirm(&ticket, &[]);
 
         let accounts = held(std::slice::from_ref(&ticket)).expect("kept");
         let account = &accounts[0];
         assert_eq!(account.len(), 3, "a file told of twice is one");
-        assert!(account.holds(b"a.txt", 5, 1_700_000_000));
-        assert!(account.holds(b"sub/b\xff.bin", 0, -3));
-        assert!(account.holds(b"", 9, 1));
-        for (path, size, mtime) in [
-            (&b"a.txt"[..], 6, 1_700_000_000),
-            (b"a.txt", 5, 1_700_000_001),
-            (b"A.txt", 5, 1_700_000_000),
-            (b"a.tx", 5, 1_700_000_000),
-            (b"sub/b\xef\xbf\xbd.bin", 0, -3),
-            (b"new.txt", 5, 1_700_000_000),
+        assert!(account.holds(b"a.txt", &version(5, at)));
+        assert!(account.holds(b"sub/b\xff.bin", &version(0, -3)));
+        assert!(account.holds(b"", &version(9, 1)));
+        for (path, other) in [
+            (&b"a.txt"[..], version(6, at)),
+            (b"A.txt", version(5, at)),
+            (b"a.tx", version(5, at)),
+            (b"sub/b\xef\xbf\xbd.bin", version(0, -3)),
+            (b"new.txt", version(5, at)),
         ] {
-            assert!(!account.holds(path, size, mtime), "{path:?} {size} {mtime}");
+            assert!(!account.holds(path, &other), "{path:?} {other:?}");
         }
 
         // Another session's ticket is another account.
-        let mut other = Account::default();
-        other.record(b"new.txt", 5, 1_700_000_000);
+        let mut other = Account::of(Path::new("/srv/m/src"));
+        other.record(b"new.txt", &version(5, at));
         let second = keep(other);
+        confirm(&second, &[]);
         assert_ne!(ticket, second);
         let both = held(&[ticket.clone(), second.clone()]).expect("both kept");
-        assert!(!both[0].holds(b"new.txt", 5, 1_700_000_000));
-        assert!(both[1].holds(b"new.txt", 5, 1_700_000_000));
+        assert!(!both[0].holds(b"new.txt", &version(5, at)));
+        assert!(both[1].holds(b"new.txt", &version(5, at)));
 
         // One ticket nothing answers to, and none of them is answered.
         assert!(held(&[ticket.clone(), vec![0u8; TICKET_BYTES]]).is_none());
@@ -230,5 +430,170 @@ mod tests {
         assert!(held(&[]).is_some_and(|none| none.is_empty()));
         // A ticket is not used up.
         assert!(held(&[ticket]).is_some());
+    }
+
+    /// cr-uv4-1: a file is held as the file it was. The reviewer's case —
+    /// other contents of the same length, written 800 ms later in the
+    /// same second — is another file; so is one whose time was put back
+    /// (its change time moved), and one put in its place (another file
+    /// altogether, of the same size and times).
+    #[test]
+    fn a_file_rewritten_within_the_second_is_not_the_file_that_was_sent() {
+        let sent = Version {
+            size: 4096,
+            mtime_nanos: 1_800_000_000 * SECOND + 100_000_000,
+            ctime_nanos: 1_800_000_000 * SECOND + 100_000_000,
+            device: 7,
+            inode: 42,
+        };
+        let mut account = Account::of(Path::new("/srv/m/src"));
+        account.record(b"f.bin", &sent);
+        let ticket = keep(account);
+        confirm(&ticket, &[]);
+        let account = &held(&[ticket]).expect("kept")[0];
+        assert!(account.holds(b"f.bin", &sent));
+
+        let later = sent.mtime_nanos + 800_000_000;
+        assert_eq!(later / SECOND, sent.mtime_nanos / SECOND, "the same second");
+        let rewritten = Version {
+            mtime_nanos: later,
+            ctime_nanos: later,
+            ..sent
+        };
+        assert!(!account.holds(b"f.bin", &rewritten));
+        // Each of the two times tells by itself.
+        let written_later = Version {
+            mtime_nanos: later,
+            ..sent
+        };
+        assert!(!account.holds(b"f.bin", &written_later));
+        // Written to, and its time put back: the change time tells.
+        let put_back = Version {
+            ctime_nanos: later,
+            ..sent
+        };
+        assert!(!account.holds(b"f.bin", &put_back));
+        // Another file under the name, with the size and both times.
+        let replaced = Version { inode: 43, ..sent };
+        assert!(!account.holds(b"f.bin", &replaced));
+        let elsewhere = Version { device: 8, ..sent };
+        assert!(!account.holds(b"f.bin", &elsewhere));
+    }
+
+    /// cr-uv4-1: an account answers nothing until its session has ended
+    /// well — the ticket is given before a byte of any file has gone —
+    /// and then holds nothing the receiving end said it does not have.
+    /// One whose session never ends well is never answered.
+    #[test]
+    fn an_account_answers_only_once_its_session_has_ended_well() {
+        let at = 1_700_000_000 * SECOND;
+        let mut account = Account::of(Path::new("/srv/m/src"));
+        for path in [
+            &b"landed.txt"[..],
+            b"failed.txt",
+            b"sub/bad\xff.bin",
+            b"kept",
+        ] {
+            account.record(path, &version(1, at));
+        }
+        let ticket = keep(account);
+        assert!(
+            held(std::slice::from_ref(&ticket)).is_none(),
+            "the session has not ended"
+        );
+        // It may yet: worth a wait. A ticket nothing answers to is not.
+        assert!(pending(std::slice::from_ref(&ticket)));
+        assert!(!pending(&[ticket.clone(), vec![0u8; TICKET_BYTES]]));
+        assert!(!pending(&[ticket[..4].to_vec()]));
+        assert!(!pending(&[]));
+        // A word about another ticket confirms nothing here.
+        confirm(&[0u8; TICKET_BYTES], &[]);
+        confirm(&ticket[..4], &[]);
+        assert!(held(std::slice::from_ref(&ticket)).is_none());
+
+        confirm(
+            &ticket,
+            &[
+                b"failed.txt".to_vec(),
+                b"sub/bad\xff.bin".to_vec(),
+                b"never sent".to_vec(),
+            ],
+        );
+        assert!(!pending(std::slice::from_ref(&ticket)), "it has ended");
+        let accounts = held(std::slice::from_ref(&ticket)).expect("confirmed");
+        let account = &accounts[0];
+        assert_eq!(account.len(), 2);
+        assert!(account.holds(b"landed.txt", &version(1, at)));
+        assert!(account.holds(b"kept", &version(1, at)));
+        assert!(!account.holds(b"failed.txt", &version(1, at)));
+        assert!(!account.holds(b"sub/bad\xff.bin", &version(1, at)));
+        // The text a name that is not text is shown as is another path.
+        assert!(!account.holds(b"sub/bad\xef\xbf\xbd.bin", &version(1, at)));
+        // Confirmed once: a second word changes nothing.
+        confirm(&ticket, &[b"landed.txt".to_vec()]);
+        assert!(
+            held(std::slice::from_ref(&ticket)).unwrap()[0].holds(b"landed.txt", &version(1, at))
+        );
+
+        // A session that ended without a whole word on what landed.
+        let mut lost = Account::of(Path::new("/srv/m/src"));
+        lost.record(b"x", &version(1, at));
+        let lost = keep(lost);
+        forget(&lost);
+        confirm(&lost, &[]);
+        assert!(held(&[lost]).is_none());
+    }
+
+    /// cr-uv4-1: an account is of one place — the path its session read —
+    /// however that path is spelled, and of no other.
+    #[test]
+    fn an_account_is_of_the_place_its_session_read() {
+        let mut account = Account::of(Path::new("/srv/m/src/"));
+        account.record(b"a", &version(1, 1));
+        let ticket = keep(account);
+        confirm(&ticket, &[]);
+        let account = &held(&[ticket]).unwrap()[0];
+        for same in ["/srv/m/src", "/srv/m/src/", "/srv/m/./src/."] {
+            assert!(account.is_of(Path::new(same)), "{same}");
+        }
+        for other in ["/srv/m/src2", "/srv/m", "/srv/m/src/sub", "/srv/other/src"] {
+            assert!(!account.is_of(Path::new(other)), "{other}");
+        }
+    }
+
+    /// What a file's metadata gives: its size and its time to the part of
+    /// a second the filesystem keeps; a write is another version.
+    #[test]
+    fn a_version_is_read_from_the_file_whole() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("f");
+        std::fs::write(&file, b"1234").unwrap();
+        let at = filetime::FileTime::from_unix_time(1_800_000_000, 100_000_000);
+        filetime::set_file_mtime(&file, at).unwrap();
+        let first = Version::of(&std::fs::metadata(&file).unwrap());
+        assert_eq!(first.size, 4);
+        assert_eq!(first.mtime_nanos / SECOND, 1_800_000_000);
+        // Other contents of the same length, 800 ms later in that second.
+        std::fs::write(&file, b"abcd").unwrap();
+        let later = filetime::FileTime::from_unix_time(1_800_000_000, 900_000_000);
+        filetime::set_file_mtime(&file, later).unwrap();
+        let second = Version::of(&std::fs::metadata(&file).unwrap());
+        assert_eq!(second.size, first.size);
+        assert_eq!(second.mtime_nanos / SECOND, first.mtime_nanos / SECOND);
+        if first.mtime_nanos % SECOND != 0 {
+            // (A filesystem that keeps whole seconds cannot show this.)
+            assert_ne!(second, first);
+            assert_eq!(second.mtime_nanos - first.mtime_nanos, 800_000_000);
+        }
+        #[cfg(unix)]
+        {
+            // And its time put back, the change time has still moved.
+            std::thread::sleep(Duration::from_millis(20));
+            filetime::set_file_mtime(&file, at).unwrap();
+            let put_back = Version::of(&std::fs::metadata(&file).unwrap());
+            assert_eq!(put_back.mtime_nanos, first.mtime_nanos);
+            assert_eq!(put_back.inode, first.inode);
+            assert_ne!(put_back.ctime_nanos, first.ctime_nanos);
+        }
     }
 }
