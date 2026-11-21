@@ -25,7 +25,9 @@ afresh and synced before every removal. Run twice: with the tree on tmpfs
 and with it on Btrfs — the two filesystems this project's gate runs on,
 and removal costs more than four times as much on the second. "Before" is the tree
 at `cade8d6c` (after slice 3, before this one), which has no `-size`,
-`-mtime` or `-delete`; "after" is slice 4. `bench_uv4.py` is the script;
+`-mtime` or `-delete`; "after" is slice 4. `bench_uv4.py` is the script
+(since cr-uv4-6 it works in a directory of its own inside the one it is
+given, and removes nothing else; the numbers here were taken before);
 `result.txt` its output for both runs, medians included.
 
 ## Result (best of five)

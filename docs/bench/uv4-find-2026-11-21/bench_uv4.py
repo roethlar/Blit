@@ -1,7 +1,10 @@
 """`find` over 200,000 empty files in 2,000 directories: the tests that ask each entry about itself, and
 `-delete` — the system's, and each build's through its own loopback daemon.
 
-Usage: bench_uv4.py <work dir> <label=release dir>...   Best and median of RUNS, milliseconds."""
+Usage: bench_uv4.py <where> <label=release dir>...   Best and median of RUNS, milliseconds.
+Everything is made in a directory of this script's own inside <where> (`blit-bench-uv4`), which is all it
+ever removes: <where> itself, and anything else in it, is left alone (cr-uv4-6 — it used to remove the
+directory it was given, whole, before it began)."""
 import os
 import shutil
 import socket
@@ -10,7 +13,7 @@ import subprocess
 import sys
 import time
 
-work = sys.argv[1]
+work = os.path.join(sys.argv[1], "blit-bench-uv4")
 builds = [arg.split("=", 1) for arg in sys.argv[2:]]
 RUNS = 5
 DIRS, FILES = 2000, 100
@@ -118,3 +121,5 @@ for label, release in builds:
         daemon.terminate()
         daemon.wait(timeout=10)
         log.close()
+print("the tree's filesystem:", subprocess.run(["stat", "-f", "-c", "%T", work], capture_output=True, text=True).stdout.strip())
+shutil.rmtree(work, ignore_errors=True)
