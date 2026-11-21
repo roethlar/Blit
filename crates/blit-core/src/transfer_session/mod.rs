@@ -1511,6 +1511,16 @@ pub async fn run_source(
 /// source's own last name (cr-ecm9-3). A list of exact paths — a retry's —
 /// has none (cr-ecm12-1): there the file sent under the empty path is the
 /// source itself and accounts for no path below it.
+/// A manifest entry's name by its own bytes (cr-ecm14-1): the exact ones
+/// when it is not text, its text's otherwise. Two entries of one text are
+/// two names here.
+fn own_name(header: &FileHeader) -> &[u8] {
+    match header.raw_relative_path.as_deref() {
+        Some(raw) if !raw.is_empty() => raw,
+        _ => header.relative_path.as_bytes(),
+    }
+}
+
 fn sole_name_of(root: &Path, exact: bool) -> Option<String> {
     if exact {
         return None;
@@ -1519,10 +1529,17 @@ fn sole_name_of(root: &Path, exact: bool) -> Option<String> {
         .map(|name| name.to_string_lossy().into_owned())
 }
 
+///
+/// cr-ecm14-1: `scanned` is every name the walk put on the manifest, EACH
+/// BY ITS OWN BYTES ([`own_name`]). What was asked for is looked up there
+/// by its own bytes too. It was looked up by its text in the manifest's
+/// map of texts — where `dup` and the byte `FF` and `dup` and U+FFFD are
+/// one key: with the first gone from the source, the second answered for
+/// it, and the retry reported nothing missing.
 fn requested_but_unscanned(
     scope: Option<&HashSet<PathBuf>>,
     unnamed: &[String],
-    sent: &HashMap<String, FileHeader>,
+    scanned: &HashSet<Vec<u8>>,
     sole_name: Option<&str>,
     unreadable: &[String],
 ) -> (Vec<crate::generated::FileFailure>, u64) {
@@ -1530,7 +1547,7 @@ fn requested_but_unscanned(
         return (Vec::new(), 0);
     };
     // The one file a single-file source sent, by the name a list has for it.
-    let sole_sent = sole_name.filter(|_| sent.contains_key(""));
+    let sole_sent = sole_name.filter(|_| scanned.contains(&b""[..]));
     let mut out = Vec::new();
     let mut dropped = 0u64;
     let mut budget = crate::remote::transfer::sink::MAX_WIRE_FAILED_PATHS_ENCODED_BYTES;
@@ -1546,7 +1563,10 @@ fn requested_but_unscanned(
                 crate::raw_name::raw_relative_bytes(requested).unwrap_or_default(),
             )
         })
-        .filter(|(rel, _)| !sent.contains_key(rel) && Some(rel.as_str()) != sole_sent)
+        .filter(|(rel, raw)| {
+            let own: &[u8] = if raw.is_empty() { rel.as_bytes() } else { raw };
+            !scanned.contains(own) && Some(rel.as_str()) != sole_sent
+        })
         .chain(unnamed.iter().map(|text| (text.clone(), Vec::new())))
         .collect();
     requested.sort();
@@ -2144,6 +2164,10 @@ async fn source_send_half(
         let unreadable: Arc<StdMutex<Vec<String>>> =
             instruments.unreadable.clone().unwrap_or_default();
         let (mut header_rx, mut scan) = scan_source.scan(None, Arc::clone(&unreadable));
+        // cr-ecm14-1: the names a LISTED scan found, each by its own
+        // bytes — what the account of what was not found is taken from.
+        let listed = scan_source.files_from_scope().is_some();
+        let mut names_found: HashSet<Vec<u8>> = HashSet::new();
         // The TCP carrier owns a separate authenticated lane, so an ordinary
         // copy can restore the old push driver's scan/transfer overlap as soon
         // as DESTINATION has authorized a batch through NeedBatch. Mirror and
@@ -2241,6 +2265,12 @@ async fn source_send_half(
                     header = header_rx.recv() => header,
                 };
                 let Some(header) = next_header else { break };
+                // cr-ecm14-1: under a list, each name the walk gives is
+                // kept by its own bytes — the map below keeps one entry
+                // per TEXT, and two names can share one.
+                if listed {
+                    names_found.insert(own_name(&header).to_vec());
+                }
                 if let Some(probe) = &small_file_probe {
                     let wait_started = probe.start();
                     let mut sent = sent.lock().expect("sent-manifest lock poisoned");
@@ -2309,7 +2339,7 @@ async fn source_send_half(
         let (scan_failures, scan_failures_dropped) = requested_but_unscanned(
             scan_source.files_from_scope().as_ref(),
             &scan_source.files_from_unnamed(),
-            &sent.lock().expect("sent-manifest lock poisoned"),
+            &names_found,
             sole_name.as_deref(),
             &unreadable.lock().expect("unreadable list lock poisoned"),
         );
@@ -7203,6 +7233,7 @@ mod tests {
         let sent: HashMap<String, FileHeader> =
             [("sent.txt".to_string(), FileHeader::default())].into();
         let unnamed = vec!["./dot.txt".to_string(), "/abs.txt".to_string()];
+        let sent = names_of(&sent);
         let (failures, dropped) = requested_but_unscanned(Some(&scope), &unnamed, &sent, None, &[]);
         assert_eq!(dropped, 0);
         let reported: Vec<(&str, &str)> = failures
@@ -7224,6 +7255,63 @@ mod tests {
             .is_empty());
     }
 
+    /// The names a manifest of texts holds, for the guards that write
+    /// one: each key, as the bytes of a name that is text.
+    fn names_of(sent: &HashMap<String, FileHeader>) -> HashSet<Vec<u8>> {
+        sent.keys().map(|text| text.clone().into_bytes()).collect()
+    }
+
+    /// cr-ecm14-1: two names of one text are two names to the account of
+    /// what a retry did not find. The reviewer's case: `dup` and the byte
+    /// `FF`, and `dup` and U+FFFD, both asked for; the first gone from
+    /// the source, the second found — the first is reported missing, by
+    /// its bytes. It was not: its text was in the manifest, the other's.
+    /// And the other way round; and both found, neither is missing.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_is_not_found_because_another_of_its_text_was() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let by_a_byte: &[u8] = b"sub/dup\xff";
+        let by_the_character = "sub/dup\u{fffd}";
+        let scope: HashSet<PathBuf> = [
+            PathBuf::from(std::ffi::OsStr::from_bytes(by_a_byte)),
+            PathBuf::from(by_the_character),
+        ]
+        .into();
+        let missing = |found: &[&[u8]]| -> Vec<(String, Vec<u8>)> {
+            let scanned: HashSet<Vec<u8>> = found.iter().map(|name| name.to_vec()).collect();
+            requested_but_unscanned(Some(&scope), &[], &scanned, None, &[])
+                .0
+                .into_iter()
+                .map(|failure| (failure.relative_path, failure.raw_relative_path))
+                .collect()
+        };
+        assert_eq!(
+            missing(&[by_the_character.as_bytes()]),
+            [(by_the_character.to_string(), by_a_byte.to_vec())],
+            "the name that is not text has gone"
+        );
+        assert_eq!(
+            missing(&[by_a_byte]),
+            [(by_the_character.to_string(), Vec::new())],
+            "the name that is text has gone"
+        );
+        assert!(missing(&[by_a_byte, by_the_character.as_bytes()]).is_empty());
+        assert_eq!(missing(&[]).len(), 2);
+        // A manifest entry's own name: its bytes when it is not text.
+        let entry = FileHeader {
+            relative_path: by_the_character.to_string(),
+            raw_relative_path: Some(by_a_byte.to_vec()),
+            ..FileHeader::default()
+        };
+        assert_eq!(own_name(&entry), by_a_byte);
+        let entry = FileHeader {
+            relative_path: by_the_character.to_string(),
+            ..FileHeader::default()
+        };
+        assert_eq!(own_name(&entry), by_the_character.as_bytes());
+    }
+
     /// cr-ecm13-3: a requested name that is not text, and was not found,
     /// is reported with its bytes — the retry after it asks by them.
     #[cfg(unix)]
@@ -7236,7 +7324,7 @@ mod tests {
         ]
         .into();
         let (missing, dropped) =
-            requested_but_unscanned(Some(&scope), &[], &HashMap::new(), None, &[]);
+            requested_but_unscanned(Some(&scope), &[], &HashSet::new(), None, &[]);
         assert_eq!(dropped, 0);
         let by_text: HashMap<&str, &[u8]> = missing
             .iter()
@@ -7263,6 +7351,7 @@ mod tests {
         // was sent, under a list of exact paths.
         let scope: HashSet<PathBuf> = [PathBuf::from("Report.txt")].into();
         let sent: HashMap<String, FileHeader> = [(String::new(), FileHeader::default())].into();
+        let sent = names_of(&sent);
         let missing = |exact: bool| {
             requested_but_unscanned(
                 Some(&scope),
@@ -7289,7 +7378,7 @@ mod tests {
                 .iter()
                 .map(|path| (path.to_string(), FileHeader::default()))
                 .collect();
-            requested_but_unscanned(Some(&scope), &[], &sent, sole, &[])
+            requested_but_unscanned(Some(&scope), &[], &names_of(&sent), sole, &[])
                 .0
                 .into_iter()
                 .map(|failure| (failure.relative_path, failure.reason))
@@ -7315,7 +7404,7 @@ mod tests {
             [PathBuf::from("Report.txt"), PathBuf::from("other.txt")].into();
         let sent: HashMap<String, FileHeader> = [(String::new(), FileHeader::default())].into();
         let missing = |sole: Option<&str>, sent: &HashMap<String, FileHeader>| -> Vec<String> {
-            requested_but_unscanned(Some(&scope), &[], sent, sole, &[])
+            requested_but_unscanned(Some(&scope), &[], &names_of(sent), sole, &[])
                 .0
                 .into_iter()
                 .map(|failure| failure.relative_path)

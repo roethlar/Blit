@@ -1209,3 +1209,57 @@ fn two_names_of_one_text_both_arrive() {
         "{said}"
     );
 }
+
+/// cr-ecm14-1: of two names of one text that both failed, the one that
+/// has gone from the source by the retry is reported missing — the other,
+/// found, does not answer for it. The reviewer's case: `dup` and the byte
+/// `FF`, and `dup` and U+FFFD; the first removed during the wait. The
+/// retry copied the second and exited 0, with the first never copied and
+/// never mentioned.
+#[cfg(unix)]
+#[test]
+fn a_name_that_has_gone_is_missing_though_another_of_its_text_was_found() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let src = temp.path().join("src");
+    let dst = temp.path().join("dst");
+    fs::create_dir_all(src.join("sub")).expect("mkdir src");
+    fs::create_dir_all(&dst).expect("mkdir dst");
+    let raw = OsStr::from_bytes(b"dup\xff");
+    if fs::write(src.join("sub").join(raw), b"named by a byte").is_err() {
+        eprintln!("this filesystem refuses a name that is not text: nothing to tell apart");
+        return;
+    }
+    fs::write(src.join("sub/dup\u{fffd}"), b"named by the character").expect("the other");
+    // A file where their directory is to be: neither can land.
+    fs::write(dst.join("sub"), b"in the way").expect("block the directory");
+    let counters = temp.path().join("counters.txt");
+    let child = spawn(
+        "copy",
+        &["--retries", "1", "--retry-wait", "4"],
+        &src,
+        &dst,
+        &counters,
+    );
+    wait_for_counter(&counters, "retry_wait_seconds", Duration::from_secs(60));
+    // Both could land now — and one of them is no longer there to send.
+    fs::remove_file(dst.join("sub")).expect("free the directory's place");
+    fs::remove_file(src.join("sub").join(raw)).expect("remove the name that is not text");
+    let output = finish(child);
+    let said = format!("{}{}", stdout_of(&output), stderr_of(&output));
+    assert_eq!(counter_lines(&counters, "retry_pass"), vec![1], "{said}");
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_PARTIAL_FAILURE),
+        "a name the retry could not find is still a failure\n{said}"
+    );
+    assert!(said.contains("missing at retry"), "{said}");
+    assert_eq!(
+        fs::read(dst.join("sub/dup\u{fffd}")).expect("the one that was found"),
+        b"named by the character",
+        "{said}"
+    );
+    assert!(!dst.join("sub").join(raw).exists(), "{said}");
+}
