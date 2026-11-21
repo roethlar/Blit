@@ -477,17 +477,27 @@ impl<'a> Spellings<'a> {
     /// Checked with the filter itself ([`FileFilter::probing`]), over
     /// names read off each text's own syntax ([`samples`]). Under the
     /// other platform's path rule nothing can be asked of this machine's
-    /// filter, and the rules stand unchecked.
+    /// filter, and the rules stand unchecked. That is the one case in
+    /// which they do.
     fn of_role(
         pattern: &'a str,
         role: Role,
         windows: bool,
         whole: &std::rc::Rc<Complete>,
     ) -> Option<Self> {
-        let asked = (windows == cfg!(windows))
-            .then(|| Asked::about(pattern, role, whole))
-            .flatten();
-        Self::with(pattern, windows, asked.as_ref())
+        if windows != cfg!(windows) {
+            return Self::with(pattern, windows, None);
+        }
+        match Asked::about(pattern, role, whole) {
+            Some(asked) => Self::with(pattern, windows, Some(&asked)),
+            // cr-ecm11-4: the pattern cannot be put to the filter in one
+            // of its two readings, so nothing can be asked — and nothing
+            // is shown of it but the rule. It was shown BY RULE, unchecked:
+            // an `s` inside 249 pairs of braces is a pattern as typed, the
+            // line offered `S` for it, and the same command with
+            // `--ignore-case` is refused, the pattern too deep to widen.
+            None => (widen_case(pattern, windows) != pattern).then(|| Self::in_words(pattern)),
+        }
     }
 
     /// What the rules alone make of an exclude, nothing checked: so that a
@@ -2861,6 +2871,37 @@ mod tests {
     /// spells out alternatives is compared spelling by spelling, and past
     /// that the line is the plain rule. Counted in questions put to a
     /// filter.
+    #[test]
+    fn a_pattern_the_option_cannot_read_gets_the_rule_and_no_example() {
+        let pattern = format!("{}s{}", "{".repeat(249), "}".repeat(249));
+        let probing =
+            |ignore_case| crate::fs_enum::FileFilter::probing(&pattern, true, ignore_case);
+        assert!(probing(false).is_some(), "as typed it is a pattern");
+        assert!(probing(true).is_none(), "with the option it is refused");
+        assert_eq!(
+            case_note(&[(pattern.as_str(), None)], cfg!(windows)),
+            Some(format!(
+                "\"{pattern}\" matches exactly as typed; capital letters matter \
+                 (--ignore-case ignores them)."
+            ))
+        );
+        // Beside a pattern that can be asked about, that one is shown.
+        assert_eq!(
+            case_note(&[(pattern.as_str(), None), ("*Cache", None)], cfg!(windows)).as_deref(),
+            Some(
+                "\"*Cache\" matches Cache only, and 1 more pattern matches only as typed; \
+                 capital letters matter (--ignore-case would also match cache, CACHE)."
+            )
+        );
+        // Few enough levels, and both readings compile: an example, checked.
+        let shallow = format!("{}s{}", "{".repeat(8), "}".repeat(8));
+        assert!(
+            case_note(&[(shallow.as_str(), None)], cfg!(windows)).is_some_and(
+                |line| line.ends_with("(--ignore-case would also match {{{{{{{{S}}}}}}}}).")
+            )
+        );
+    }
+
     #[test]
     fn the_line_asks_a_bounded_number_of_questions() {
         /// A few hundred are asked for the patterns looked at; a thousand
