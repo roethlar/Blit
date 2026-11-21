@@ -4,14 +4,26 @@ use eyre::{Context, Result};
 use std::path::Path;
 use std::time::SystemTime;
 
+/// What stands at `dst`, when it is something a copy can be THE SAME AS:
+/// a regular file (or a link to one). `None` when nothing is there — and
+/// when what is there is no file (cr-ecm12-3). A directory has a size and
+/// a time too: where the two happened to pass the test — Btrfs gives a
+/// directory holding one entry a size of twenty bytes or so — a directory
+/// standing in a file's place was taken for the file already copied, and
+/// the run reported one file copied, no bytes, exit 0. Such an entry
+/// needs copying, and the write says why it cannot be.
+fn comparable(dst: &Path) -> Option<std::fs::Metadata> {
+    std::fs::metadata(dst)
+        .ok()
+        .filter(std::fs::Metadata::is_file)
+}
+
 /// Check if a file needs to be copied (for mirror mode)
 pub fn file_needs_copy(src: &Path, dst: &Path, use_checksum: bool) -> Result<bool> {
-    if !dst.exists() {
-        return Ok(true);
-    }
-
     let src_meta = src.metadata()?;
-    let dst_meta = dst.metadata()?;
+    let Some(dst_meta) = comparable(dst) else {
+        return Ok(true);
+    };
 
     if src_meta.len() != dst_meta.len() {
         return Ok(true);
@@ -39,11 +51,10 @@ pub fn file_needs_copy_with_checksum_type(
     dst: &Path,
     checksum: Option<ChecksumType>,
 ) -> Result<bool> {
-    if !dst.exists() {
-        return Ok(true);
-    }
     let src_meta = src.metadata()?;
-    let dst_meta = dst.metadata()?;
+    let Some(dst_meta) = comparable(dst) else {
+        return Ok(true);
+    };
     if src_meta.len() != dst_meta.len() {
         return Ok(true);
     }
@@ -96,19 +107,17 @@ pub fn file_needs_copy_with_mode(src: &Path, dst: &Path, mode: ComparisonMode) -
     match mode {
         ComparisonMode::IgnoreTimes | ComparisonMode::Force => Ok(true),
         ComparisonMode::SizeOnly => {
-            if !dst.exists() {
-                return Ok(true);
-            }
             let src_meta = src.metadata().context("stat source for size compare")?;
-            let dst_meta = dst.metadata().context("stat dest for size compare")?;
+            let Some(dst_meta) = comparable(dst) else {
+                return Ok(true);
+            };
             Ok(src_meta.len() != dst_meta.len())
         }
         ComparisonMode::Checksum => {
-            if !dst.exists() {
-                return Ok(true);
-            }
             let src_meta = src.metadata().context("stat source for checksum compare")?;
-            let dst_meta = dst.metadata().context("stat dest for checksum compare")?;
+            let Some(dst_meta) = comparable(dst) else {
+                return Ok(true);
+            };
             if src_meta.len() != dst_meta.len() {
                 return Ok(true);
             }
@@ -140,17 +149,15 @@ pub fn file_needs_copy_with_mode_opened(
     match mode {
         ComparisonMode::IgnoreTimes | ComparisonMode::Force => Ok(true),
         ComparisonMode::SizeOnly => {
-            if !dst.exists() {
+            let Some(dst_meta) = comparable(dst) else {
                 return Ok(true);
-            }
-            let dst_meta = dst.metadata().context("stat dest for size compare")?;
+            };
             Ok(src_meta.len() != dst_meta.len())
         }
         ComparisonMode::Checksum => {
-            if !dst.exists() {
+            let Some(dst_meta) = comparable(dst) else {
                 return Ok(true);
-            }
-            let dst_meta = dst.metadata().context("stat dest for checksum compare")?;
+            };
             if src_meta.len() != dst_meta.len() {
                 return Ok(true);
             }
@@ -164,10 +171,9 @@ pub fn file_needs_copy_with_mode_opened(
             Ok(src_hash != dst_hash)
         }
         ComparisonMode::SizeMtime | ComparisonMode::Unspecified => {
-            if !dst.exists() {
+            let Some(dst_meta) = comparable(dst) else {
                 return Ok(true);
-            }
-            let dst_meta = dst.metadata().context("stat dest for size+mtime compare")?;
+            };
             if src_meta.len() != dst_meta.len() {
                 return Ok(true);
             }
@@ -177,5 +183,69 @@ pub fn file_needs_copy_with_mode_opened(
                 .duration_since(dst_time)
                 .is_ok_and(|diff| diff.as_secs() > 2))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// cr-ecm12-3: a directory standing where a file is to go is never
+    /// "the file, already copied" — whatever size and time the filesystem
+    /// gives it. The source here is made to have exactly the directory's
+    /// size and its time, so the comparison has nothing else to go by.
+    #[test]
+    fn a_directory_is_never_the_same_as_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("Report.txt");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("inside"), b"x").unwrap();
+        let there = std::fs::metadata(&dir).unwrap();
+        let src = tmp.path().join("source");
+        std::fs::write(&src, vec![b'x'; there.len() as usize]).unwrap();
+        filetime::set_file_mtime(
+            &src,
+            filetime::FileTime::from_last_modification_time(&there),
+        )
+        .unwrap();
+        let here = std::fs::metadata(&src).unwrap();
+        assert_eq!(here.len(), there.len(), "the same size");
+        assert_eq!(
+            here.modified().unwrap(),
+            there.modified().unwrap(),
+            "the same time"
+        );
+
+        for mode in [
+            ComparisonMode::SizeMtime,
+            ComparisonMode::Unspecified,
+            ComparisonMode::SizeOnly,
+            ComparisonMode::Checksum,
+        ] {
+            assert!(
+                file_needs_copy_with_mode(&src, &dir, mode).unwrap(),
+                "{mode:?}: by path"
+            );
+            let mut opened = std::fs::File::open(&src).unwrap();
+            assert!(
+                file_needs_copy_with_mode_opened(&mut opened, &here, &dir, mode).unwrap(),
+                "{mode:?}: by the opened source"
+            );
+        }
+        assert!(file_needs_copy(&src, &dir, false).unwrap());
+        assert!(file_needs_copy(&src, &dir, true).unwrap());
+
+        // A regular file of that size and time is the same, as ever.
+        let copy = tmp.path().join("copy");
+        std::fs::copy(&src, &copy).unwrap();
+        filetime::set_file_mtime(
+            &copy,
+            filetime::FileTime::from_last_modification_time(&there),
+        )
+        .unwrap();
+        assert!(!file_needs_copy_with_mode(&src, &copy, ComparisonMode::SizeMtime).unwrap());
+        assert!(!file_needs_copy(&src, &copy, true).unwrap());
+        // And nothing there needs copying.
+        assert!(file_needs_copy(&src, &tmp.path().join("missing"), false).unwrap());
     }
 }

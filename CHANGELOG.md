@@ -193,6 +193,11 @@ part, and a job you can list, read, re-run and retry.
   success on two different files, and with an exclude naming the file it
   compared what `copy` left out. `copy` with the file named in
   `--files-from` copied it and then exited 2 reporting it missing.
+- A directory standing where a file is to be copied is no longer taken
+  for the file already there. Where its size and time happened to pass
+  the comparison — on Btrfs a small directory's can — `copy` reported
+  the file copied, no bytes written, exit 0. It is now a failure, as on
+  other filesystems.
 - A single-file copy whose file fails and is retried (`--retries`) is
   retried: the retry looked for it under an empty name, sent nothing,
   reported `source: missing at retry` and exited 2 with the file there
