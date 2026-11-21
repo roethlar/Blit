@@ -352,6 +352,86 @@ fn a_list_that_holds_no_name_overrides_the_patterns_at_a_daemon_too() {
     }
 }
 
+/// cr-ecm5-5: under a list of names a mirror deletes nothing the list does
+/// not name — not even an empty directory. The walk admits every
+/// directory under a list (a listed file may lie anywhere), and each one
+/// walked was a deletion candidate: with a list holding no name, a daemon
+/// removed two empty directories nobody listed, and a local mirror removed
+/// one that both sides held. Locally, pushed to a daemon and pulled from
+/// one; with a list that names nothing, and with one that names a file.
+#[test]
+fn under_a_list_of_names_a_mirror_leaves_unlisted_directories_alone() {
+    let ctx = common::TestContext::new();
+    let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    let local = ctx.workspace.join("local");
+    let other = ctx.workspace.join("other");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&other).unwrap();
+    let (here, there) = (with_slash(&local), with_slash(&other));
+    let nothing = ctx.workspace.join("nothing.txt");
+    fs::write(&nothing, "# nothing is listed\n").unwrap();
+    let one = ctx.workspace.join("one.txt");
+    fs::write(&one, "listed.txt\n").unwrap();
+
+    for (route, from, to, source, destination) in [
+        ("local", here.as_str(), there.as_str(), &local, &other),
+        (
+            "push",
+            here.as_str(),
+            remote.as_str(),
+            &local,
+            &ctx.module_dir,
+        ),
+        (
+            "pull",
+            remote.as_str(),
+            here.as_str(),
+            &ctx.module_dir,
+            &local,
+        ),
+    ] {
+        for (list, copied) in [(&nothing, false), (&one, true)] {
+            refill(source, &["listed.txt", "unlisted.txt"]);
+            refill(destination, &["stale.txt"]);
+            for dir in ["empty-on-both", "holds/empty-below"] {
+                fs::create_dir_all(source.join(dir)).unwrap();
+                fs::create_dir_all(destination.join(dir)).unwrap();
+            }
+            fs::create_dir_all(destination.join("only-here")).unwrap();
+            let (ok, said) = daemon_run(
+                &ctx,
+                &[
+                    "mirror",
+                    "--yes",
+                    "--files-from",
+                    list.to_str().unwrap(),
+                    from,
+                    to,
+                ],
+            );
+            let case = format!("{route}, {}", list.file_name().unwrap().to_string_lossy());
+            assert!(ok, "{case}\n{said}");
+            assert_eq!(
+                destination.join("listed.txt").exists(),
+                copied,
+                "{case}: what the list names is copied, and nothing else\n{said}"
+            );
+            assert!(!destination.join("unlisted.txt").exists(), "{case}\n{said}");
+            for kept in [
+                "stale.txt",
+                "empty-on-both",
+                "holds/empty-below",
+                "only-here",
+            ] {
+                assert!(
+                    destination.join(kept).exists(),
+                    "{case}: {kept} is not named by the list and stays\n{said}"
+                );
+            }
+        }
+    }
+}
+
 /// AC-6: daemon to daemon. The asking machine only hands the destination
 /// daemon the request; that daemon opens the session to the source daemon
 /// itself. The mode rides the whole way: the source daemon leaves

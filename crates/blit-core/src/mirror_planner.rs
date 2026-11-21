@@ -99,10 +99,11 @@ impl MirrorPlanner {
             .iter()
             .map(|e| CasefoldKey::new(&e.relative_path))
             .collect::<HashSet<_>>();
-        let dest_set = dest_entries
+        let mut dest_set = dest_entries
             .into_iter()
             .map(|e| (e.relative_path, matches!(e.kind, EntryKind::Directory)))
             .collect::<Vec<_>>();
+        only_listed_directories(&mut dest_set, filter);
 
         Ok(plan_from_sets(
             destination,
@@ -150,10 +151,11 @@ impl MirrorPlanner {
             .iter()
             .map(|e| CasefoldKey::new(&e.relative_path))
             .collect::<HashSet<_>>();
-        let dest_set = dest_entries
+        let mut dest_set = dest_entries
             .into_iter()
             .map(|e| (e.relative_path, matches!(e.kind, EntryKind::Directory)))
             .collect::<Vec<_>>();
+        only_listed_directories(&mut dest_set, filter);
 
         Ok(plan_from_sets(
             destination,
@@ -315,7 +317,7 @@ impl MirrorPlanner {
             }
         }
 
-        let dest_set = dest_entries
+        let mut dest_set = dest_entries
             .into_iter()
             .map(|e| (e.relative_path, matches!(e.kind, EntryKind::Directory)))
             .collect::<Vec<_>>();
@@ -324,6 +326,7 @@ impl MirrorPlanner {
         } else {
             dest_set.iter().map(|(rel, _)| rel.clone()).collect()
         };
+        only_listed_directories(&mut dest_set, filter);
         // cr-ssc5-4: a failed entry shields its destination subtree under the
         // identity it actually has here — a raw-named entry's exact bytes
         // where storable (its text names nothing of its own there), its text
@@ -461,6 +464,24 @@ impl MirrorPlanner {
             let diff = local_secs - remote_state.mtime;
             !(-2..=2).contains(&diff)
         }
+    }
+}
+
+/// cr-ecm5-5: under a list of exact names (`--files-from`), the scope of a
+/// mirror's deletions is the names listed — so a destination directory the
+/// list does not name is no candidate, whatever it holds or lacks.
+///
+/// The walk admits EVERY directory under such a list, because a listed
+/// file may lie anywhere below it (`FileFilter::should_include_dir`), and
+/// each directory walked used to be a candidate: empty ones the source no
+/// longer vouched for were removed. With a list that named nothing, a
+/// daemon removed two empty directories nobody listed, and a local mirror
+/// removed one that both sides held. A file was never affected — the
+/// filter passes only listed files — and a directory the list does name
+/// is a candidate like any listed entry.
+fn only_listed_directories(dest_set: &mut Vec<(PathBuf, bool)>, filter: &FileFilter) {
+    if let Some(listed) = filter.files_from.as_ref() {
+        dest_set.retain(|(rel, is_dir)| !*is_dir || listed.contains(rel));
     }
 }
 
@@ -1247,6 +1268,85 @@ mod identity_pairing_tests {
             .unwrap();
         assert_eq!(plan.files, vec![dst.join("stale.txt")], "{plan:?}");
         assert!(plan.dirs.is_empty(), "{plan:?}");
+    }
+
+    /// cr-ecm5-5: under a list of exact names only what the list names can
+    /// be deleted — a listed file the source no longer has, a listed
+    /// directory — and never a directory it does not name, empty or not,
+    /// on one side or both. A list that names nothing plans nothing. With
+    /// no list the same tree does plan its empty directories (transfers do
+    /// not carry empty directories; that rule is older and unchanged).
+    #[test]
+    fn under_a_list_of_names_a_directory_it_does_not_name_is_never_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        for dir in [
+            "empty-on-both",
+            "only-here",
+            "sub/empty-below",
+            "listed-dir",
+        ] {
+            std::fs::create_dir_all(dst.join(dir)).unwrap();
+        }
+        for file in ["gone.txt", "unlisted.txt", "sub/old.txt"] {
+            std::fs::write(dst.join(file), b"x").unwrap();
+        }
+        let source_files: HashSet<String> = ["a.txt".to_string()].into();
+        let plan = |filter: &FileFilter| {
+            let plan = MirrorPlanner::new(false)
+                .plan_session_deletions(&dst, &source_files, &[], &HashSet::new(), true, filter)
+                .unwrap();
+            let rel = |paths: Vec<PathBuf>| -> Vec<String> {
+                let mut rels: Vec<String> = paths
+                    .iter()
+                    .map(|path| {
+                        path.strip_prefix(&dst)
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace('\\', "/")
+                    })
+                    .collect();
+                rels.sort();
+                rels
+            };
+            (rel(plan.files), rel(plan.dirs))
+        };
+
+        let mut listed = FileFilter::default();
+        listed.files_from = Some(
+            ["a.txt", "gone.txt", "listed-dir"]
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+        );
+        assert_eq!(
+            plan(&listed),
+            (vec!["gone.txt".to_string()], vec!["listed-dir".to_string()]),
+            "what the list names, and nothing else"
+        );
+
+        let mut nothing = FileFilter::default();
+        nothing.files_from = Some(HashSet::new());
+        assert_eq!(
+            plan(&nothing),
+            (vec![], vec![]),
+            "a list that names nothing"
+        );
+
+        // No list: every destination entry the source lacks is planned, the
+        // empty directories among them.
+        let (files, dirs) = plan(&FileFilter::default());
+        assert_eq!(files, ["gone.txt", "sub/old.txt", "unlisted.txt"]);
+        assert_eq!(
+            dirs,
+            [
+                "empty-on-both",
+                "listed-dir",
+                "only-here",
+                "sub",
+                "sub/empty-below"
+            ]
+        );
     }
 }
 
