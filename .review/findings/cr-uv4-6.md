@@ -1,9 +1,9 @@
 # cr-uv4-6: the benchmark script removed the directory it was given
 
 **Severity**: MEDIUM — a script in the repository destroys the contents of an existing directory passed to it
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r16` (Codex openreview, 2026-11-21) reviewed `35adeacb..13faafd2` — utilities slices 5 and 6 and the eleven `combined-r15` fixes — with `guard_confirmed: true`. "Both scripts recursively delete a fixed-name child at startup. An existing directory of that name loses its contents, and concurrent runs can delete each other's work." The remaining work is cr-uv5-6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv4-6`)
+**Commit**: `f40e83b2`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r15` over `b8273ac1..35adeacb` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r15.codex.md`. The defect is in utilities slice 4 (`35adeacb`).
 
 ## Evidence

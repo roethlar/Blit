@@ -1,9 +1,9 @@
 # cr-uv4-1: a move's removal could take a file that is not the one that landed
 
 **Severity**: HIGH — a file rewritten at the source within the second it was sent in is removed, and it was never copied
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r16` (Codex openreview, 2026-11-21) reviewed `35adeacb..13faafd2` — utilities slices 5 and 6 and the eleven `combined-r15` fixes — with `guard_confirmed: true`. Four things. The account misses what was asked for before the manifest's end: "I moved 2,048 ordinary, unchanged files. All 2,048 arrived with the correct contents, but 384 remained at the source and the command exited 1. Incoming requests consume entries from the same map that cleanup later snapshots." (older than this fix: cr-uv3-1's; the working agent met it the same hour, measuring a move of 20,000 files). The version is read apart from the bytes: "On the `move --checksum` path, a same-size edit in the same timestamp second can occur after hashing and before the receipt's separate stat … Windows also records zero for file identity and change time." A file with two names is refused at its second: "Removing the first name changed the inode's ctime, so the move rejected the second name as changed." And a failed name is struck twice over: "The receipt subtracts both the raw name and its display spelling." The remaining work is cr-uv5-1, -2, -3 and -4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv4-1`)
+**Commit**: `c4241da0`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r15` over `b8273ac1..35adeacb` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r15.codex.md`. It completes cr-uv3-1 (`57e8ee24`), whose design the review keeps ("source-issued move tickets").
 
 ## Evidence

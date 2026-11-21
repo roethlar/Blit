@@ -1,9 +1,9 @@
 # cr-ecm14-5: the line printed a spelling where its claim rested on the names it had tried
 
 **Severity**: MEDIUM — the question's line says the option would match names that both runs leave out
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r16` (Codex openreview, 2026-11-21) reviewed `35adeacb..13faafd2` — utilities slices 5 and 6 and the eleven `combined-r15` fixes — with `guard_confirmed: true`. A pattern that is the whole filter is not always answered for by its spelling: "With the sole include `1*a*2`, the note presents `1*A*2` as what `--ignore-case` gains. I verified that `1aA2` already copied in both modes." The remaining work is cr-ecm15-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm14-5`)
+**Commit**: `33ac6700`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r15` over `b8273ac1..35adeacb` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r15.codex.md`. It completes cr-ecm13-7 (`b7139bd9`).
 
 ## Evidence

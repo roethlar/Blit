@@ -1,9 +1,9 @@
 # cr-ecm14-1: a name a retry did not find was answered for by another of its text
 
 **Severity**: HIGH — a failed file that has gone from the source is not reported, and the retry exits 0 without it
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r16` (Codex openreview, 2026-11-21) reviewed `35adeacb..13faafd2` — utilities slices 5 and 6 and the eleven `combined-r15` fixes — with `guard_confirmed: true`, which required no change to it
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm14-1`)
+**Commit**: `0140d741`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r15` over `b8273ac1..35adeacb` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r15.codex.md`. It completes cr-ecm13-3 (`6f0479dc`, `b2b77b78`).
 
 ## Evidence

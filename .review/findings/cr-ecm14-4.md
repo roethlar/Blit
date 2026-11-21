@@ -1,9 +1,9 @@
 # cr-ecm14-4: a record from before `destination_nested` was replayed by reading its words again
 
 **Severity**: HIGH — the retry of a run recorded by an earlier build writes the files that failed somewhere else, and exits 0
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r16` (Codex openreview, 2026-11-21) reviewed `35adeacb..13faafd2` — utilities slices 5 and 6 and the eleven `combined-r15` fixes — with `guard_confirmed: true`. It refuses where the two readings give one destination: "For `copy source/child/.. output`, I verified that both an absent and an existing `output` received the file directly. The legacy retry still refused." The remaining work is cr-ecm15-3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm14-4`)
+**Commit**: `62b12719`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r15` over `b8273ac1..35adeacb` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r15.codex.md`. It completes cr-ecm13-2 (`bf4987de`), whose design the review keeps ("persisted retry destination").
 
 ## Evidence

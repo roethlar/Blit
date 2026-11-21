@@ -1,9 +1,9 @@
 # cr-ecm14-3: the answer two daemons give a CLI was not versioned with what it says
 
 **Severity**: HIGH — a CLI of this build and two daemons of an earlier one agree to work together, and the CLI's retry asks for another file
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r16` (Codex openreview, 2026-11-21) reviewed `35adeacb..13faafd2` — utilities slices 5 and 6 and the eleven `combined-r15` fixes — with `guard_confirmed: true`, which required no change to it
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm14-3`)
+**Commit**: `25fa29be`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r15` over `b8273ac1..35adeacb` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r15.codex.md`. It completes cr-ecm13-3 (`6f0479dc`, `b2b77b78`); the reviewer found it by inspection.
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-uv4-3: `find -delete` removed through a link in the middle of its path
 
 **Severity**: HIGH — slice 4 said that nothing is removed through a link, and a link on the way to the path typed was looked through
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r16` (Codex openreview, 2026-11-21) reviewed `35adeacb..13faafd2` — utilities slices 5 and 6 and the eleven `combined-r15` fixes — with `guard_confirmed: true`, which required no change to it
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv4-3`)
+**Commit**: `9856b991`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r15` over `b8273ac1..35adeacb` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r15.codex.md`. The defect is in utilities slice 4 (`35adeacb`).
 
 ## Evidence

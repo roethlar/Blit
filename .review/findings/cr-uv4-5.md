@@ -1,9 +1,9 @@
 # cr-uv4-5: the bound on the accounts a daemon keeps for moves did not hold
 
 **Severity**: MEDIUM — one move's account could take the memory the bound was written to deny it, and put out every other move's
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r16` (Codex openreview, 2026-11-21) reviewed `35adeacb..13faafd2` — utilities slices 5 and 6 and the eleven `combined-r15` fixes — with `guard_confirmed: true`, which required no change to it
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv4-5`)
+**Commit**: `f0f34b59`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r15` over `b8273ac1..35adeacb` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r15.codex.md`. It completes cr-uv3-1 (`57e8ee24`).
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-uv4-2: `find -delete` went on removing after its asker had gone
 
 **Severity**: HIGH — a `find -delete` stopped with Ctrl-C keeps deleting across the tree on the daemon
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r16` (Codex openreview, 2026-11-21) reviewed `35adeacb..13faafd2` — utilities slices 5 and 6 and the eleven `combined-r15` fixes — with `guard_confirmed: true`, which required no change to it
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv4-2`)
+**Commit**: `9b634f3f`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r15` over `b8273ac1..35adeacb` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r15.codex.md`. The defect is in utilities slice 4 (`35adeacb`).
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-ecm14-2: `--ignore-existing` wrote through a link that stood at the path
 
 **Severity**: HIGH — a run told to keep what exists writes a file somewhere it was never pointed at, through a link, and exits 0
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r16` (Codex openreview, 2026-11-21) reviewed `35adeacb..13faafd2` — utilities slices 5 and 6 and the eleven `combined-r15` fixes — with `guard_confirmed: true`. "The wire destination hard-codes the option to `false`. A file created after planning can therefore be truncated by a remote transfer. The local copy path acquires an exclusive handle, drops it, and reopens the pathname." And Windows attributes are prepared at a destination before it is this run's. The remaining work is cr-ecm15-1
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm14-2`)
+**Commit**: `e672e1c2`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r15` over `b8273ac1..35adeacb` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r15.codex.md`. It completes cr-ecm13-1 (`fc3df295`).
 
 ## Evidence
