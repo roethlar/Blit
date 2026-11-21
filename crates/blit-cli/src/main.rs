@@ -1,6 +1,7 @@
 mod check;
 mod cli;
 mod completions;
+mod confirm;
 mod context;
 mod df;
 mod diagnostics;
@@ -136,10 +137,7 @@ async fn run_cli(lifecycle_trace: &TransferLifecycleTrace) -> Result<ExitCode> {
         }
         Commands::Du(args) => du::run_du(args).await?,
         Commands::Df(args) => df::run_df(args).await?,
-        Commands::Rm(args) => {
-            rm::run_rm(args).await?;
-            ExitCode::SUCCESS
-        }
+        Commands::Rm(args) => rm::run_rm(args).await?,
         Commands::Find(args) => {
             find::run_find(args).await?;
             ExitCode::SUCCESS

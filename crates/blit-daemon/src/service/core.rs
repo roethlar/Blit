@@ -1,5 +1,5 @@
 use super::admin::{
-    delete_rel_paths, filesystem_space_for_path, list_completions, sanitize_request_paths,
+    filesystem_space_for_path, list_completions, remove_operands, sanitize_request_paths,
     split_completion_prefix, stream_disk_usage, stream_find_entries,
 };
 use super::util::{
@@ -16,7 +16,7 @@ use blit_core::generated::{
     ClearRecentResponse, CompletionRequest, CompletionResponse, Counters, DaemonEvent, DaemonState,
     DelegatedPullProgress, DelegatedPullRequest, DfReply, DfRequest, DuReply, DuRequest, FileInfo,
     FindEntry, FindRequest, GetStateRequest, ListModulesRequest, ListModulesResponse, ListRequest,
-    ListResponse, ModuleInfo, PurgeRequest, PurgeResponse, SubscribeRequest, TransferComplete,
+    ListResponse, ModuleInfo, RmReply, RmRequest, SubscribeRequest, TransferComplete,
     TransferError, TransferProgress, TransferRecord, TransferStarted,
 };
 use std::collections::HashMap;
@@ -150,7 +150,10 @@ impl BlitService {
     /// `--metrics` completion log can wrap a single call site and
     /// branch on Result without duplicating the response shape.
     /// §3.1 followup.
-    async fn purge_inner(&self, req: PurgeRequest) -> Result<Response<PurgeResponse>, Status> {
+    async fn rm_inner(&self, req: RmRequest) -> Result<Response<RmReply>, Status> {
+        // AC-11: an asker of this daemon's own contract, or nothing is
+        // read and nothing removed.
+        blit_core::admin::same_build::check(req.contract_version)?;
         let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
         if module.read_only {
             return Err(Status::permission_denied(format!(
@@ -158,19 +161,18 @@ impl BlitService {
                 module.name
             )));
         }
-        let sanitized = sanitize_request_paths(req.paths_to_delete)?;
-        if sanitized.is_empty() {
-            return Ok(Response::new(PurgeResponse { files_deleted: 0 }));
-        }
-        let stats = delete_rel_paths(
+        let operands = sanitize_request_paths(req.paths)?;
+        let reply = remove_operands(
             module.path.clone(),
             module.canonical_root.clone(),
-            sanitized,
+            operands,
+            blit_core::deletion::RmOptions {
+                recursive: req.recursive,
+                force: req.force,
+            },
         )
         .await?;
-        Ok(Response::new(PurgeResponse {
-            files_deleted: stats.total(),
-        }))
+        Ok(Response::new(reply))
     }
 
     /// Send a `TransferStarted` event onto the broadcast channel.
@@ -910,10 +912,7 @@ impl Blit for BlitService {
         }))
     }
 
-    async fn purge(
-        &self,
-        request: Request<PurgeRequest>,
-    ) -> Result<Response<PurgeResponse>, Status> {
+    async fn rm(&self, request: Request<RmRequest>) -> Result<Response<RmReply>, Status> {
         let req = request.into_inner();
         // F5: counters mark dispatch attempts (matching push/pull
         // semantics). Previously inc_purge fired only after a
@@ -923,7 +922,7 @@ impl Blit for BlitService {
         // Pre-fix `purge_ops` was visible only on later push/pull
         // logs, never on the purge RPC itself.
         let started = std::time::Instant::now();
-        let result = self.purge_inner(req).await;
+        let result = self.rm_inner(req).await;
         let ok = result.is_ok();
         if result.is_err() {
             self.metrics.inc_error();

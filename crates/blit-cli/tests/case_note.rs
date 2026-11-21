@@ -92,6 +92,11 @@ fn untouched(dst: &Path) -> bool {
 /// part of its question and just before it; "no" — and nobody answering —
 /// deletes nothing; "yes" goes on, and deletes exactly what the line said
 /// the pattern does not name.
+///
+/// UTILITY_VERBS_LOCAL_PARITY AC-10: "no" ends the command with exit
+/// status 0; with nobody to answer it ends with 1 and names the option
+/// that skips the question. It used to print "Aborted." and exit 0 there,
+/// and an unattended job that did nothing looked like one that had run.
 #[test]
 fn mirror_shows_the_line_in_its_question_before_any_delete() {
     for answer in [Some("n\n"), None] {
@@ -114,10 +119,18 @@ fn mirror_shows_the_line_in_its_question_before_any_delete() {
             ran.all()
         );
         assert_eq!(ran.all().matches(MARK).count(), 1, "{}", ran.all());
-        assert!(ran.stdout.contains("Aborted."), "{}", ran.all());
         assert!(untouched(&dst), "{answer:?}: nothing copied or deleted");
         if answer.is_some() {
+            assert!(ran.stdout.contains("Aborted."), "{}", ran.all());
             assert_eq!(ran.code, Some(0), "{}", ran.all());
+        } else {
+            assert!(!ran.stdout.contains("Aborted."), "{}", ran.all());
+            assert!(
+                ran.stderr.contains("no answer could be read") && ran.stderr.contains("-y"),
+                "{}",
+                ran.all()
+            );
+            assert_eq!(ran.code, Some(1), "{}", ran.all());
         }
     }
 

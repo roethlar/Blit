@@ -144,10 +144,10 @@ impl blit_core::generated::blit_server::Blit for SmallFrames {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
 
-    async fn purge(
+    async fn rm(
         &self,
-        _: tonic::Request<blit_core::generated::PurgeRequest>,
-    ) -> Result<tonic::Response<blit_core::generated::PurgeResponse>, tonic::Status> {
+        _: tonic::Request<blit_core::generated::RmRequest>,
+    ) -> Result<tonic::Response<blit_core::generated::RmReply>, tonic::Status> {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
 

@@ -40,7 +40,6 @@ use crate::cli::TransferArgs;
 use crate::context::AppContext;
 use eyre::{bail, Context, Result};
 use std::fs;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -562,27 +561,16 @@ fn delete_scope_note(args: &TransferArgs, mode: TransferKind) -> Option<String> 
 const DELETE_SCOPE_ALL_NOTE: &str = "--delete-scope all: the filter chooses what is copied, not \
      what is kept; destination entries it leaves out are deleted too.";
 
-/// Prompt for confirmation of a destructive operation. Returns true if the user confirms.
-/// Always returns true if `skip_prompt` is true. `note` is printed on its
-/// own line just before the question.
+/// The question `mirror` and `move` ask before they delete: yes goes
+/// ahead, no stops with nothing done, and with nobody to answer the
+/// command fails and names `-y` ([`crate::confirm::confirm`], AC-10).
+/// `note` is printed on its own line just before the question.
 fn confirm_destructive_operation(
     note: Option<&str>,
     message: &str,
     skip_prompt: bool,
 ) -> Result<bool> {
-    if skip_prompt {
-        return Ok(true);
-    }
-
-    if let Some(note) = note {
-        println!("{note}");
-    }
-    print!("{} [y/N]: ", message);
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let decision = input.trim().to_ascii_lowercase();
-    Ok(decision == "y" || decision == "yes")
+    crate::confirm::confirm(note, message, skip_prompt, "-y")
 }
 
 struct PreparedTransferRoute {

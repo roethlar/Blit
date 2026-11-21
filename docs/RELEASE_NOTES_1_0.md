@@ -149,6 +149,34 @@ after. **This changes their output from 0.1.x.**
   status 1 while the rest is printed. `-h` is the commands' own; help is
   `--help`.
 
+## `rm` on a daemon behaves like `rm`, and a question nobody answers is a failure
+
+**This changes `blit rm` from 0.1.x.**
+
+- **`blit rm [-r] [-f] HOST:/module/path...`** treats each path as `rm`
+  does. A directory needs `-r` — before, a whole tree was deleted without
+  it. A path that is not there is an error unless `-f` — before, it was
+  reported as success. Several paths may be given; one that fails does not
+  stop the others, and the exit status is 0 only when every path is gone.
+  Nothing is printed for what was removed; each entry that could not be
+  is reported as `rm` reports it (`cannot remove '…': Permission denied`),
+  and a removal goes on past it. A symbolic link is removed and never
+  followed. On Linux the messages, the exit status and what is left on
+  disk equal the system `rm`'s.
+- **It still asks first** — once, naming the paths, before anything is
+  sent. `-y` skips the question and so does `-f`, so `blit rm -rf` behaves
+  as `rm -rf` does.
+- **`mirror`, `move` and `rm`: with nobody to answer the question, the
+  command now fails.** Answering "no" still stops it with exit status 0.
+  When no answer can be read at all — standard input is closed, as under
+  cron or in a script that forgot `-y` — the command used to print
+  "Aborted." and exit 0, so a job that did nothing looked like one that
+  had run. It now does nothing, exits 1, and names the option to pass.
+  **A script that relied on the old exit status must pass `-y`.**
+- `blit move` from a daemon reports the source removed only when every
+  entry of it went; an entry that could not be removed is named and the
+  command fails.
+
 ## Filenames that are not valid UTF-8 transfer
 
 A filename that is valid on Linux (ext4 accepts any bytes) but not valid
@@ -203,7 +231,7 @@ carry such names by their exact bytes.
 
 ## Protocol and compatibility
 
-- **Wire contract 13.** A session is refused at open, with a plain
+- **Wire contract 14.** A session is refused at open, with a plain
   message, when the two ends' protocol contract versions differ (every
   0.1.x release is another contract); upgrade both ends. Two 1.0.0 builds
   from any channel talk to each other. Both executables report

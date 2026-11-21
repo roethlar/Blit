@@ -194,6 +194,43 @@ fn stale_destination_unimplemented_does_not_fall_back_to_relay() {
     assert_eq!(counters.cli_data_plane_outbound_bytes, 0);
 }
 
+/// UTILITY_VERBS_LOCAL_PARITY AC-11 for removal, a newer asker against a
+/// daemon of an earlier contract: that daemon does not serve `Rm` at all
+/// and answers "unimplemented" — it knows only the old request, which
+/// deleted a tree without being asked for a recursive removal. `blit rm`
+/// reports it as what it is, the two are different builds, for every
+/// operand, and exits 1.
+#[test]
+fn rm_against_a_daemon_too_old_to_know_it_is_refused_as_another_build() {
+    let work = tempdir().expect("tempdir");
+    let config_dir = work.path().join("cli-config");
+    fs::create_dir_all(&config_dir).expect("cli config");
+    let stale = spawn_fake_blit_server(UnimplementedBlit, "fake daemon of an earlier contract");
+    let (one, other) = (
+        format!("127.0.0.1:{}:/test/one", stale.port),
+        format!("127.0.0.1:{}:/test/other", stale.port),
+    );
+    let mut cmd = Command::new(common::cli_bin());
+    cmd.arg("--config-dir")
+        .arg(&config_dir)
+        .args(["rm", "-r", "-f"])
+        .arg(&one)
+        .arg(&other);
+    let output = run_with_timeout(cmd, Duration::from_secs(20));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(output.stdout.is_empty(), "{stderr}");
+    for operand in [&one, &other] {
+        assert!(
+            stderr.contains(&format!(
+                "blit rm: cannot remove '{operand}': the daemon does not serve `rm`"
+            )),
+            "{operand}: {stderr}"
+        );
+    }
+    assert!(stderr.contains("another contract version"), "{stderr}");
+}
+
 /// UTILITY_VERBS_LOCAL_PARITY AC-11, a newer asker against a daemon of an
 /// earlier contract: that daemon does not serve `Du` or `Df` at all and
 /// answers "unimplemented". `blit du` and `blit df` report it as what it
@@ -372,10 +409,10 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
 
-    async fn purge(
+    async fn rm(
         &self,
-        _: tonic::Request<blit_core::generated::PurgeRequest>,
-    ) -> Result<tonic::Response<blit_core::generated::PurgeResponse>, tonic::Status> {
+        _: tonic::Request<blit_core::generated::RmRequest>,
+    ) -> Result<tonic::Response<blit_core::generated::RmReply>, tonic::Status> {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
 
@@ -510,10 +547,10 @@ impl blit_core::generated::blit_server::Blit for RejectingTransferBlit {
         ))
     }
 
-    async fn purge(
+    async fn rm(
         &self,
-        _: tonic::Request<blit_core::generated::PurgeRequest>,
-    ) -> Result<tonic::Response<blit_core::generated::PurgeResponse>, tonic::Status> {
+        _: tonic::Request<blit_core::generated::RmRequest>,
+    ) -> Result<tonic::Response<blit_core::generated::RmReply>, tonic::Status> {
         Err(tonic::Status::unimplemented(
             "test only exercises pull_sync",
         ))

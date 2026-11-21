@@ -2,7 +2,9 @@ use super::{DiskUsageSender, FindSender};
 use blit_core::disk_usage::{disk_usage, os_reason, Stopped, UsageEnd, UsageEvent, UsageOptions};
 use blit_core::enumeration::{EntryKind, FileEnumerator};
 use blit_core::fs_enum::FileFilter;
-use blit_core::generated::{du_reply, DfReply, DuFailure, DuReply, DuRow, FindEntry};
+use blit_core::generated::{
+    du_reply, DfReply, DuFailure, DuReply, DuRow, FindEntry, RmFailure, RmReply,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::task;
@@ -17,13 +19,13 @@ pub(crate) fn sanitize_request_paths(paths: Vec<String>) -> Result<Vec<PathBuf>,
     for raw in paths {
         if raw.trim().is_empty() {
             return Err(Status::invalid_argument(
-                "paths_to_delete cannot contain empty entries",
+                "an operand to remove cannot be empty",
             ));
         }
         let rel = resolve_relative_path(&raw)?;
         if rel.as_os_str().is_empty() || rel == Path::new(".") {
             return Err(Status::invalid_argument(
-                "refusing to delete module root; specify a sub-path",
+                "refusing to remove the module's root; name a path inside it",
             ));
         }
         sanitized.push(rel);
@@ -31,40 +33,50 @@ pub(crate) fn sanitize_request_paths(paths: Vec<String>) -> Result<Vec<PathBuf>,
     Ok(sanitized)
 }
 
-pub(crate) async fn delete_rel_paths(
+/// `rm`'s operands, each removed as the command removes it
+/// (UTILITY_VERBS_LOCAL_PARITY slice 2): one after another, an operand
+/// that fails not stopping the next, and every entry that could not be
+/// removed reported with the operand it belongs to.
+pub(crate) async fn remove_operands(
     module_path: PathBuf,
     canonical_root: PathBuf,
-    rel_paths: Vec<PathBuf>,
-) -> Result<blit_core::deletion::DeletionStats, Status> {
-    task::spawn_blocking(move || delete_rel_paths_sync(&module_path, &canonical_root, rel_paths))
-        .await
-        .map_err(|err| internal_err("purge task failed", err))?
+    operands: Vec<PathBuf>,
+    options: blit_core::deletion::RmOptions,
+) -> Result<RmReply, Status> {
+    task::spawn_blocking(move || {
+        remove_operands_sync(&module_path, &canonical_root, &operands, options)
+    })
+    .await
+    .map_err(|err| internal_err("rm task failed", err))?
 }
 
-fn delete_rel_paths_sync(
+fn remove_operands_sync(
     module_path: &Path,
     canonical_root: &Path,
-    rel_paths: Vec<PathBuf>,
-) -> Result<blit_core::deletion::DeletionStats, Status> {
-    let (files, dirs) = blit_core::deletion::classify_explicit_targets(
-        module_path,
-        canonical_root,
-        rel_paths,
-        "purge",
-    )
-    .map_err(deletion_status)?;
-    blit_core::deletion::execute_deletion_plan(
-        &files,
-        &dirs,
-        blit_core::deletion::DeletionOptions {
-            operation: "purge",
-            canonical_root: Some(canonical_root),
-            abort: None,
-            execute: true,
-            directory_mode: blit_core::deletion::DirectoryMode::Recursive,
-        },
-    )
-    .map_err(deletion_status)
+    operands: &[PathBuf],
+    options: blit_core::deletion::RmOptions,
+) -> Result<RmReply, Status> {
+    let mut reply = RmReply::default();
+    for (operand, rel) in operands.iter().enumerate() {
+        let removal = blit_core::deletion::remove_as_rm(
+            &module_path.join(rel),
+            Some(canonical_root),
+            options,
+            None,
+        )
+        .map_err(deletion_status)?;
+        reply.entries_removed += removal.removed;
+        reply.failures_truncated |= removal.failures_truncated;
+        reply
+            .failures
+            .extend(removal.failures.into_iter().map(|failure| RmFailure {
+                operand: operand as u32,
+                relative_path: wire_path(&failure.relative_path),
+                raw_relative_path: blit_core::raw_name::raw_relative_bytes(&failure.relative_path),
+                reason: os_reason(&failure.error),
+            }));
+    }
+    Ok(reply)
 }
 
 fn deletion_status(error: blit_core::deletion::DeletionError) -> Status {

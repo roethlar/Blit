@@ -15,7 +15,7 @@ blit – local and hybrid-transport file transfer CLI
 `blit ls <TARGET> [--json]`
 `blit du [-a] [-s] [-d <N>] [-h] [--json] <REMOTE>`
 `blit df [-h] [-k] [--json] <REMOTE>`
-`blit rm [--yes] <REMOTE>`
+`blit rm [-r] [-f] [-y] [--json] <REMOTE>...`
 `blit find [--pattern <GLOB>] [--case-insensitive] [--limit <N>] [--json] <REMOTE>`
 `blit completions shell <SHELL>`
 `blit completions remote <REMOTE> [--prefix <STR>] [--files] [--dirs]`
@@ -92,7 +92,17 @@ path, then push it.
 - `df` reports the filesystem that holds a remote path as `df -k` does:
   size, used and available space in 1K blocks, with the path as typed in
   the first column.
-- `rm` removes a file or directory on a remote daemon.
+- `rm` removes paths on a remote daemon as the Unix `rm` does, on the
+  daemon's own disk in one request per daemon: a directory needs `-r`
+  (`-R`, `--recursive`), a path that is not there is an error unless `-f`,
+  the other paths are still processed, and the exit status is 0 only when
+  every path is gone. Nothing is printed on success; each entry that could
+  not be removed is reported as `rm` reports it. A symbolic link is
+  removed and never followed; a wildcard is not expanded. Unlike `rm`, it
+  asks once before anything is removed, as `mirror` and `move` do: `-y`
+  skips the question, and so does `-f`. When no answer can be read the
+  command does nothing and exits 1 (so do `mirror` and `move`). A whole
+  module, and a read-only module, are refused.
 - `find` searches for files on a remote daemon (glob `--pattern`,
   e.g. `*.csv` or `**/*.log`; `*` does not cross `/`).
 - `completions shell <SHELL>` writes a clap-generated shell-completion

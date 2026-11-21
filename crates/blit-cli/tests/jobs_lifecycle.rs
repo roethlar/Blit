@@ -541,10 +541,10 @@ impl blit_core::generated::blit_server::Blit for StallingTransferBlit {
         Err(tonic::Status::unimplemented("stalling fake source"))
     }
 
-    async fn purge(
+    async fn rm(
         &self,
-        _: tonic::Request<blit_core::generated::PurgeRequest>,
-    ) -> Result<tonic::Response<blit_core::generated::PurgeResponse>, tonic::Status> {
+        _: tonic::Request<blit_core::generated::RmRequest>,
+    ) -> Result<tonic::Response<blit_core::generated::RmReply>, tonic::Status> {
         Err(tonic::Status::unimplemented("stalling fake source"))
     }
 

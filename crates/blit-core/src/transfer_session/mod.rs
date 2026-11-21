@@ -148,7 +148,15 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// (`admin::same_build`). The rows changed with the names — `du` reports
 /// allocated space per printed line, `df` the filesystem that holds the
 /// path given.
-pub const CONTRACT_VERSION: u32 = 13;
+/// v14: `Rm` replaces `Purge` (UTILITY_VERBS_LOCAL_PARITY slice 2, AC-3,
+/// AC-11), by the same rule as v13 and for a sharper reason: the request
+/// gained `recursive`, and a daemon that ignored the field would delete a
+/// directory tree its asker never named for deletion. The reply changed
+/// with the name — every entry that could not be removed, operand by
+/// operand, where `Purge` answered with one count and stopped at the first
+/// failure. `move`'s source removal asks through it, recursively and by
+/// name.
+pub const CONTRACT_VERSION: u32 = 14;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames

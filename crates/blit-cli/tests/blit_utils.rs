@@ -452,11 +452,12 @@ fn test_utils_rm_file() {
 
     assert!(!file.exists(), "file should have been deleted");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    // As `rm`: nothing is printed for what was removed.
     assert!(
-        stdout.contains("Deleted"),
-        "expected 'Deleted' in rm output, got:\n{}",
-        stdout
+        output.stdout.is_empty() && output.stderr.is_empty(),
+        "rm prints nothing on success, got:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -469,7 +470,7 @@ fn test_utils_rm_directory() {
 
     let remote = format!("127.0.0.1:{}:/test/rmdir", ctx.daemon_port);
     let mut cmd = Command::new(&ctx.cli_bin);
-    cmd.arg("rm").arg("--yes").arg(&remote);
+    cmd.arg("rm").arg("-r").arg("--yes").arg(&remote);
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(output.status.success());

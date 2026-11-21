@@ -19,7 +19,10 @@ service Blit {
   rpc List(ListRequest) returns (ListResponse);
 
   // Deletes files/directories on the server for mirror operations.
-  rpc Purge(PurgeRequest) returns (PurgeResponse);
+  // `rm`, run on the daemon's own disk (UTILITY_VERBS_LOCAL_PARITY slice 2).
+  // Replaces `Purge`: a request name a daemon of an earlier contract does
+  // not serve, carrying the asker's contract version.
+  rpc Rm(RmRequest) returns (RmReply);
 
   // Provides path completion suggestions for a given remote path prefix.
   rpc CompletePath(CompletionRequest) returns (CompletionResponse);
@@ -357,8 +360,49 @@ message FileInfo {
   int64 mtime_seconds = 4;
 }
 
-message PurgeRequest { string module = 1; repeated string paths_to_delete = 2; }
-message PurgeResponse { uint64 files_deleted = 1; }
+// `rm OPERAND...` inside one module, as the Unix command treats each
+// operand: a directory is refused without `recursive`, an operand that is
+// not there is an error without `force`, a symbolic link is removed and
+// never followed, and a removal goes on past an entry it cannot remove.
+message RmRequest {
+  // The asker's contract; the daemon refuses any other before it reads
+  // or removes anything (AC-11).
+  uint32 contract_version = 1;
+  string module = 2;
+  // One per operand, relative to the module; never the module's root.
+  repeated string paths = 3;
+  // `-r`. Unset, a directory is refused with "Is a directory" and nothing
+  // in it is touched. A daemon that ignored this field would delete a
+  // tree its asker never named for deletion — which is why the request
+  // has a name of its own.
+  bool recursive = 4;
+  // `-f`: an operand that is not there is no failure.
+  bool force = 5;
+}
+
+// One entry that could not be removed.
+message RmFailure {
+  // The operand it belongs to: its index in `RmRequest.paths`.
+  uint32 operand = 1;
+  // The entry, below the operand, `/`-separated; empty for the operand
+  // itself.
+  string relative_path = 2;
+  // Its exact bytes when the name is not valid UTF-8.
+  optional bytes raw_relative_path = 3;
+  // Why, in the operating system's own words ("Permission denied").
+  string reason = 4;
+}
+
+message RmReply {
+  // Every entry that could not be removed, operand by operand, in the
+  // order met. Empty: every operand is gone (or, with `force`, was never
+  // there).
+  repeated RmFailure failures = 1;
+  // Entries removed, the operands and everything below them.
+  uint64 entries_removed = 2;
+  // More entries failed than `failures` lists.
+  bool failures_truncated = 3;
+}
 
 message CompletionRequest {
   string module = 1;

@@ -137,7 +137,7 @@ fn usage_options(args: &DuArgs) -> Result<UsageOptions> {
 /// itself, and below it the operand, one `/`, and the entry's path — so
 /// `host:/module/dir/` and `host:/module/dir` both print
 /// `host:/module/dir/sub`, as `du dir/` prints `dir/sub`.
-fn shown(operand: &str, path: &EntryPath) -> Vec<u8> {
+pub(crate) fn shown(operand: &str, path: &EntryPath) -> Vec<u8> {
     if path.is_start() {
         return operand.as_bytes().to_vec();
     }

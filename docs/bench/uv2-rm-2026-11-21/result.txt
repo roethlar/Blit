@@ -1,0 +1,7 @@
+base:  blit 1.0.0+e6eba948b895
+slice: blit 1.0.0+3853e2203fda.dirty.f583d952a80db3f9
+rm (GNU coreutils) 9.12
+200,000 empty files in 2,000 directories, a fresh tree for every run; 5 runs each
+rm -rf t  (the system command)                          248.6 ms median      242.9 ms best
+blit rm --yes HOST:/bench/t  (base build)               246.4 ms median      244.3 ms best
+blit rm -rf HOST:/bench/t  (slice build)                255.5 ms median      253.7 ms best

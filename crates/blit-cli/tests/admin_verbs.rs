@@ -478,11 +478,12 @@ fn test_admin_rm_directory() {
         .arg("--config-dir")
         .arg(&ctx.config_dir)
         .arg("rm")
+        .arg("-r")
         .arg("--yes")
         .arg(&remote_path);
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(10));
-    assert!(output.status.success(), "blit rm directory failed");
+    assert!(output.status.success(), "blit rm -r directory failed");
 
     assert!(
         !ctx.module_dir.join("removeme").exists(),

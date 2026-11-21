@@ -123,7 +123,19 @@ pub enum Commands {
     /// Use%`, with the path as typed in the first column. -h prints
     /// human-readable sizes; any other option is refused.
     Df(DfArgs),
-    /// Remove a file or directory on a remote daemon
+    /// Remove paths on a daemon, as `rm` does
+    ///
+    /// What the Unix `rm` does, on the daemon's own disk and in one
+    /// request per daemon: a directory needs -r (-R, --recursive), a path
+    /// that is not there is an error unless -f, the other paths are still
+    /// processed, and the exit status is 0 only when every path is gone.
+    /// Nothing is printed on success; each entry that could not be removed
+    /// is reported as rm reports it. A symbolic link is removed and never
+    /// followed; a wildcard in a path is not expanded. Unlike rm, it asks
+    /// once before anything is removed, as `mirror` and `move` do; -y
+    /// skips the question, and so does -f — and when no answer can be
+    /// read, nothing is removed and the exit status is 1. A whole module,
+    /// and a read-only module, are refused.
     Rm(RmArgs),
     /// Search for files on a remote daemon
     Find(FindArgs),
@@ -735,11 +747,21 @@ pub struct DfArgs {
     pub help: Option<bool>,
 }
 
+/// `rm`, as the Unix command, run on the daemon's own disk
+/// (UTILITY_VERBS_LOCAL_PARITY slice 2). The options are `rm`'s, and `-y`,
+/// blit's answer to the question it asks before deleting.
 #[derive(Args, Clone, Debug)]
 pub struct RmArgs {
-    /// Remote path to delete (e.g., server:/module/path)
-    pub target: String,
-    /// Skip confirmation prompt
+    /// Remote paths to remove (e.g., server:/module/path)
+    #[arg(required = true, num_args = 1..)]
+    pub targets: Vec<String>,
+    /// Remove directories and everything in them
+    #[arg(short = 'r', long = "recursive", visible_short_alias = 'R')]
+    pub recursive: bool,
+    /// Never ask, and treat a path that is not there as no error
+    #[arg(short = 'f', long = "force")]
+    pub force: bool,
+    /// Skip the question before removing
     #[arg(long, short = 'y')]
     pub yes: bool,
     /// Output as JSON

@@ -21,7 +21,7 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `files_from_unnamed`; `client::connect_with_timeout` and
 `connect_transfer_client` return a `BlitClient<client::BlitChannel>`
 (the channel behind `client::BoundedResponses`). The wire
-protocol is contract 13: a peer on any other contract version (every 0.1.x
+protocol is contract 14: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
 
@@ -118,7 +118,7 @@ part, and a job you can list, read, re-run and retry.
   be written the transfer still completes and the report says the log is
   incomplete.
 - A dry run or `--null` run is logged as what it planned, not as copies.
-- Wire protocol (contract 13): the job ID rides the session-open and
+- Wire protocol (contract 14): the job ID rides the session-open and
   delegated-pull requests; `GetJobLog` returns a daemon's log by ID; the
   finished-job record carries the failed-file count. In a filtered mirror,
   `ManifestPruned` tells the destination which source paths were excluded,
@@ -200,7 +200,7 @@ part, and a job you can list, read, re-run and retry.
 a server's files runs on the server's own disk, in one request, instead
 of paying a network filesystem's cost per file. From 1.0.0 each also
 behaves like the Unix command it is named after; `du` and `df` are the
-first two (`rm`, `find` and `ls` follow).
+first two, `rm` the third (`find` and `ls` follow).
 
 - **`blit df HOST:/module/path`** reports the filesystem that holds THAT
   path, asked of the operating system directly, as `df -k` prints it —
@@ -238,6 +238,51 @@ first two (`rm`, `find` and `ls` follow).
   path and returns `FilesystemSpace { total_bytes, used_bytes,
   available_bytes }`; the walk and the size arithmetic are public as
   `blit_core::disk_usage`.
+
+### `rm` behaves like `rm`; a question nobody can answer fails the command
+
+**Behaviour change from 0.1.x**, for `blit rm` and for every command that
+asks before it deletes.
+
+- **`blit rm [-r] [-f] HOST:/module/path...`** treats each path as the
+  Unix `rm` does. A directory is refused with `Is a directory` unless `-r`
+  (`-R`, `--recursive`) is given — it used to delete a whole tree without
+  being told to. A path that is not there is an error unless `-f` — it
+  used to exit 0 ("path may already be absent"). Any number of paths may
+  be given, each processed whatever became of the others — two used to be
+  a usage error. The exit status is 0 only when every path is gone.
+- It prints what `rm` prints: nothing for what was removed, and
+  `cannot remove 'PATH': REASON` for each entry that could not be, with
+  the path as typed. A removal goes on past an entry it cannot remove and
+  leaves the directories above it standing, as `rm -r` does — it used to
+  stop at the first. A symbolic link is removed as a link and never
+  followed. `--json` gives `entries_removed`, `failures` and
+  `failures_truncated`. On Linux the messages, the exit status and what
+  is left on disk equal the system `rm`'s for the same tree and paths.
+- **It still asks first**, once for the whole command and before anything
+  is sent, naming the paths: `Remove 'a' and 'b'? [y/N]`. `-y` skips the
+  question, and so does `-f`, which means "never ask" in `rm` itself — so
+  `blit rm -rf` behaves as `rm -rf` does and a bare `blit rm -r` asks.
+- **`mirror`, `move` and `rm`: when no answer can be read, the command
+  fails.** "No" still stops it with nothing done and exit status 0. With
+  standard input closed — under cron, or in a script that forgot `-y` —
+  each of them used to print "Aborted." and exit 0, and a job that did
+  nothing looked like one that had run. Each now does nothing, exits 1
+  and names the option that skips the question. **A script that relied on
+  that exit status must pass `-y`.**
+- **`blit move` from a daemon** asks for the source's removal as a
+  recursive removal, by name, and reports the source removed only when
+  every entry of it went; otherwise it names an entry that stayed and
+  fails.
+- The request is new on the wire (`Rm`) and compares the contract version
+  before it removes anything; the old `Purge` request is gone. An option
+  `rm` has and `blit rm` does not (`-i`, `-v`, `-d`, …) is refused by
+  name before anything is asked of a daemon.
+- For a program built on `blit-core`: `admin::rm::remove` takes the
+  module, the paths and `RmOptions` and returns an `RmReport` (entries
+  removed, and each `RmFailure` with its operand, path and reason);
+  `delete_remote_path` now returns the count removed and fails when any
+  entry stayed; `blit_core::deletion::remove_as_rm` is the removal itself.
 
 ### Fixes
 
