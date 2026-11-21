@@ -88,10 +88,66 @@ pub fn relative_str_to_posix(s: &str) -> String {
     }
 }
 
+/// Whether a path is written so that it names a directory and nothing
+/// else: with a separator after it, or with `.` as its last name. The
+/// system resolves a link standing there and refuses anything that is no
+/// directory (`Not a directory`). [`Path::components`] drops both marks.
+pub fn typed_as_directory(path: &Path) -> bool {
+    let typed = path.as_os_str().as_encoded_bytes();
+    let is_separator = |byte: &u8| *byte == b'/' || (cfg!(windows) && *byte == b'\\');
+    match typed.last() {
+        None => false,
+        Some(last) if is_separator(last) => true,
+        Some(_) => typed.rsplit(is_separator).next() == Some(b".".as_slice()),
+    }
+}
+
+/// A transfer's SOURCE path for the wire (cr-uv2-1):
+/// [`relative_path_to_posix`], with a `/` after it when the path was typed
+/// as a directory. The end that holds the source then knows what was
+/// asked for — `single.txt/` is a directory or it is nothing, as it is to
+/// `cp`, `mv` and `rsync` — where it was told `single.txt` and copied the
+/// file. The module's root needs no mark.
+pub fn source_path_to_posix(path: &Path) -> String {
+    let mut posix = relative_path_to_posix(path);
+    if !posix.is_empty() && posix != "." && typed_as_directory(path) {
+        posix.push('/');
+    }
+    posix
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// cr-uv2-1: what was typed after a source's last name reaches the
+    /// wire as one `/`, and nothing else about the path changes.
+    #[test]
+    fn a_source_keeps_the_mark_that_it_was_typed_as_a_directory() {
+        for (typed, wire) in [
+            ("single.txt", "single.txt"),
+            ("single.txt/", "single.txt/"),
+            ("single.txt//", "single.txt/"),
+            ("single.txt/.", "single.txt/"),
+            ("a/b/", "a/b/"),
+            ("a/./b", "a/b"),
+            ("dir/.x", "dir/.x"),
+            ("dir/x.", "dir/x."),
+            ("", ""),
+            (".", ""),
+            ("./", ""),
+        ] {
+            assert_eq!(source_path_to_posix(Path::new(typed)), wire, "{typed:?}");
+        }
+        // A `\` is a separator where the system says so, and a letter of
+        // the name everywhere else.
+        assert_eq!(typed_as_directory(Path::new("dir\\")), cfg!(windows));
+        assert_eq!(
+            source_path_to_posix(Path::new("dir\\")),
+            if cfg!(windows) { "dir/" } else { "dir\\" }
+        );
+    }
 
     #[test]
     fn empty_and_dot_produce_empty_string() {

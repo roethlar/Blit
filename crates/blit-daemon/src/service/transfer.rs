@@ -32,7 +32,7 @@ use tokio::sync::Mutex;
 use tonic::{Status, Streaming};
 
 use blit_core::generated::session_error::Code;
-use blit_core::generated::{ComparisonMode, SessionOpen, TransferFrame};
+use blit_core::generated::{ComparisonMode, SessionOpen, TransferFrame, TransferRole};
 use blit_core::perf_history::{HistoryStore, Initiator, LocalRole, RecordSink, RouteTag, Topology};
 use blit_core::remote::transfer::session_client::{record_session_history, SessionRecordFacts};
 use blit_core::remote::transfer::{ByteProgressSink, RemoteTransferProgress};
@@ -321,6 +321,56 @@ fn status_to_fault(status: Status) -> SessionFault {
     SessionFault::refusal(code, status.message().to_string())
 }
 
+/// A SOURCE is what its path was typed as, or the session does not open
+/// (cr-uv2-1). `single.txt/` names a directory and nothing else: it was
+/// tidied to `single.txt` on its way here and the file was copied, where
+/// `cp`, `mv` and `rsync` say `Not a directory` and copy nothing; and a
+/// move then asked for the removal of `single.txt/`, removed nothing, and
+/// reported success.
+///
+/// A source that will be REMOVED has one more way to be other than typed:
+/// `link/` on a link to a directory is that directory to the transfer,
+/// and to the removal it is a link that is never gone through
+/// (cr-uv1-1), so everything would be copied and nothing removed. `mv`
+/// refuses the same operand; so does this, before anything is copied.
+///
+/// A source that is not there is not this function's: the scan says so,
+/// as it does for any path.
+async fn refuse_source_not_as_typed(
+    wire_path: &str,
+    root: &std::path::Path,
+    removed_after: bool,
+) -> Result<(), SessionFault> {
+    use blit_core::admin::operand;
+    let typed = wire_path.as_bytes();
+    if !operand::names_a_directory(typed) || operand::is_the_root(typed) {
+        return Ok(());
+    }
+    let Ok(found) = tokio::fs::metadata(root).await else {
+        return Ok(());
+    };
+    if !found.is_dir() {
+        return Err(SessionFault::refusal(
+            Code::ProtocolViolation,
+            format!("source '{wire_path}': Not a directory"),
+        ));
+    }
+    let is_a_link = tokio::fs::symlink_metadata(root)
+        .await
+        .is_ok_and(|entry| entry.file_type().is_symlink());
+    if removed_after && is_a_link {
+        return Err(SessionFault::refusal(
+            Code::ProtocolViolation,
+            format!(
+                "source '{wire_path}' is a symbolic link to a directory: a move removes its \
+                 source, and nothing is removed through a link. Name the directory itself, or \
+                 the link without the '/' after it"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Build the daemon's [`OpenResolver`]: given a received `SessionOpen`,
 /// resolve its module + path to an absolute local root and report the
 /// module's read-only flag. Mirrors the push Header sequence
@@ -337,6 +387,11 @@ pub(crate) fn make_open_resolver(
         let default_root = default_root.clone();
         let module_name = open.module.clone();
         let wire_path = open.path.clone();
+        // The initiator writes, so this end is read from; and it removes
+        // what it read when the session ends well — a move is the one
+        // operation that asks a SOURCE for a complete scan.
+        let read_from = open.initiator_role() == TransferRole::Destination;
+        let removed_after = open.require_complete_scan;
         Box::pin(async move {
             let config = resolve_module(&modules, default_root.as_ref(), &module_name)
                 .await
@@ -351,6 +406,9 @@ pub(crate) fn make_open_resolver(
                 let rel = resolve_relative_path(&wire_path).map_err(status_to_fault)?;
                 resolve_contained_path(&config, &rel).map_err(status_to_fault)?
             };
+            if read_from {
+                refuse_source_not_as_typed(&wire_path, &root, removed_after).await?;
+            }
             Ok(ResolvedEndpoint {
                 root,
                 read_only: config.read_only,

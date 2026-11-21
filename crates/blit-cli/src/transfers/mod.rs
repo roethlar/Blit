@@ -50,7 +50,6 @@ use blit_core::fs_enum::FileFilter;
 use blit_core::remote::transfer::{
     SessionPhaseRole, TransferLifecycleOutcome, TransferLifecycleTrace,
 };
-use blit_core::remote::RemotePath;
 use blit_core::transfers::dispatch::{select_transfer_route, TransferKind, TransferRoute};
 use blit_core::transfers::filter::{self, FilterInputs};
 use blit_core::transfers::resolution::resolve_destination;
@@ -1289,14 +1288,8 @@ async fn run_move_inner(
                 &failures::failures_from_wire(&state.summary.failures),
             )?;
 
-            // Delete remote source
-            let rel_path = match &remote.path {
-                RemotePath::Module { rel_path, .. } | RemotePath::Root { rel_path } => {
-                    rel_path.to_string_lossy().into_owned()
-                }
-                _ => bail!("unsupported remote source for move"),
-            };
-            delete_remote_path(&remote, &rel_path).await?;
+            // Delete remote source: the path the session read (cr-uv2-1).
+            delete_remote_path(&remote).await?;
             note_source_removed(args, &format_remote_endpoint(&remote));
             render_result(lifecycle_trace, || {
                 remote::print_deferred_pull_result(args, &state);
@@ -1463,14 +1456,8 @@ async fn run_move_inner(
                 &state.contained_failures(),
             )?;
 
-            // Delete remote source
-            let rel_path = match &src.path {
-                RemotePath::Module { rel_path, .. } | RemotePath::Root { rel_path } => {
-                    rel_path.to_string_lossy().into_owned()
-                }
-                _ => bail!("unsupported remote source for move"),
-            };
-            delete_remote_path(&src, &rel_path).await?;
+            // Delete remote source: the path the session read (cr-uv2-1).
+            delete_remote_path(&src).await?;
             note_source_removed(args, &format_remote_endpoint(&src));
             render_result(lifecycle_trace, || {
                 remote_remote_direct::print_deferred_delegated_result(args, &state);

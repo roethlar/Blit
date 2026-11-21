@@ -21,7 +21,7 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `files_from_unnamed`; `client::connect_with_timeout` and
 `connect_transfer_client` return a `BlitClient<client::BlitChannel>`
 (the channel behind `client::BoundedResponses`). The wire
-protocol is contract 18: a peer on any other contract version (every 0.1.x
+protocol is contract 19: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
 
@@ -118,7 +118,7 @@ part, and a job you can list, read, re-run and retry.
   be written the transfer still completes and the report says the log is
   incomplete.
 - A dry run or `--null` run is logged as what it planned, not as copies.
-- Wire protocol (contract 18): the job ID rides the session-open and
+- Wire protocol (contract 19): the job ID rides the session-open and
   delegated-pull requests; `GetJobLog` returns a daemon's log by ID; the
   finished-job record carries the failed-file count. In a filtered mirror,
   `ManifestPruned` tells the destination which source paths were excluded,
@@ -297,6 +297,17 @@ asks before it deletes.
   `--json` gives `entries_removed`, `failures` and `unfinished`. On Linux
   the messages, the exit status and what is left on disk equal the system
   `rm`'s for the same tree and paths.
+- **A source typed as a directory is one, or nothing is copied.** `blit
+  copy HOST:/m/report.pdf/ …` — a file, with a `/` after it — was copied
+  as the file, where `cp`, `mv`, `rsync` and blit on this machine say it
+  is no directory; and a `move` of it then removed nothing and exited 0,
+  the file in both places. A daemon now refuses such a source before
+  anything is copied (`source 'report.pdf/': Not a directory`). A `move`
+  through a link typed as a directory (`current/`, where `current` is a
+  link) copied everything and removed nothing; it is refused before
+  copying, as `mv` refuses it — name the directory, or the link without
+  the `/`. A `copy` goes through the link as before. And `move
+  HOST:/m/dir/.` now removes `dir` once its contents have landed.
 - **Every entry that could not be removed is named**, as the daemon meets
   it — a tree with a million of them prints a million lines, as `rm`
   does. If a daemon's answer stops before it says it is done, what it

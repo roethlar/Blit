@@ -129,8 +129,16 @@ where
 /// is already gone is no failure. `Ok` with the count removed ONLY when
 /// the daemon reports no entry left behind; otherwise the error names the
 /// first one, and the source is not reported removed.
-pub async fn delete_remote_path(remote: &RemoteEndpoint, rel_path: &str) -> Result<u64> {
-    let (module, _) = extract_module_and_path(remote)?;
+///
+/// What is removed is the path the session that copied it was opened
+/// with (cr-uv2-1), from the one function that says what that is. The two
+/// were read off the endpoint separately, and differed: the transfer
+/// tidied `single.txt/` to `single.txt` and copied the file, this asked
+/// for `single.txt/`, a directory that is not there and under `-f` no
+/// failure, and the move ended well with nothing removed.
+pub async fn delete_remote_path(remote: &RemoteEndpoint) -> Result<u64> {
+    let (module, source) = crate::remote::transfer::session_client::source_module_path(remote)?;
+    let rel_path = source.as_str();
     // The first entry left behind, and how many more: a move names one.
     let (mut first, mut more): (Option<RmFailure>, u64) = (None, 0);
     let removed = remove(

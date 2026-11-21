@@ -182,7 +182,13 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// bytes, and what they print has to be a path they take. A daemon of
 /// contract 17 would read the text alone — a near-copy of the name, which
 /// is another name or none.
-pub const CONTRACT_VERSION: u32 = 18;
+/// v19: `SessionOpen.path` and a delegated `source_path` keep the `/` that
+/// says a SOURCE was typed as a directory (cr-uv2-1), and the end that
+/// holds the source refuses one that is none — or, for a move, a link to
+/// one — before anything is copied. No message changed. A daemon of
+/// contract 18 would drop the mark and copy the file, and the removal
+/// that ends the move would then find no directory to remove.
+pub const CONTRACT_VERSION: u32 = 19;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames

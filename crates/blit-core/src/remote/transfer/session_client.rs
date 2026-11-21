@@ -438,7 +438,8 @@ pub async fn run_pull_session_with_client(
 
     let lifecycle_trace = options.lifecycle_trace.clone();
     lifecycle_trace.attach_initiator_role(SessionPhaseRole::Destination);
-    let (module, path) = endpoint_module_path(endpoint)?;
+    // The endpoint is the SOURCE: its path goes as it was typed (cr-uv2-1).
+    let (module, path) = source_module_path(endpoint)?;
 
     let open = SessionOpen {
         initiator_role: TransferRole::Destination as i32,
@@ -668,10 +669,56 @@ pub(crate) fn endpoint_module_path(endpoint: &RemoteEndpoint) -> Result<(String,
     }
 }
 
+/// [`endpoint_module_path`] for the endpoint a session reads FROM
+/// (cr-uv2-1): the path keeps the mark that it was typed as a directory
+/// ([`crate::path_posix::source_path_to_posix`]), and the responder
+/// refuses a source that is not what it was typed as before anything is
+/// copied. A move's removal of its source asks for this same path
+/// ([`crate::admin::rm::delete_remote_path`]): the transfer was told
+/// `single.txt` and the removal `single.txt/`, so the file was copied,
+/// the removal found no directory and said nothing under `-f`, and the
+/// move reported success with its source in place.
+pub(crate) fn source_module_path(endpoint: &RemoteEndpoint) -> Result<(String, String)> {
+    use crate::path_posix::source_path_to_posix;
+    match &endpoint.path {
+        RemotePath::Module { module, rel_path } => {
+            Ok((module.clone(), source_path_to_posix(rel_path)))
+        }
+        RemotePath::Root { rel_path } => Ok((String::new(), source_path_to_posix(rel_path))),
+        RemotePath::Discovery => Err(eyre!(
+            "a transfer session needs a resolved module or root endpoint, not a discovery form"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod endpoint_module_path_tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// cr-uv2-1: the session that reads from an endpoint is opened with
+    /// the path as typed; the one that writes to it is not concerned.
+    #[test]
+    fn a_source_endpoint_says_it_was_typed_as_a_directory() {
+        for (typed, source, destination) in [
+            ("single.txt", "single.txt", "single.txt"),
+            ("single.txt/", "single.txt/", "single.txt"),
+            ("sub/dir/.", "sub/dir/", "sub/dir"),
+            ("", "", ""),
+        ] {
+            let endpoint = endpoint(PathBuf::from(typed));
+            assert_eq!(
+                source_module_path(&endpoint).unwrap().1,
+                source,
+                "{typed:?}"
+            );
+            assert_eq!(
+                endpoint_module_path(&endpoint).unwrap().1,
+                destination,
+                "{typed:?}"
+            );
+        }
+    }
 
     fn endpoint(rel_path: PathBuf) -> RemoteEndpoint {
         RemoteEndpoint {

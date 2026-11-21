@@ -318,3 +318,178 @@ fn test_remote_move_remote_to_local_directory_tree() {
         "remote source tree/ should be fully removed after the move"
     );
 }
+
+/// `blit <args>` against the context's daemon: its exit status and
+/// everything it said.
+fn blit(ctx: &TestContext, args: &[&str]) -> (Option<i32>, String) {
+    let mut cmd = Command::new(&ctx.cli_bin);
+    cmd.arg("--config-dir").arg(&ctx.config_dir).args(args);
+    let output = run_with_timeout(cmd, Duration::from_secs(60));
+    (
+        output.status.code(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
+}
+
+/// cr-uv2-1: a source typed as a directory is one, or nothing is copied.
+/// `single.txt/` was tidied to `single.txt` before it reached the daemon
+/// and the file was copied — where `cp`, `mv` and `rsync` say `Not a
+/// directory` — and a move then asked for the removal of `single.txt/`,
+/// which under `-f` is no failure: exit 0, both files in place. The
+/// daemon is now told what was typed and refuses before anything is
+/// copied, for a copy, a move, and a move between two daemons.
+#[test]
+fn a_file_typed_as_a_directory_is_neither_copied_nor_moved() {
+    let ctx = TestContext::builder().delegation(true).build();
+    let source = ctx.module_dir.join("single.txt");
+    fs::write(&source, "one file").expect("source");
+    let host = format!("127.0.0.1:{}:/test", ctx.daemon_port);
+    let local = ctx.workspace.join("landed.txt");
+    let there = ctx.module_dir.join("landed.txt");
+    for typed in ["single.txt/", "single.txt/.", "single.txt//"] {
+        for (verb, to, lands) in [
+            ("copy", local.display().to_string(), &local),
+            ("move", local.display().to_string(), &local),
+            ("move", format!("{host}/landed.txt"), &there),
+        ] {
+            let (code, said) = blit(&ctx, &[verb, "-y", &format!("{host}/{typed}"), &to]);
+            let what = format!("{verb} {typed} -> {to}\nexit {code:?}\n{said}");
+            assert_ne!(code, Some(0), "refused\n{what}");
+            assert!(
+                said.contains("source 'single.txt/': Not a directory"),
+                "in the system's words\n{what}"
+            );
+            assert!(!lands.exists(), "nothing was copied\n{what}");
+            assert_eq!(
+                fs::read_to_string(&source).expect("the source stays"),
+                "one file",
+                "{what}"
+            );
+        }
+    }
+    // Typed as what it is, it is copied.
+    let (code, said) = blit(
+        &ctx,
+        &[
+            "copy",
+            "-y",
+            &format!("{host}/single.txt"),
+            &local.display().to_string(),
+        ],
+    );
+    assert_eq!(code, Some(0), "{said}");
+    assert_eq!(fs::read_to_string(&local).expect("copied"), "one file");
+}
+
+/// cr-uv2-1: a move removes the path its session read. The two were read
+/// off the endpoint separately: `dir/.` was copied as the directory's
+/// contents, and the removal was asked for `dir/.`, which `rm` refuses —
+/// everything copied, nothing removed. Both now go by one path.
+#[test]
+fn a_move_removes_the_path_its_session_read() {
+    let ctx = TestContext::builder().delegation(true).build();
+    let host = format!("127.0.0.1:{}:/test", ctx.daemon_port);
+    for (case, typed) in ["dir/", "dir/.", "dir//", "dir"].into_iter().enumerate() {
+        let source = ctx.module_dir.join("dir");
+        fs::create_dir_all(source.join("sub")).expect("source");
+        fs::write(source.join("inner.txt"), "inner").expect("file");
+        fs::write(source.join("sub/deep.txt"), "deep").expect("file");
+        let to = ctx.workspace.join(format!("to-{case}"));
+        let (code, said) = blit(
+            &ctx,
+            &[
+                "move",
+                "-y",
+                &format!("{host}/{typed}"),
+                &format!("{}/", to.display()),
+            ],
+        );
+        let what = format!("move {typed}\nexit {code:?}\n{said}");
+        assert_eq!(code, Some(0), "{what}");
+        // With a separator after it the contents land; without, the
+        // directory does.
+        let landed = if typed == "dir" {
+            to.join("dir")
+        } else {
+            to.clone()
+        };
+        assert_eq!(
+            fs::read_to_string(landed.join("sub/deep.txt")).expect("copied"),
+            "deep",
+            "{what}"
+        );
+        assert!(!source.exists(), "the source is gone\n{what}");
+    }
+}
+
+/// cr-uv2-1: `link/` on a link to a directory is that directory to the
+/// transfer, and to the removal it is a link that is never gone through.
+/// A move of it copied everything, removed nothing and exited 0. `mv`
+/// refuses the operand; so does a move, before anything is copied. A copy
+/// removes nothing, and goes through the link as it did.
+#[cfg(unix)]
+#[test]
+fn a_move_through_a_link_typed_as_a_directory_is_refused_before_copying() {
+    let ctx = TestContext::builder().delegation(true).build();
+    let host = format!("127.0.0.1:{}:/test", ctx.daemon_port);
+    let real = ctx.module_dir.join("real");
+    fs::create_dir_all(&real).expect("directory");
+    fs::write(real.join("inner.txt"), "inner").expect("file");
+    std::os::unix::fs::symlink("real", ctx.module_dir.join("link")).expect("link");
+
+    let local = ctx.workspace.join("moved");
+    let there = ctx.module_dir.join("landing");
+    for (to, lands) in [
+        (format!("{}/", local.display()), &local),
+        (format!("{host}/landing/"), &there),
+    ] {
+        let (code, said) = blit(&ctx, &["move", "-y", &format!("{host}/link/"), &to]);
+        let what = format!("move link/ -> {to}\nexit {code:?}\n{said}");
+        assert_ne!(code, Some(0), "refused\n{what}");
+        assert!(
+            said.contains("source 'link/' is a symbolic link to a directory"),
+            "and says why\n{what}"
+        );
+        assert!(
+            !lands.join("inner.txt").exists(),
+            "nothing was copied\n{what}"
+        );
+        assert!(
+            real.join("inner.txt").exists() && ctx.module_dir.join("link").is_symlink(),
+            "the source stays whole\n{what}"
+        );
+    }
+
+    let copied = ctx.workspace.join("copied");
+    let (code, said) = blit(
+        &ctx,
+        &[
+            "copy",
+            "-y",
+            &format!("{host}/link/"),
+            &format!("{}/", copied.display()),
+        ],
+    );
+    assert_eq!(code, Some(0), "a copy goes through the link\n{said}");
+    assert_eq!(
+        fs::read_to_string(copied.join("inner.txt")).expect("copied"),
+        "inner"
+    );
+
+    // The directory itself, typed as one, is moved whole.
+    let (code, said) = blit(
+        &ctx,
+        &[
+            "move",
+            "-y",
+            &format!("{host}/real/"),
+            &format!("{}/", local.display()),
+        ],
+    );
+    assert_eq!(code, Some(0), "{said}");
+    assert!(local.join("inner.txt").exists() && !real.exists(), "{said}");
+}

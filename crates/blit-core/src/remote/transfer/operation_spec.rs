@@ -396,7 +396,12 @@ pub fn delegated_spec_from_options(
         }
     };
 
-    let path_str = crate::path_posix::request_path_to_posix(&rel_path);
+    // As typed (cr-uv2-1): the daemon that pulls opens its session to the
+    // source with this path, and the source must be told what was asked.
+    let path_str = match crate::path_posix::source_path_to_posix(&rel_path) {
+        root if root.is_empty() => ".".to_string(),
+        path => path,
+    };
 
     // ComparisonMode covers only the "given the file is being
     // considered, what counts as a match?" axis; the orthogonal
@@ -477,6 +482,17 @@ mod delegated_spec_tests {
         assert_eq!(spec.module, "mod");
         assert_eq!(spec.source_path, "a/b");
         assert_eq!(spec.spec_version, SUPPORTED_SPEC_VERSION);
+    }
+
+    /// cr-uv2-1: a source typed as a directory is delegated as one.
+    #[test]
+    fn a_source_typed_as_a_directory_is_delegated_as_one() {
+        for (typed, wire) in [("a/b/", "a/b/"), ("a/b/.", "a/b/"), ("./", "."), (".", ".")] {
+            let spec =
+                delegated_spec_from_options(&module_ep(typed), &DelegatedSpecOptions::default())
+                    .unwrap();
+            assert_eq!(spec.source_path, wire, "{typed:?}");
+        }
     }
 
     #[test]
