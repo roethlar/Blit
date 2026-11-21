@@ -1429,15 +1429,23 @@ pub async fn run_source(
 /// cr-ecm7-1: and the lines of the list that name no entry at all
 /// (`unnamed`), which no scan can find — reported the same way, by the
 /// text they were written in.
+///
+/// cr-ecm9-3: a source that IS one file is sent under the empty path, and
+/// listed by its own name (`sole_name`, the source's base name). The two
+/// are the same file: listed and sent, it was reported missing all the
+/// same — the copy wrote it and the run ended with exit 2.
 fn requested_but_unscanned(
     scope: Option<&HashSet<PathBuf>>,
     unnamed: &[String],
     sent: &HashMap<String, FileHeader>,
+    sole_name: Option<&str>,
     unreadable: &[String],
 ) -> (Vec<crate::generated::FileFailure>, u64) {
     let Some(scope) = scope else {
         return (Vec::new(), 0);
     };
+    // The one file a single-file source sent, by the name a list has for it.
+    let sole_sent = sole_name.filter(|_| sent.contains_key(""));
     let mut out = Vec::new();
     let mut dropped = 0u64;
     let mut budget = crate::remote::transfer::sink::MAX_WIRE_FAILED_PATHS_ENCODED_BYTES;
@@ -1445,7 +1453,7 @@ fn requested_but_unscanned(
     let mut requested: Vec<String> = scope
         .iter()
         .map(|requested| crate::path_posix::relative_path_to_posix(requested))
-        .filter(|rel| !sent.contains_key(rel))
+        .filter(|rel| !sent.contains_key(rel) && Some(rel.as_str()) != sole_sent)
         .chain(unnamed.iter().cloned())
         .collect();
     requested.sort();
@@ -2158,10 +2166,15 @@ async fn source_send_half(
         // is reported to the DESTINATION as that file's failure, so the
         // retry pass can never quietly drop a file it was asked to
         // re-land. Unscoped scans report nothing here.
+        let sole_name = scan_source
+            .root()
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
         let (scan_failures, scan_failures_dropped) = requested_but_unscanned(
             scan_source.files_from_scope().as_ref(),
             &scan_source.files_from_unnamed(),
             &sent.lock().expect("sent-manifest lock poisoned"),
+            sole_name.as_deref(),
             &unreadable.lock().expect("unreadable list lock poisoned"),
         );
         // cr-g3fix6-2: what the walk pruned, complete now that it finished,
@@ -6933,7 +6946,7 @@ mod tests {
         let sent: HashMap<String, FileHeader> =
             [("sent.txt".to_string(), FileHeader::default())].into();
         let unnamed = vec!["./dot.txt".to_string(), "/abs.txt".to_string()];
-        let (failures, dropped) = requested_but_unscanned(Some(&scope), &unnamed, &sent, &[]);
+        let (failures, dropped) = requested_but_unscanned(Some(&scope), &unnamed, &sent, None, &[]);
         assert_eq!(dropped, 0);
         let reported: Vec<(&str, &str)> = failures
             .iter()
@@ -6949,9 +6962,38 @@ mod tests {
             ]
         );
         // No list in force: nothing was requested.
-        assert!(requested_but_unscanned(None, &unnamed, &sent, &[])
+        assert!(requested_but_unscanned(None, &unnamed, &sent, None, &[])
             .0
             .is_empty());
+    }
+
+    /// cr-ecm9-3: a source that is one file is sent under the empty path
+    /// and listed by its own name; listed and sent, it is not missing.
+    /// What else the list names still is.
+    #[test]
+    fn the_one_file_of_a_single_file_source_is_not_missing_when_it_was_sent() {
+        let scope: HashSet<PathBuf> =
+            [PathBuf::from("Report.txt"), PathBuf::from("other.txt")].into();
+        let sent: HashMap<String, FileHeader> = [(String::new(), FileHeader::default())].into();
+        let missing = |sole: Option<&str>, sent: &HashMap<String, FileHeader>| -> Vec<String> {
+            requested_but_unscanned(Some(&scope), &[], sent, sole, &[])
+                .0
+                .into_iter()
+                .map(|failure| failure.relative_path)
+                .collect()
+        };
+        assert_eq!(missing(Some("Report.txt"), &sent), ["other.txt"]);
+        // Another name is another file; and a source that sent nothing
+        // under the empty path sent no such file.
+        assert_eq!(
+            missing(Some("report.txt"), &sent),
+            ["Report.txt", "other.txt"]
+        );
+        assert_eq!(missing(None, &sent), ["Report.txt", "other.txt"]);
+        assert_eq!(
+            missing(Some("Report.txt"), &HashMap::new()),
+            ["Report.txt", "other.txt"]
+        );
     }
 
     /// EXCLUDE_CASE_MATCHING slice 3 (contract 9): an open's filter is

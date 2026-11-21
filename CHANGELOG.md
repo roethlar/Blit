@@ -172,6 +172,12 @@ part, and a job you can list, read, re-run and retry.
   select an unrelated file called exactly that for deletion. A line that
   is no relative path of names (`./x`, `../x`, `/abs`) still names
   nothing and is still reported as a file that did not land.
+- A source that is ONE FILE is filtered under that file's name
+  everywhere. `check` asked its filter about an empty path instead: with
+  the file named in `--files-from` it compared nothing and reported
+  success on two different files, and with an exclude naming the file it
+  compared what `copy` left out. `copy` with the file named in
+  `--files-from` copied it and then exited 2 reporting it missing.
 - An `--exclude` reported as unable to match anything (an absolute path
   outside the source, or any absolute path when the source is on a
   daemon) is no longer part of the filter or sent to the daemon. It was

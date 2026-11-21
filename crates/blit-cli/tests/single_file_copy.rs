@@ -225,3 +225,97 @@ fn single_file_missing_source_fails() {
         "blit copy should fail when source is missing"
     );
 }
+
+/// cr-ecm9-3: a source that is ONE FILE is filtered under one name — the
+/// file's own — by `copy`, by `check`, and by the account of what a list
+/// asked for. It was asked about under the empty path in one place and
+/// under its name in another:
+/// - `--ignore-case --exclude './report.txt'` over `Report.txt`: `copy`
+///   left the file out, and `check` with the same options compared it
+///   and reported a difference;
+/// - `Report.txt` in a `--files-from` list: `check` compared no file and
+///   reported success over an unequal pair, and `copy` wrote the file and
+///   then ended with exit 2, reporting it missing.
+#[test]
+fn a_single_file_source_is_one_name_to_copy_and_to_check() {
+    let run = |verb: &str, options: &[&str], src: &std::path::Path, dst: &std::path::Path| {
+        let mut cmd = cli_command();
+        cmd.arg(verb)
+            .args(options)
+            .arg(src)
+            .arg(dst)
+            .stdin(std::process::Stdio::null());
+        let output = run_with_timeout(cmd, Duration::from_secs(30));
+        (
+            output.status.code(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let (src, dst) = (
+        tmp.path().join("src/Report.txt"),
+        tmp.path().join("out/Report.txt"),
+    );
+    let list = tmp.path().join("list.txt");
+    fs::write(&list, "Report.txt\n").unwrap();
+    let other = tmp.path().join("other.txt");
+    fs::write(&other, "other.txt\n").unwrap();
+    let reset = || {
+        for (path, body) in [(&src, "the new one, longer"), (&dst, "old")] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+    };
+    let (differs, same) = ("1 difference(s) found", "no differences found");
+
+    // An exclude that names the file only when case is ignored.
+    let skipping = ["--ignore-case", "--exclude", "./report.txt"];
+    reset();
+    let (code, said) = run("check", &skipping, &src, &dst);
+    assert_eq!(
+        code,
+        Some(0),
+        "the one file is left out: nothing to compare\n{said}"
+    );
+    assert!(said.contains(same), "{said}");
+    let (code, said) = run("copy", &skipping, &src, &dst);
+    assert_eq!(code, Some(0), "{said}");
+    assert_eq!(
+        fs::read_to_string(&dst).unwrap(),
+        "old",
+        "and nothing to copy\n{said}"
+    );
+    // As typed it does not name the file: both see it.
+    let exact = ["--exclude", "./report.txt"];
+    let (code, said) = run("check", &exact, &src, &dst);
+    assert_eq!(code, Some(1), "{said}");
+    assert!(said.contains(differs), "{said}");
+    let (code, said) = run("copy", &exact, &src, &dst);
+    assert_eq!(code, Some(0), "{said}");
+    assert_eq!(fs::read_to_string(&dst).unwrap(), "the new one, longer");
+
+    // A list that names the file: both see it, and it is not missing.
+    let listed = ["--files-from", list.to_str().unwrap()];
+    reset();
+    let (code, said) = run("check", &listed, &src, &dst);
+    assert_eq!(code, Some(1), "an unequal pair is a difference\n{said}");
+    assert!(said.contains(differs), "{said}");
+    let (code, said) = run("copy", &listed, &src, &dst);
+    assert_eq!(code, Some(0), "copied, and not reported missing\n{said}");
+    assert!(!said.contains("did not land"), "{said}");
+    assert_eq!(fs::read_to_string(&dst).unwrap(), "the new one, longer");
+    // A list that names another file: neither does.
+    let unlisted = ["--retries", "0", "--files-from", other.to_str().unwrap()];
+    reset();
+    let (code, said) = run("check", &unlisted[2..], &src, &dst);
+    assert_eq!(code, Some(0), "{said}");
+    assert!(said.contains(same), "{said}");
+    let (code, said) = run("copy", &unlisted, &src, &dst);
+    assert_eq!(fs::read_to_string(&dst).unwrap(), "old", "{said}");
+    assert_eq!(code, Some(2), "the name it lists was not found\n{said}");
+    assert!(said.contains("other.txt: source: missing"), "{said}");
+}

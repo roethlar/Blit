@@ -258,7 +258,15 @@ impl FileEnumerator {
                     let size = metadata.len();
                     let mtime = metadata.modified().ok();
                     let rel = PathBuf::new();
-                    if filter.allows_entry(Some(&rel), path, size, mtime) {
+                    // cr-ecm9-3: filtered under the file's OWN NAME, as a
+                    // transfer of the same source filters it
+                    // (`filter_manifest`). Asked about the empty path, a
+                    // `--files-from` list never held it and a rule that
+                    // names it never matched: `check` compared nothing —
+                    // or everything — where `copy` did the opposite. The
+                    // empty relative path is still what is emitted.
+                    let named = path.file_name().map(Path::new).unwrap_or(&rel);
+                    if filter.allows_entry(Some(named), path, size, mtime) {
                         visit(EnumeratedEntry {
                             absolute_path: path.to_path_buf(),
                             // Empty relative path so src_root.join(rel) === src_root
@@ -492,5 +500,69 @@ mod tests {
         // Only the top-level `ignored.log` is recorded in `pruned_paths`;
         // `backup` and `backup/sub/deep.log` were skipped before filter/pruned tracking.
         assert_eq!(pruned.take(), vec!["ignored.log".to_string()]);
+    }
+
+    /// cr-ecm9-3: a root that is one file is filtered under the file's own
+    /// name — by a list, by a rule that names it, in either case mode —
+    /// and emitted under the empty relative path. Asked about the empty
+    /// path, a list of names never held it and a rule naming it never
+    /// matched, so `check` saw the file a `copy` of the same source and
+    /// options left out, and missed the one a `copy` took.
+    #[test]
+    fn a_root_that_is_one_file_is_filtered_by_its_own_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Report.txt");
+        std::fs::write(&root, b"x").unwrap();
+        let visited = |filter: FileFilter| -> Vec<PathBuf> {
+            let mut seen = Vec::new();
+            FileEnumerator::new(filter)
+                .enumerate_local_streaming(&root, |entry| {
+                    seen.push(entry.relative_path.clone());
+                    Ok(())
+                })
+                .unwrap();
+            seen
+        };
+        let emitted = vec![PathBuf::new()];
+        assert_eq!(visited(FileFilter::default()), emitted);
+        let listing = |names: &[&str]| {
+            let mut filter = FileFilter::default();
+            filter.files_from = Some(names.iter().map(PathBuf::from).collect());
+            filter
+        };
+        assert_eq!(
+            visited(listing(&["Report.txt"])),
+            emitted,
+            "listed by its name"
+        );
+        assert_eq!(visited(listing(&["other.txt"])), Vec::<PathBuf>::new());
+        assert_eq!(visited(listing(&[])), Vec::<PathBuf>::new());
+        let excluding = |pattern: &str, ignore_case: bool| {
+            let mut filter = FileFilter::default();
+            filter.exclude_files = vec![pattern.to_string()];
+            filter.ignore_case = ignore_case;
+            filter
+        };
+        for (pattern, ignore_case, left_out) in [
+            ("./Report.txt", false, true),
+            ("./report.txt", false, false),
+            ("./report.txt", true, true),
+            ("Report.txt", false, true),
+            ("*.txt", false, true),
+            ("other.txt", true, false),
+        ] {
+            assert_eq!(
+                visited(excluding(pattern, ignore_case)).is_empty(),
+                left_out,
+                "--exclude {pattern}, ignore_case {ignore_case}"
+            );
+        }
+        let including = |pattern: &str| {
+            let mut filter = FileFilter::default();
+            filter.include_files = vec![pattern.to_string()];
+            filter
+        };
+        assert_eq!(visited(including("Report.txt")), emitted);
+        assert_eq!(visited(including("*.md")), Vec::<PathBuf>::new());
     }
 }
