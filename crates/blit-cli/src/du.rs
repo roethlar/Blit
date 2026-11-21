@@ -94,9 +94,10 @@ pub async fn run_du(args: DuArgs) -> Result<ExitCode> {
                     reason,
                 } => {
                     failed = true;
+                    // The name as `du` writes it (cr-uv2-5).
                     eprintln!(
-                        "blit du: {action} '{}': {reason}",
-                        String::from_utf8_lossy(&operand.below(&path))
+                        "blit du: {action} {}: {reason}",
+                        blit_core::admin::quote::for_shell(&operand.below(&path), true)
                     );
                 }
             }

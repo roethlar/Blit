@@ -187,9 +187,10 @@ pub async fn run_find(args: FindArgs) -> Result<ExitCode> {
                     failed = true;
                     // What was found before it is printed before it.
                     let flushed = out.flush();
+                    // The name as `find` writes it (cr-uv2-5).
                     eprintln!(
-                        "blit find: \u{2018}{}\u{2019}: {reason}",
-                        String::from_utf8_lossy(&shown(&path))
+                        "blit find: {}: {reason}",
+                        blit_core::admin::quote::for_find(&shown(&path))
                     );
                     flushed
                 }

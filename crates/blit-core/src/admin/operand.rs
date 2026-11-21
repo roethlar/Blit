@@ -83,6 +83,19 @@ pub fn word_bytes(word: &OsStr) -> Result<&[u8]> {
     }
 }
 
+/// Where the daemon's part of an operand ends and its path begins: after
+/// `HOST://`, or after `HOST:/MODULE/`. Found in the bytes, by the first
+/// `:/` — what a path holds further on, a `\`, a `://`, a byte that is
+/// no text, is not asked.
+fn daemon_part(typed: &[u8]) -> Option<usize> {
+    let at = typed.windows(2).position(|pair| pair == b":/")?;
+    if typed.get(at + 2) == Some(&b'/') {
+        return Some(at + 3);
+    }
+    let module_ends = typed[at + 2..].iter().position(|&byte| byte == b'/')?;
+    Some(at + 2 + module_ends + 1)
+}
+
 /// A utility verb's operand as typed: `HOST:/MODULE/PATH` or
 /// `HOST://PATH`, the path by its bytes.
 #[derive(Debug, Clone)]
@@ -101,36 +114,41 @@ impl Operand {
     /// Read one operand. `Ok(None)` is a word that names no daemon — a
     /// local path. An operand that names a daemon and no module, or whose
     /// host or module is not text, is an error.
+    ///
+    /// The daemon's part — `HOST://`, `HOST:/MODULE/` — is read ON ITS
+    /// OWN (cr-uv2-5), and what follows it is the path, whatever its
+    /// bytes. The whole word used to be read as an endpoint, by rules
+    /// made for telling a local path from a daemon: a `\` anywhere made
+    /// it "local", so `HOST:/m/quarter\notes.pst` — a name Unix allows,
+    /// and one these commands had just printed — was refused as no
+    /// remote path at all.
     pub fn read(word: &OsStr) -> Result<Option<Self>> {
+        use crate::endpoints::{parse_transfer_endpoint, Endpoint};
         let typed = word_bytes(word)?;
-        // The daemon and the module are text, and stand before the path:
-        // they are read from the text the operand begins with. Whatever
-        // in the PATH is not text stays as the bytes it is.
-        let (text, all_text) = match std::str::from_utf8(typed) {
-            Ok(text) => (text, true),
-            Err(error) => (
-                std::str::from_utf8(&typed[..error.valid_up_to()]).expect("valid up to there"),
-                false,
-            ),
-        };
-        let holds_a_path = |remote: &RemoteEndpoint| !matches!(remote.path, RemotePath::Discovery);
-        let read = RemoteEndpoint::parse(text)
-            .ok()
-            .filter(holds_a_path)
-            .and_then(|remote| Some((remote, RemoteEndpoint::path_offset(text)?)));
-        let Some((remote, path_at)) = read else {
-            // Does the whole word, read leniently, name a daemon at all?
-            let lenient = String::from_utf8_lossy(typed);
-            return match RemoteEndpoint::parse(&lenient) {
-                Err(_) => Ok(None),
-                Ok(_) if !all_text => {
-                    bail!("the daemon and the module in `{lenient}` must be valid text")
-                }
-                Ok(_) => {
+        let Some(path_at) = daemon_part(typed) else {
+            // No daemon's part with a path after it. A word shaped like
+            // one that does not read as one says why (`HOST:/module`
+            // wants a `/` after the module); a bare daemon names no path.
+            return match parse_transfer_endpoint(&String::from_utf8_lossy(typed))? {
+                Endpoint::Local(_) => Ok(None),
+                Endpoint::Remote(_) => {
                     bail!("remote target must include a module path (e.g., server:/module/path)")
                 }
             };
         };
+        // The daemon and the module are text. Whatever in the PATH is not
+        // text stays as the bytes it is.
+        let daemon = String::from_utf8_lossy(&typed[..path_at]);
+        let remote = match parse_transfer_endpoint(&daemon)? {
+            Endpoint::Local(_) => return Ok(None),
+            Endpoint::Remote(remote) => remote,
+        };
+        if std::str::from_utf8(&typed[..path_at]).is_err() {
+            bail!(
+                "the daemon and the module in `{}` must be valid text",
+                String::from_utf8_lossy(typed)
+            );
+        }
         let module = match &remote.path {
             RemotePath::Module { module, .. } => module.clone(),
             _ => String::new(),
@@ -163,7 +181,10 @@ impl Operand {
         &self.typed
     }
 
-    /// The operand as typed, as text for a message.
+    /// The operand as typed, as text — for JSON, which holds text and
+    /// nothing else. A name that is not text is only near it here; a
+    /// message writes [`typed`](Self::typed) through
+    /// [`super::quote`], and output writes the bytes.
     pub fn shown(&self) -> String {
         String::from_utf8_lossy(&self.typed).into_owned()
     }
@@ -259,6 +280,59 @@ mod tests {
         Operand::read(OsStr::new(typed))
             .expect(typed)
             .expect("names a daemon")
+    }
+
+    /// cr-uv2-5: the daemon's part is read on its own, and nothing in the
+    /// path decides whether the word names a daemon. `quarter\notes.pst`
+    /// is a name Unix allows; with it in the path the whole word was
+    /// "a local path".
+    #[test]
+    fn what_a_path_holds_does_not_decide_what_the_word_is() {
+        for (typed, module, path) in [
+            ("srv:/m/quarter\\notes.pst", "m", "quarter\\notes.pst"),
+            ("srv:9031:/m/a\\b/c\\", "m", "a\\b/c\\"),
+            ("srv://quarter\\notes.pst", "", "quarter\\notes.pst"),
+            ("srv:/m/a://b", "m", "a://b"),
+            ("srv:/m/C:/x", "m", "C:/x"),
+            ("srv:/m/~x", "m", "~x"),
+            ("[::1]:9031:/m/\\", "m", "\\"),
+        ] {
+            let operand = read(typed);
+            assert_eq!(operand.module, module, "{typed:?}");
+            assert_eq!(operand.path(), path.as_bytes(), "{typed:?}");
+            assert_eq!(operand.typed(), typed.as_bytes(), "{typed:?}");
+        }
+        // What is local stays local, a `:/` in it or not.
+        for local in [
+            "./srv:/m/x",
+            "/abs/srv:/m/x",
+            "~/srv:/m/x",
+            "C:/dir/file",
+            "C:\\dir\\file",
+            "dir/file",
+            "\\\\server\\share:/x/y",
+        ] {
+            assert!(
+                Operand::read(OsStr::new(local)).expect(local).is_none(),
+                "{local:?}"
+            );
+        }
+        // A word shaped like a daemon's that is none says why, in place
+        // of "a local path".
+        for (typed, why) in [
+            ("srv:/m", "module path must end with '/'"),
+            ("srv", "must include a module path"),
+            // A bare word is a daemon's name, as it always was.
+            ("plain", "must include a module path"),
+            ("srv:9031", "must include a module path"),
+            ("srv:\\m\\x", "forward slashes"),
+        ] {
+            let refused = Operand::read(OsStr::new(typed)).expect_err(typed);
+            assert!(
+                format!("{refused:#}").contains(why),
+                "{typed:?}: {refused:#}"
+            );
+        }
     }
 
     fn entry(path: &str) -> EntryPath {

@@ -532,6 +532,179 @@ fn rm_asks_of_a_directory_what_the_system_rm_asks() {
     }
 }
 
+/// cr-uv2-5, where the system commands ARE the reference: a name in a
+/// message is written as `rm`, `du`, `df` and `find` each write it, so
+/// that it reads back as the name it is. Shown as text, a name that is
+/// not text was told of in the words for ANOTHER file — `bad\xff.dat` as
+/// the file really called `bad\u{fffd}.dat`. Twenty-two names that are not
+/// there, each given to the four commands and to the system's four.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_name_in_a_message_is_written_as_the_system_commands_write_it() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let ctx = TestContext::new();
+    let elsewhere = ctx.workspace.join("system");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let module = remote(&ctx, "");
+    let names: [&[u8]; 22] = [
+        b"plain.txt",
+        b"two words",
+        b"it's",
+        b"bad\xff.dat",
+        b"\xff",
+        b"a\xffb\xfec",
+        b"new\nline",
+        b"tab\there",
+        b"bell\x07",
+        b"back\\slash",
+        b"quarter\\notes.pst",
+        b"quote\"double",
+        b"dollar$x",
+        "caf\u{e9}".as_bytes(),
+        "em\u{2003}sp".as_bytes(),
+        b"ctl\x01\x02",
+        b"del\x7f",
+        b"-dash",
+        b" lead",
+        b"trail ",
+        b"both\xff'q",
+        "bad\u{fffd}.dat".as_bytes(),
+    ];
+    let said = |output: std::process::Output| String::from_utf8_lossy(&output.stderr).into_owned();
+    let mut written = std::collections::BTreeSet::new();
+    for name in names {
+        let shown = String::from_utf8_lossy(name).into_owned();
+        let mut operand = module.clone().into_bytes();
+        operand.extend_from_slice(name);
+        let mut beside = b"./".to_vec();
+        beside.extend_from_slice(name);
+        for (verb, flags, start) in [
+            ("rm", &["-y"][..], name),
+            ("du", &[][..], name),
+            ("df", &[][..], name),
+            ("find", &[][..], &beside[..]),
+        ] {
+            let mut system = Command::new(verb);
+            if verb != "find" {
+                system.arg("--");
+            }
+            let theirs = said(
+                system
+                    .arg(OsStr::from_bytes(start))
+                    .current_dir(&elsewhere)
+                    .env("LC_ALL", "C.UTF-8")
+                    .stdin(Stdio::null())
+                    .output()
+                    .expect("the system command"),
+            );
+            let mut cmd = Command::new(&ctx.cli_bin);
+            cmd.arg("--config-dir")
+                .arg(&ctx.config_dir)
+                .arg(verb)
+                .args(flags)
+                .arg(OsStr::from_bytes(&operand))
+                .stdin(Stdio::null());
+            let ours = said(run_with_timeout(cmd, Duration::from_secs(60)));
+            // Ours names itself and the daemon; `find` here started at `./`.
+            let ours = ours
+                .replacen(&format!("blit {verb}: "), &format!("{verb}: "), 1)
+                .replace(&module, "");
+            let theirs = theirs.replacen("\u{2018}./", "\u{2018}", 1);
+            assert_eq!(ours, theirs, "{verb} {shown:?}");
+            assert!(
+                ours.contains("No such file or directory"),
+                "{verb} {shown:?}: {ours}"
+            );
+            written.insert((verb, ours));
+        }
+    }
+    // Every name is written in its own way by each command: none stands
+    // for another.
+    assert_eq!(written.len(), names.len() * 4);
+}
+
+/// cr-uv2-5: a name with a `\` in it — one Unix allows — is a path these
+/// commands take. `find` printed `HOST:/module/t/quarter\notes.pst`, and
+/// that line given back to `du`, `df` or `rm` was "a local path". And
+/// `df` prints the operand by its own bytes: a name that is not text was
+/// printed as the text nearest it, which is another file's name.
+#[cfg(unix)]
+#[test]
+fn a_name_these_commands_print_is_one_they_take() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let ctx = TestContext::new();
+    write(&ctx.module_dir, "t/quarter\\notes.pst");
+    write(&ctx.module_dir, "t/plain.txt");
+    fs::write(
+        ctx.module_dir
+            .join("t")
+            .join(OsStr::from_bytes(b"bad\xff.dat")),
+        b"x",
+    )
+    .unwrap();
+    let ours = |args: &[&OsStr]| {
+        let mut cmd = Command::new(&ctx.cli_bin);
+        cmd.arg("--config-dir")
+            .arg(&ctx.config_dir)
+            .args(args)
+            .stdin(Stdio::null());
+        run_with_timeout(cmd, Duration::from_secs(60))
+    };
+    let start = remote(&ctx, "t");
+    for (pattern, name) in [
+        ("quarter*", &b"quarter\\notes.pst"[..]),
+        ("bad*", &b"bad\xff.dat"[..]),
+    ] {
+        let found = ours(&[
+            OsStr::new("find"),
+            OsStr::new(&start),
+            OsStr::new("-name"),
+            OsStr::new(pattern),
+        ]);
+        let line = found.stdout.strip_suffix(b"\n").expect("one line").to_vec();
+        let mut expected = remote(&ctx, "t/").into_bytes();
+        expected.extend_from_slice(name);
+        assert_eq!(line, expected, "what `find` prints");
+        let line = OsStr::from_bytes(&line);
+
+        let usage = ours(&[OsStr::new("du"), line]);
+        assert!(
+            usage.status.success() && usage.stdout.ends_with(&[&expected[..], b"\n"].concat()),
+            "du: {}{}",
+            String::from_utf8_lossy(&usage.stdout),
+            String::from_utf8_lossy(&usage.stderr)
+        );
+        let space = ours(&[OsStr::new("df"), line]);
+        let row = space
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .nth(1)
+            .unwrap_or_default();
+        assert!(
+            space.status.success() && row.starts_with(&[&expected[..], b" "].concat()),
+            "df prints the operand by its bytes: {}{}",
+            String::from_utf8_lossy(&space.stdout),
+            String::from_utf8_lossy(&space.stderr)
+        );
+        let removed = ours(&[OsStr::new("rm"), OsStr::new("-y"), line]);
+        assert!(
+            removed.status.success() && removed.stderr.is_empty(),
+            "rm: {}",
+            String::from_utf8_lossy(&removed.stderr)
+        );
+        assert!(!ctx
+            .module_dir
+            .join("t")
+            .join(OsStr::from_bytes(name))
+            .exists());
+    }
+    assert!(ctx.module_dir.join("t/plain.txt").exists());
+}
+
 /// AC-12, on every Unix: a name that is not valid text is removed as the
 /// name it is, with the tree that holds it.
 #[cfg(unix)]

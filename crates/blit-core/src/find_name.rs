@@ -147,6 +147,13 @@ impl Unit for char {
     }
 }
 
+/// Whether a character can be printed, by the reference locale's
+/// `[:print:]`: what a message shows as itself, and what it must write
+/// some other way ([`crate::admin::quote`]).
+pub fn is_printable(character: char) -> bool {
+    Unit::is(character, Class::Print)
+}
+
 /// Whether `point` is in the class `edges` describes: the code points at
 /// which membership changes, in order ([`reference_classes`]).
 fn within(edges: &[u32], point: u32) -> bool {

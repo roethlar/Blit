@@ -395,7 +395,18 @@ none of the options it had.**
   or `-iname` pattern — `blit find HOST:/m/t -name '*.tmp' | xargs -d
   '\n' blit rm -y` removes it. `find` keeps every `/` typed after its
   path in what it prints below it (`dir//` prints `dir//sub`), as `find`
-  does.
+  does. A name with a `\` in it — one Unix allows — is a path they take
+  too: `HOST:/m/quarter\notes.pst` was refused as "a local path".
+- **A name in a message is written so that it reads back**, as each
+  command's namesake writes it: `blit rm: cannot remove
+  'HOST:/m/bad'$'\377''.dat'`, `"it's"`, `'new'$'\n''line'` from `rm`
+  and `du`; the same from `df` where the name needs it; `‘bad\377.dat’`
+  from `find`. A name that is not text used to be shown with a
+  replacement character — the name of another file. `rm`'s question
+  quotes its paths the same way, and `df`'s table prints the path by its
+  own bytes. (`--json` holds text: there such a name is still the text
+  nearest it.) `HOST:/module`, with no `/` after the module, now says
+  that it wants one.
 - **`[:class:]` in a `-name` pattern is the reference locale's**, by its
   own tables: the classes of `C.UTF-8` as the C library has them (glibc
   2.44), for every code point. A code point no character is assigned to

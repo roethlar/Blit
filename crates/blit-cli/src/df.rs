@@ -21,13 +21,16 @@ pub async fn run_df(args: DfArgs) -> Result<ExitCode> {
             args.target.to_string_lossy()
         );
     };
-    let typed = operand.shown();
     let asked = df::query(&operand.remote, operand.module.clone(), operand.wire_path());
     let space = match asked.await {
         Ok(space) => space,
-        // `df: PATH: No such file or directory`, and exit 1.
+        // `df: PATH: No such file or directory`, and exit 1 — the path as
+        // `df` writes it, quoted where it needs to be (cr-uv2-5).
         Err(error) => {
-            eprintln!("blit df: {typed}: {error}");
+            eprintln!(
+                "blit df: {}: {error}",
+                blit_core::admin::quote::for_shell(operand.typed(), false)
+            );
             return Ok(ExitCode::from(1));
         }
     };
@@ -35,7 +38,12 @@ pub async fn run_df(args: DfArgs) -> Result<ExitCode> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&space)?);
     } else {
-        print!("{}", table(&typed, &space, args.human_readable));
+        // The operand by its own bytes (cr-uv2-5): as text, a name that
+        // is not text was printed as another file's.
+        use std::io::Write as _;
+        std::io::stdout()
+            .lock()
+            .write_all(&table(operand.typed(), &space, args.human_readable))?;
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -43,7 +51,7 @@ pub async fn run_df(args: DfArgs) -> Result<ExitCode> {
 /// `df`'s two lines for one filesystem: the header and the numbers, the
 /// first column wide enough for the operand and each number right-aligned
 /// under its heading.
-fn table(operand: &str, space: &FilesystemSpace, human: bool) -> String {
+fn table(operand: &[u8], space: &FilesystemSpace, human: bool) -> Vec<u8> {
     let size = |bytes: u64| {
         if human {
             human_size(bytes)
@@ -66,17 +74,26 @@ fn table(operand: &str, space: &FilesystemSpace, human: bool) -> String {
         size(space.available_bytes),
         percent,
     ];
-    let first = operand.len().max(14);
-    let mut header = format!("{:<first$}", "Filesystem");
-    let mut row = format!("{operand:<first$}");
+    // As wide as the operand is when it is text; its bytes, when not.
+    let wide = match std::str::from_utf8(operand) {
+        Ok(text) => text.chars().count(),
+        Err(_) => operand.len(),
+    };
+    let first = wide.max(14);
+    let mut header = format!("{:<first$}", "Filesystem").into_bytes();
+    let mut row = operand.to_vec();
+    row.resize(operand.len() + (first - wide), b' ');
     for (at, (heading, value)) in headings.iter().zip(&values).enumerate() {
         // `df -h` keeps its three sizes at least five wide.
         let least = if human && at < 3 { 5 } else { 0 };
         let width = heading.len().max(value.len()).max(least);
-        header.push_str(&format!(" {heading:>width$}"));
-        row.push_str(&format!(" {value:>width$}"));
+        header.extend_from_slice(format!(" {heading:>width$}").as_bytes());
+        row.extend_from_slice(format!(" {value:>width$}").as_bytes());
     }
-    format!("{header}\n{row}\n")
+    header.push(b'\n');
+    row.push(b'\n');
+    header.extend_from_slice(&row);
+    header
 }
 
 #[cfg(test)]
@@ -94,6 +111,9 @@ mod tests {
             used_bytes: 259_788 * 1024,
             available_bytes: 15_858_384 * 1024,
         };
+        let table = |operand: &str, space: &FilesystemSpace, human: bool| {
+            String::from_utf8(super::table(operand.as_bytes(), space, human)).unwrap()
+        };
         assert_eq!(
             table("tmpfs", &space, false),
             "Filesystem     1K-blocks   Used Available Use%\n\
@@ -109,6 +129,20 @@ mod tests {
         let lines: Vec<&str> = wide.lines().collect();
         assert_eq!(lines[0].len(), lines[1].len());
         assert!(lines[1].starts_with("server.example:/module/some/path  16118172"));
+        // cr-uv2-5: the operand is printed by its own bytes — not as the
+        // text nearest it, which is another file's name — and a name of
+        // letters beyond ASCII is as wide as its letters.
+        let raw = super::table(b"srv:/m/bad\xff.dat", &space, false);
+        assert!(raw
+            .split(|byte| *byte == b'\n')
+            .nth(1)
+            .is_some_and(|row| row.starts_with(b"srv:/m/bad\xff.dat  16118172")));
+        let lettered = table("srv:/m/caf\u{e9}s", &space, false);
+        assert!(lettered
+            .lines()
+            .nth(1)
+            .unwrap()
+            .starts_with("srv:/m/caf\u{e9}s    16118172"));
         // A filesystem of no size has no percentage.
         let empty = FilesystemSpace {
             total_bytes: 0,

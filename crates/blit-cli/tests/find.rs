@@ -717,15 +717,17 @@ fn a_name_that_is_not_text_goes_round() {
         .join(OsStr::from_bytes(b"bad\xff.dat"))
         .exists());
     assert!(ctx.module_dir.join("t/plain.dat").exists());
-    // One that is not there is named by its bytes in what `rm` says.
+    // One that is not there is named in what `rm` says as `rm` writes a
+    // name that is not text (cr-uv2-5): so that it reads back as that
+    // name, and not as the one with U+FFFD in the byte's place.
     let missing = ours(&[OsStr::new("rm"), OsStr::new("-y"), OsStr::from_bytes(&line)]);
     assert_eq!(missing.status.code(), Some(1));
-    let mut said = b"blit rm: cannot remove '".to_vec();
-    said.extend_from_slice(&String::from_utf8_lossy(&line).into_owned().into_bytes());
-    said.extend_from_slice(b"': No such file or directory\n");
+    let module = String::from_utf8(operand(b"").into_vec()).expect("the daemon's part is text");
     assert_eq!(
         String::from_utf8_lossy(&missing.stderr),
-        String::from_utf8_lossy(&said)
+        format!(
+            "blit rm: cannot remove '{module}t/bad'$'\\377''.dat': No such file or directory\n"
+        )
     );
 }
 

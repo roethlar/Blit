@@ -16,6 +16,7 @@
 
 use crate::cli::RmArgs;
 use blit_core::admin::operand::{self, Operand};
+use blit_core::admin::quote;
 use blit_core::admin::rm::{self, RmError, RmOptions};
 use eyre::{bail, Result};
 use std::process::ExitCode;
@@ -28,7 +29,8 @@ pub use blit_core::admin::rm::delete_remote_path;
 struct Failed {
     /// The operand it belongs to, by its place on the command line.
     operand: usize,
-    path: String,
+    /// The entry as these commands print it: by its bytes (cr-uv2-5).
+    path: Vec<u8>,
     reason: String,
     /// `rm` itself refuses the operand: a path ending in `.` or `..`.
     refused: bool,
@@ -69,7 +71,7 @@ pub async fn run_rm(args: RmArgs) -> Result<ExitCode> {
         if operand::names_dot(each.path()) {
             refused.push(Failed {
                 operand: at,
-                path: each.shown(),
+                path: each.typed().to_vec(),
                 reason: DOT_OR_DOT_DOT.to_string(),
                 refused: true,
             });
@@ -133,10 +135,9 @@ pub async fn run_rm(args: RmArgs) -> Result<ExitCode> {
                 let Some(&at) = group.get(failure.operand) else {
                     return;
                 };
-                let shown = operands[at].below(&failure.path);
                 said.failed(Failed {
                     operand: at,
-                    path: String::from_utf8_lossy(&shown).into_owned(),
+                    path: operands[at].below(&failure.path),
                     reason: failure.reason,
                     refused: false,
                 });
@@ -151,7 +152,7 @@ pub async fn run_rm(args: RmArgs) -> Result<ExitCode> {
                 for &at in &group {
                     said.failed(Failed {
                         operand: at,
-                        path: operands[at].shown(),
+                        path: operands[at].typed().to_vec(),
                         reason: format!("{error:#}"),
                         refused: false,
                     });
@@ -218,18 +219,24 @@ impl Said {
         }
     }
 
+    /// A name is written as `rm` writes it (cr-uv2-5): quoted so that
+    /// it reads back as the name it is — `'bad'$'\377''.dat'`. Shown as
+    /// text, a name that is not text was told of in the words for
+    /// another file, the one holding U+FFFD where this holds a byte.
     fn say(&mut self, failed: Failed) {
         self.any = true;
         if self.json {
-            self.listed
-                .push(serde_json::json!({ "path": failed.path, "reason": failed.reason }));
-        } else if failed.refused {
-            eprintln!("blit rm: {}: skipping '{}'", failed.reason, failed.path);
+            self.listed.push(serde_json::json!({
+                "path": String::from_utf8_lossy(&failed.path),
+                "reason": failed.reason,
+            }));
+            return;
+        }
+        let name = quote::for_shell(&failed.path, true);
+        if failed.refused {
+            eprintln!("blit rm: {}: skipping {name}", failed.reason);
         } else {
-            eprintln!(
-                "blit rm: cannot remove '{}': {}",
-                failed.path, failed.reason
-            );
+            eprintln!("blit rm: cannot remove {name}: {}", failed.reason);
         }
     }
 }
@@ -240,7 +247,7 @@ fn question<'a>(operands: impl ExactSizeIterator<Item = &'a Operand>) -> String 
     let more = operands.len().saturating_sub(NAMED);
     let mut named: Vec<String> = operands
         .take(NAMED)
-        .map(|operand| format!("'{}'", operand.shown()))
+        .map(|operand| quote::for_shell(operand.typed(), true))
         .collect();
     if more > 0 {
         named.push(format!("{more} more"));
