@@ -158,10 +158,35 @@ impl Complete {
         filter
     }
 
-    fn ignoring(&self) -> &crate::fs_enum::FileFilter {
-        self.ignoring
-            .get_or_init(|| Self::filter(&self.excludes, &self.includes, true))
+    /// The filter as the option would read it — or `None` when it holds
+    /// more than [`MOST_PATTERNS_WIDENED`] patterns (cr-ecm11-6). It is
+    /// the one thing here the run does not build for itself, and building
+    /// it costs by the pattern: asked once, about one name, it compiled
+    /// 10,000 includes a second time and one line took 120 ms. Past the
+    /// bound nothing is asked of it, and what it would have settled is
+    /// not claimed.
+    fn ignoring(&self) -> Option<&crate::fs_enum::FileFilter> {
+        if self.excludes.len() + self.includes.len() > MOST_PATTERNS_WIDENED {
+            return None;
+        }
+        Some(self.ignoring.get_or_init(|| {
+            #[cfg(test)]
+            WIDENED.with(|built| built.set(built.get() + 1));
+            Self::filter(&self.excludes, &self.includes, true)
+        }))
     }
+}
+
+/// The most patterns a run's filter may hold and still be built a second
+/// time, as `--ignore-case` would read it, for the line's sake
+/// ([`Complete::ignoring`]). Measured: about 12 microseconds a pattern.
+const MOST_PATTERNS_WIDENED: usize = 64;
+
+// How many times a run's whole filter was built as the option would read
+// it, on this thread (cr-ecm11-6).
+#[cfg(test)]
+thread_local! {
+    static WIDENED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// What a pattern is in the filter: it leaves entries out, or lets them in.
@@ -787,7 +812,12 @@ impl Asked {
         let typed = Self::named(self.role, &self.whole.typed, name);
         let with = match self.role {
             Role::Exclude => by_pattern,
-            Role::Include => Self::named(self.role, self.whole.ignoring(), name),
+            // cr-ecm11-6: past the bound it cannot be asked, and nothing
+            // is claimed.
+            Role::Include => match self.whole.ignoring() {
+                Some(filter) => Self::named(self.role, filter, name),
+                None => return false,
+            },
         };
         (by_pattern.0 && with.0 && !typed.0) || (by_pattern.1 && with.1 && !typed.1)
     }
@@ -805,7 +835,9 @@ impl Asked {
         named(&self.as_typed)
             && !named(&self.ignoring_case)
             && named(&self.whole.typed)
-            && !named(self.whole.ignoring())
+            // cr-ecm11-6: not shown past the bound; the class is then
+            // one that MAY take less.
+            && self.whole.ignoring().is_some_and(|filter| !named(filter))
     }
 
     /// `spelling` — the WHOLE pattern with its letters all lowered, or all
@@ -2871,6 +2903,60 @@ mod tests {
     /// spells out alternatives is compared spelling by spelling, and past
     /// that the line is the plain rule. Counted in questions put to a
     /// filter.
+    /// cr-ecm11-6: the line never builds a long filter a second time. One
+    /// question about one include built the run's whole filter as the
+    /// option would read it — 10,000 includes compiled again, 160 ms where
+    /// the command takes 38. Past [`MOST_PATTERNS_WIDENED`] patterns it is
+    /// not built, and the line says only what it can without it.
+    #[test]
+    fn the_line_does_not_build_a_long_filter_a_second_time() {
+        let includes =
+            |n: usize| -> Vec<String> { (0..n).map(|at| format!("name{at:05}.dat")).collect() };
+        let line = |includes: &[String], excludes: &[String]| {
+            let noted: Vec<Noted> = includes
+                .iter()
+                .map(|pattern| (pattern, Role::Include))
+                .chain(excludes.iter().map(|pattern| (pattern, Role::Exclude)))
+                .map(|(pattern, role)| Noted {
+                    typed: pattern,
+                    read_as: pattern,
+                    file: None,
+                    role,
+                })
+                .collect();
+            WIDENED.with(|built| built.set(0));
+            let line = case_note_of(&noted, Whole { excludes, includes }, cfg!(windows));
+            (line, WIDENED.with(|built| built.get()))
+        };
+        // The reviewer's command: 10,000 includes. The rule, and a count.
+        let (said, built) = line(&includes(10_000), &[]);
+        assert_eq!(built, 0, "the whole filter was built again for one line");
+        assert_eq!(
+            said.as_deref(),
+            Some(
+                "\"name00000.dat\" matches exactly as typed, and 9999 more patterns match only \
+                 as typed; capital letters matter (--ignore-case ignores them)."
+            )
+        );
+        // Within the bound it is built, once, and the example is shown.
+        let (said, built) = line(&includes(MOST_PATTERNS_WIDENED), &[]);
+        assert_eq!(built, 1);
+        assert!(
+            said.is_some_and(|said| said.contains("would also match NAME00000.DAT")),
+            "an include's example is asked of the whole filter"
+        );
+        // A class that could take less, beside more patterns than the
+        // bound: the warning stays, and says `may` — no name was asked.
+        let (said, built) = line(&includes(MOST_PATTERNS_WIDENED), &["[!a]*.dat".to_string()]);
+        assert_eq!(built, 0);
+        assert!(
+            said.is_some_and(|said| said.contains("[!a] may stop matching A")),
+            "what cannot be shown is still warned of"
+        );
+    }
+
+    /// cr-ecm11-4: a pattern that cannot be put to the filter as the
+    /// option would read it gets the rule, and no example made by rule.
     #[test]
     fn a_pattern_the_option_cannot_read_gets_the_rule_and_no_example() {
         let pattern = format!("{}s{}", "{".repeat(249), "}".repeat(249));
