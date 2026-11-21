@@ -1910,6 +1910,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         ));
 
@@ -1958,6 +1959,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         ));
 
@@ -2022,6 +2024,7 @@ mod tests {
                     checksum: None,
                     resume: false,
                     compare_mode: ComparisonMode::SizeMtime,
+                    ignore_existing: false,
                 },
             )) as Arc<dyn TransferSink>
         };
@@ -2072,6 +2075,7 @@ mod tests {
                     checksum: None,
                     resume: false,
                     compare_mode: ComparisonMode::SizeMtime,
+                    ignore_existing: false,
                 },
             ));
             // Header promises 4 bytes; the body carries two 4-byte
@@ -2155,6 +2159,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         ));
 
@@ -2691,6 +2696,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         ));
 
@@ -2789,6 +2795,7 @@ mod tests {
                     checksum: None,
                     resume: false,
                     compare_mode: ComparisonMode::SizeMtime,
+                    ignore_existing: false,
                 },
             ))
         };
@@ -3050,6 +3057,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         ));
 
@@ -3089,6 +3097,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         ));
 

@@ -213,7 +213,11 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// tickets of the sessions that copied, and takes only what they sent. It
 /// was a recursive removal of whatever stood at the source by then. A
 /// peer of contract 23 would issue no ticket, or remove without one.
-pub const CONTRACT_VERSION: u32 = 24;
+/// v25: `FilterSpec.files_from_left` means something else (cr-ecm13-1) —
+/// at a listed path NOTHING that stands there is written over. A peer of
+/// contract 24 would replace a file that carries the mark that contract
+/// stamped on an incomplete copy; no mark is stamped or read any more.
+pub const CONTRACT_VERSION: u32 = 25;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames
@@ -4368,6 +4372,10 @@ async fn destination_session_inner(
                     checksum: None,
                     resume: false,
                     compare_mode,
+                    // Read by the local carrier's resume copy alone, which
+                    // this sink never runs: a record that fails here is
+                    // removed whatever the option.
+                    ignore_existing: false,
                 },
             );
             // otp-9a: applied payload bytes report against the caller's live
@@ -5563,9 +5571,8 @@ async fn destination_session_inner(
                 } else {
                     0
                 };
-                // cr-ecm12-2: what a retry of this run's own incomplete
-                // copies found in their place and kept is a failure of
-                // each such path.
+                // cr-ecm13-1: a file that stood where this run had left an
+                // incomplete copy, and was kept, is a failure of that path.
                 for (path, raw) in std::mem::take(
                     &mut *attribute_repair
                         .kept
@@ -5575,7 +5582,7 @@ async fn destination_session_inner(
                     contained_failures.record_named_failure(
                         path,
                         raw,
-                        crate::remote::transfer::sink::NOT_THIS_RUNS_COPY,
+                        crate::remote::transfer::sink::A_FILE_WHERE_A_COPY_WAS_LEFT,
                     );
                 }
                 // Review cr-jl4fix2-1: each failure, and its left-in-place
@@ -6137,14 +6144,13 @@ enum DiffVerdict {
 struct AttributeRepair {
     enabled: bool,
     repaired: AtomicU64,
-    /// cr-ecm12-2: this session's list is of paths at which the run left
-    /// its own incomplete copy (`FilterSpec.files_from_left`). Under
-    /// `ignore_existing` a file at such a path is replaced only while it
-    /// bears the mark of one.
+    /// cr-ecm12-2, cr-ecm13-1: this session's list is of paths at which
+    /// the run left its own incomplete copy (`FilterSpec.files_from_left`).
+    /// Under `ignore_existing` a file at such a path is kept like any
+    /// other — and, unlike any other, reported.
     left_listed: bool,
-    /// cr-ecm12-2: the entries of such a list whose file was something
-    /// else and was kept — failures of this session, recorded with the
-    /// rest when it ends.
+    /// The entries of such a list at whose path a file stood and was kept
+    /// — failures of this session, recorded with the rest when it ends.
     kept: std::sync::Mutex<Vec<(String, Option<Vec<u8>>)>>,
     /// ls-1: repairs run inside the diff, so their cost is timed here and
     /// subtracted from the enclosing compare span rather than being folded
@@ -6262,32 +6268,27 @@ fn destination_needs(
             .phase_probe
             .record(LocalPhase::CompareStat, started.elapsed());
     }
-    // cr-ecm12-2: `ignore_existing` keeps every file that is there — but
-    // not the incomplete copy a failed write of this run left, which a
-    // retry lists (`files_from_left`). That used to be done with the
-    // option off, and the retry replaced whatever stood at the path by
-    // then: a file someone had put in the copy's place. The copy is now
-    // known by the mark it was left with, and by nothing the retry was
-    // told: a file that bears it is replaced, and any other file there is
-    // kept — and reported, for the run did not copy this path and cannot
-    // say that what stands there is it.
-    let own_unfinished_copy = match target {
-        Some((_, mtime)) if opts.ignore_existing && repair.left_listed => {
-            if mtime != crate::remote::transfer::sink::UNFINISHED_STAMP_SECONDS {
-                repair
-                    .kept
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push((
-                        header.relative_path.clone(),
-                        header.raw_relative_path.clone(),
-                    ));
-                return Ok(NeedVerdict::Skip);
-            }
-            true
-        }
-        _ => false,
-    };
+    // cr-ecm13-1: `ignore_existing` keeps every file that is there, and
+    // that is the whole of it. A path at which a failed write of this run
+    // left its own incomplete copy (a retry lists those,
+    // `files_from_left`) was retried with the option off, and replaced
+    // whatever stood there by then; then by a mark on the copy
+    // (cr-ecm12-2), which a file put in its place could carry too. What
+    // stands at such a path is now never written over: it is kept — and
+    // reported, for the run did not copy this path, and cannot say that
+    // what stands there is the file. A path where nothing stands is
+    // copied to, as any other.
+    if target.is_some() && opts.ignore_existing && repair.left_listed {
+        repair
+            .kept
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((
+                header.relative_path.clone(),
+                header.raw_relative_path.clone(),
+            ));
+        return Ok(NeedVerdict::Skip);
+    }
     // otp-10b-1: a Checksum session hashes the local candidate so a
     // content-equal file SKIPS regardless of mtime (the old pull's
     // `--checksum` behavior, now role-agnostic). Only the same-size
@@ -6309,17 +6310,11 @@ fn destination_needs(
         }
         _ => Vec::new(),
     };
-    let status = if own_unfinished_copy {
-        // An incomplete copy is never the file, whatever a comparison of
-        // sizes or contents would make of it.
-        FileStatus::Modified
-    } else {
-        header_transfer_status(
-            header,
-            target.map(|(size, mtime)| (size, mtime, target_hash.as_slice())),
-            opts,
-        )
-    };
+    let status = header_transfer_status(
+        header,
+        target.map(|(size, mtime)| (size, mtime, target_hash.as_slice())),
+        opts,
+    );
     let metadata = match status {
         FileStatus::Unchanged => {
             // Reached for EVERY file on a converged tree, which is the
@@ -10358,7 +10353,6 @@ mod tests {
 #[cfg(test)]
 mod own_incomplete_copy_tests {
     use super::*;
-    use crate::remote::transfer::sink::UNFINISHED_STAMP_SECONDS;
 
     fn header(name: &str, size: u64) -> FileHeader {
         FileHeader {
@@ -10382,28 +10376,29 @@ mod own_incomplete_copy_tests {
         }
     }
 
-    fn stamp(path: &Path, seconds: i64) {
-        filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(seconds, 0)).unwrap();
-    }
-
-    /// cr-ecm12-2: under `ignore_existing`, a list of the run's own
-    /// incomplete copies has a file replaced only while it bears the mark
-    /// of one. Any other file there is kept and reported; a path with no
-    /// file is copied; and no other list changes what the option does.
+    /// cr-ecm13-1: under `ignore_existing`, at a path where the run left
+    /// its own incomplete copy, NOTHING that stands there is written over
+    /// — not a copy one byte longer than the source, not one of the
+    /// source's own length and time, not one carrying the time cr-ecm12-2
+    /// stamped such copies with. Each is kept and reported. A path with
+    /// nothing there is copied to. Any other list keeps a file and says
+    /// nothing; and without the option the list is not asked.
     #[test]
-    fn a_retry_replaces_only_what_still_bears_the_mark_of_an_incomplete_copy() {
+    fn nothing_is_written_over_where_an_incomplete_copy_was_left() {
         let tmp = tempfile::tempdir().unwrap();
-        // The copy as it was left: one byte longer, and stamped.
-        std::fs::write(tmp.path().join("left.bin"), b"parti\0").unwrap();
-        stamp(&tmp.path().join("left.bin"), UNFINISHED_STAMP_SECONDS);
-        // One the length could not be given to: stamped all the same —
-        // here at the very size and time a comparison would call copied.
-        std::fs::write(tmp.path().join("short.bin"), b"whole").unwrap();
-        stamp(&tmp.path().join("short.bin"), UNFINISHED_STAMP_SECONDS);
-        // A file put in the copy's place, and one written into it.
-        std::fs::write(tmp.path().join("theirs.bin"), b"someone's").unwrap();
-        std::fs::write(tmp.path().join("near.bin"), b"parti\0").unwrap();
-        stamp(&tmp.path().join("near.bin"), UNFINISHED_STAMP_SECONDS + 2);
+        let at = |name: &str, body: &[u8], seconds: i64| {
+            std::fs::write(tmp.path().join(name), body).unwrap();
+            filetime::set_file_mtime(
+                tmp.path().join(name),
+                filetime::FileTime::from_unix_time(seconds, 0),
+            )
+            .unwrap();
+        };
+        at("longer.bin", b"parti\0", 1_600_000_000);
+        at("same.bin", b"whole", 1_700_000_000);
+        at("stamped.bin", b"parti\0", 487_368_674);
+        at("theirs.bin", b"someone's", 1_650_000_000);
+        let existing = ["longer.bin", "same.bin", "stamped.bin", "theirs.bin"];
 
         let ignoring = CompareOptions {
             ignore_existing: true,
@@ -10434,27 +10429,27 @@ mod own_incomplete_copy_tests {
         };
 
         let listed = repair(true);
-        for name in ["left.bin", "short.bin", "gone.bin"] {
-            assert!(
-                matches!(
-                    verdict(name, &ignoring, &listed),
-                    NeedVerdict::Transfer { .. }
-                ),
-                "{name}"
-            );
-        }
-        for name in ["theirs.bin", "near.bin"] {
+        for name in existing {
             assert_eq!(
                 verdict(name, &ignoring, &listed),
                 NeedVerdict::Skip,
                 "{name}"
             );
         }
-        assert_eq!(kept(&listed), ["near.bin", "theirs.bin"]);
+        assert_eq!(kept(&listed), existing);
+        assert!(matches!(
+            verdict("gone.bin", &ignoring, &listed),
+            NeedVerdict::Transfer { .. }
+        ));
+        assert_eq!(
+            kept(&listed),
+            existing,
+            "a path with nothing there is no failure"
+        );
 
         // Any other list: the option keeps every file, and says nothing.
         let unlisted = repair(false);
-        for name in ["left.bin", "short.bin", "theirs.bin", "near.bin"] {
+        for name in existing {
             assert_eq!(
                 verdict(name, &ignoring, &unlisted),
                 NeedVerdict::Skip,
@@ -10466,10 +10461,11 @@ mod own_incomplete_copy_tests {
         // Without the option nothing is kept for being there, and the
         // list is not asked.
         let comparing = CompareOptions::default();
+        let asked = repair(true);
         assert!(matches!(
-            verdict("theirs.bin", &comparing, &listed),
+            verdict("theirs.bin", &comparing, &asked),
             NeedVerdict::Transfer { .. }
         ));
-        assert_eq!(kept(&listed), ["near.bin", "theirs.bin"]);
+        assert!(kept(&asked).is_empty());
     }
 }

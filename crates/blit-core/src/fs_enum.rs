@@ -67,12 +67,11 @@ pub struct FileFilter {
     /// for the source itself is the empty path, and any other entry of it
     /// is a CHILD, which a source that has since become one file is not.
     pub files_from_exact: bool,
-    /// cr-ecm12-2: the list's paths are those at which a failed write of
-    /// this run left its own incomplete copy — a retry's, of an
-    /// `--ignore-existing` run. The end that writes then replaces the
-    /// file at such a path only if it still bears the mark of one
-    /// (`sink::UNFINISHED_STAMP_SECONDS`), and keeps and reports any
-    /// other.
+    /// cr-ecm12-2, cr-ecm13-1: the list's paths are those at which a
+    /// failed write of this run left its own incomplete copy — a retry's,
+    /// of an `--ignore-existing` run. The end that writes copies to such a
+    /// path only if nothing stands there; a file that does is kept, and
+    /// reported.
     pub files_from_left: bool,
     /// EXCLUDE_CASE_MATCHING (D-2026-11-20-1): read every `include_files`
     /// and `exclude_files` pattern ignoring case. Each pattern is widened

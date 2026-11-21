@@ -877,6 +877,7 @@ pub async fn run_local_session(
                 },
                 resume: options.resume,
                 compare_mode,
+                ignore_existing: options.ignore_existing,
             },
         ))
     };

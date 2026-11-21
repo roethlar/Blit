@@ -792,14 +792,16 @@ message FilterSpec {
   // name; a list of exact paths does not: a child that failed is no
   // source, whatever the source has become since.
   bool files_from_exact = 13;
-  // Contract 23 (cr-ecm12-2): the list's paths are those at which a failed
-  // write of this run left its own incomplete copy — the retry of an
-  // `ignore_existing` session. The end that writes replaces the file at
-  // such a path only while it still bears the mark of an incomplete copy
-  // (its modification time, stamped when it was left); any other file
-  // there is kept, and reported as a failure of that path. It was said
-  // with `ignore_existing` off, and the retry replaced whatever stood
-  // there.
+  // Contract 23 (cr-ecm12-2), meaning changed at contract 25
+  // (cr-ecm13-1): the list's paths are those at which a failed write of
+  // this run left its own incomplete copy — the retry of an
+  // `ignore_existing` session. The end that writes copies to such a path
+  // only if NOTHING stands there. A file that does is kept, like any file
+  // under `ignore_existing`, and — unlike any other — reported as a
+  // failure of that path: it may be the incomplete copy. (Contracts 23
+  // and 24 replaced a file there that carried a mark; before them the
+  // retry ran with `ignore_existing` off and replaced whatever stood
+  // there.)
   bool files_from_left = 14;
 }
 

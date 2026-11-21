@@ -479,10 +479,10 @@ pub struct TransferArgs {
     /// (`retry_left`). Never a flag.
     #[arg(skip)]
     pub retry_left_in_place: Option<std::collections::HashSet<PathBuf>>,
-    /// cr-ecm12-2 internal: this pass's `retry_only` paths are those at
-    /// which a failed write of this run left its own incomplete copy. The
-    /// end that writes replaces a file there only while it bears the mark
-    /// of one, and keeps any other. Never a flag.
+    /// cr-ecm12-2, cr-ecm13-1 internal: this pass's `retry_only` paths are
+    /// those at which a failed write of this run left its own incomplete
+    /// copy. The end that writes copies to one only if nothing stands
+    /// there, and keeps and reports a file that does. Never a flag.
     #[arg(skip)]
     pub retry_left: bool,
     /// JOB_LOGS jl-2 internal: this command's run, made once per command

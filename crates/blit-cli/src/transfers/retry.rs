@@ -451,9 +451,9 @@ where
         // exception is --ignore-existing: a path whose failure left this
         // run's own incomplete copy at the destination exists there now,
         // and that copy is not one the user asked to keep — those paths
-        // retry apart, as such (cr-ecm12-2: the end that writes replaces
-        // the file there only while it bears the mark of an incomplete
-        // copy). cr-rework-1: they come from the exact set the
+        // retry apart, as such (cr-ecm13-1: the end that writes copies to
+        // one only if nothing stands there by then, and keeps and
+        // reports a file that does). cr-rework-1: they come from the exact set the
         // destination sends beside the failed paths, never the capped
         // report; if even that set did not fit, the paths it does not
         // name cannot be classified — retried with the flag a leftover is
@@ -586,12 +586,12 @@ async fn wait_before_pass(args: &TransferArgs, _pass: u32) {
 mod tests {
     use super::*;
 
-    /// cr-ecm12-2: whether `--ignore-existing` holds for every file of a
-    /// pass — `false` for the pass of this run's own incomplete copies,
-    /// which says what they are (`retry_left`) and has a file replaced
-    /// only while it bears the mark of one. The option itself is never
-    /// turned off: these passes ran without it, and replaced whatever
-    /// stood at their paths.
+    /// cr-ecm12-2: whether a pass is one of plain `--ignore-existing` —
+    /// `false` for the pass of this run's own incomplete copies, which
+    /// says what they are (`retry_left`) so that a file standing at one
+    /// of them is reported as well as kept (cr-ecm13-1). The option
+    /// itself is never turned off: these passes ran without it, and
+    /// replaced whatever stood at their paths.
     fn keeps_every_file(pass: &TransferArgs) -> bool {
         assert!(pass.ignore_existing, "the option stays on in every pass");
         !pass.retry_left

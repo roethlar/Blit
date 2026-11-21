@@ -962,6 +962,13 @@ pub struct FsSinkConfig {
     /// dropped at the sink layer. The default `SizeMtime` keeps
     /// pre-fix behavior for callers that haven't migrated.
     pub compare_mode: ComparisonMode,
+    /// cr-ecm13-1: the session keeps every file that is at the
+    /// destination (`--ignore-existing`). A write that fails then never
+    /// leaves what it created: a partial kept for a resume would be "a
+    /// file that is there" to every later pass and every later run, and
+    /// telling it from a file someone put in its place is not something a
+    /// retry can do for certain.
+    pub ignore_existing: bool,
 }
 
 impl Default for FsSinkConfig {
@@ -972,6 +979,7 @@ impl Default for FsSinkConfig {
             checksum: None,
             resume: false,
             compare_mode: ComparisonMode::SizeMtime,
+            ignore_existing: false,
         }
     }
 }
@@ -2083,20 +2091,15 @@ fn run_after_copy_fault_hook(_dst: &Path) -> std::io::Result<()> {
 /// asked to keep.
 pub const INCOMPLETE_LEFT_IN_PLACE: &str = "an incomplete copy was left at the destination";
 
-/// cr-ecm12-2: the modification time every incomplete copy is stamped with
-/// when a failed write leaves it at the destination — 1985-06-11T20:11:14Z,
-/// a whole even second, which every filesystem this runs on can hold and
-/// no copy sets. It is how this tool tells its own incomplete copy from
-/// any other file, without having kept anything: a file written to, or put
-/// in its place, has another time. A retry under `--ignore-existing`
-/// replaces a file at a path it left a copy at only while the file still
-/// bears this.
-pub const UNFINISHED_STAMP_SECONDS: i64 = 487_368_674;
-
-/// cr-ecm12-2: why a retry under `--ignore-existing` left a file where a
-/// failed write of the run had left its own incomplete copy.
-pub const NOT_THIS_RUNS_COPY: &str = "the file at the destination is not the incomplete copy \
-     this run left there, and --ignore-existing keeps it";
+/// cr-ecm13-1: what a retry under `--ignore-existing` says of a path at
+/// which the run had left its own incomplete copy, when a file stands
+/// there. It may be that copy, and it may be a file put there since; the
+/// option keeps a file that is there, and nothing a retry can look at
+/// tells the two apart for certain — a mark on the copy (cr-ecm12-2) was
+/// carried to another file with its modification time.
+pub const A_FILE_WHERE_A_COPY_WAS_LEFT: &str = "a file stands where this run left an \
+     incomplete copy, and --ignore-existing keeps it: remove it and retry, or run without \
+     --ignore-existing";
 
 /// What a write that fails after touching its in-place target does with
 /// it (D-2026-09-29-2: "nothing that looks finished is left behind").
@@ -2113,20 +2116,8 @@ enum OnFailure {
 /// Make `file` one byte longer than its source: no compare — size, mtime
 /// or content — can then match it, while a resume still finds every
 /// block it already landed.
-///
-/// cr-ecm12-2: and stamped [`UNFINISHED_STAMP_SECONDS`], after the length
-/// and whether or not the length could be set — a write that failed for
-/// want of room leaves a file it cannot lengthen either, and that file is
-/// this run's incomplete copy all the same. The result is the length's, as
-/// it was: the stamp serves the retry, and a copy without it is one the
-/// retry keeps and reports.
 fn mark_unfinished(file: &std::fs::File, source_size: u64) -> std::io::Result<()> {
-    let sized = file.set_len(source_size.saturating_add(1));
-    let stamp = filetime::FileTime::from_unix_time(UNFINISHED_STAMP_SECONDS, 0);
-    if let Err(error) = filetime::set_file_handle_times(file, None, Some(stamp)) {
-        log::warn!("could not stamp an incomplete copy as unfinished: {error}");
-    }
-    sized
+    file.set_len(source_size.saturating_add(1))
 }
 
 /// cr-win-1: hold a resume partial one byte longer than its source before
@@ -2468,7 +2459,15 @@ fn copy_and_stamp_opened(
         // `resume_copy_from` holds it one byte longer than the source until
         // it completes; a failure after that keeps it marked the same way.
         let created = std::fs::symlink_metadata(dst).is_err();
-        partial.arm(OnFailure::KeepUnfinished { created });
+        // cr-ecm13-1: under `--ignore-existing` a file this write made is
+        // removed when the write fails, as a copy without `--resume`
+        // removes it: nothing is kept that a later pass would have to
+        // tell from somebody's file.
+        partial.arm(if created && config.ignore_existing {
+            OnFailure::Remove
+        } else {
+            OnFailure::KeepUnfinished { created }
+        });
         let outcome = crate::copy::resume_copy_from(src_file, header.size, dst, 0)
             .with_context(|| format!("resume copy {}", header.relative_path))?;
         did_copy = outcome.bytes_transferred > 0;
@@ -3553,6 +3552,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         )
     }
@@ -3788,6 +3788,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         );
 
@@ -3821,6 +3822,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         );
 
@@ -3858,6 +3860,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         );
 
@@ -3895,6 +3898,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         );
 
@@ -3928,6 +3932,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         ));
 
@@ -3968,6 +3973,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         );
 
@@ -4015,6 +4021,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         );
 
@@ -4074,6 +4081,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         ));
 
@@ -4118,6 +4126,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         );
 
@@ -4315,6 +4324,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         );
 
@@ -4372,6 +4382,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         );
 
@@ -4459,6 +4470,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         );
 
@@ -4536,6 +4548,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         );
         let header = make_file_header(rel, 4);
@@ -4610,6 +4623,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         );
 
@@ -4646,6 +4660,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         );
 
@@ -4694,6 +4709,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         );
 
@@ -4754,6 +4770,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         );
 
@@ -4825,6 +4842,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         );
 
@@ -4900,6 +4918,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         )
         .with_byte_progress(sink_progress);
@@ -4948,6 +4967,7 @@ mod tests {
                 checksum: None,
                 resume: false,
                 compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
             },
         )
         .with_byte_progress(sink_progress);
@@ -6804,6 +6824,51 @@ mod cr_win_1_tests {
         }
     }
 
+    /// cr-ecm13-1: under `--ignore-existing` the local route's resume copy
+    /// keeps no partial it made itself — the file is removed, and said to
+    /// be — so a retry finds nothing there and copies. A file that was
+    /// there before is kept unfinished as ever (such a session never
+    /// writes one: it is skipped before the sink is asked).
+    #[tokio::test]
+    async fn a_local_resume_that_keeps_existing_files_leaves_no_partial_of_its_own() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("old.bin"), b"0123456789").unwrap();
+        std::fs::write(src.join("new.bin"), b"0123456789").unwrap();
+        std::fs::write(dst.join("old.bin"), b"abcdefghij").unwrap();
+        let _fault = TailFaultGuard::install(&dst);
+        let sink = FsTransferSink::new(
+            src.clone(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ignore_existing: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let made = sink
+            .write_payload(PreparedPayload::File(make_file_header("new.bin", 10)))
+            .await
+            .unwrap();
+        assert_eq!(made.files_failed_total, 1, "{made:?}");
+        assert!(!dst.join("new.bin").exists(), "nothing of it stays");
+        assert!(made.removed_incomplete().contains("new.bin"), "{made:?}");
+        assert!(
+            !made.failures[0].reason.contains(INCOMPLETE_LEFT_IN_PLACE),
+            "{:?}",
+            made.failures
+        );
+        let there = sink
+            .write_payload(PreparedPayload::File(make_file_header("old.bin", 10)))
+            .await
+            .unwrap();
+        assert_eq!(there.files_failed_total, 1, "{there:?}");
+        assert_eq!(std::fs::metadata(dst.join("old.bin")).unwrap().len(), 11);
+    }
+
     /// A resume completion whose tail fails keeps the partial for the next
     /// run — never at the source's size, which its truncation just gave it.
     #[tokio::test]
@@ -6962,49 +7027,5 @@ mod cr_win_1_tests {
             outcome.failures
         );
         assert_eq!(std::fs::read(dst.join("a.bin/inner.txt")).unwrap(), b"kept");
-    }
-}
-
-#[cfg(test)]
-mod unfinished_stamp_tests {
-    use super::*;
-
-    fn mtime_seconds(path: &Path) -> i64 {
-        filetime::FileTime::from_last_modification_time(&std::fs::metadata(path).unwrap())
-            .unix_seconds()
-    }
-
-    /// cr-ecm12-2: an incomplete copy that stays at the destination bears
-    /// the stamp, however it came to stay — kept for a resume, or marked
-    /// through the write's own handle — and nothing else does.
-    #[test]
-    fn an_incomplete_copy_left_in_place_is_stamped_as_one() {
-        let tmp = tempfile::tempdir().unwrap();
-        let kept = tmp.path().join("kept.bin");
-        std::fs::write(&kept, b"par").unwrap();
-        assert_ne!(mtime_seconds(&kept), UNFINISHED_STAMP_SECONDS);
-        let settled =
-            settle_failed_target(&kept, None, 10, OnFailure::KeepUnfinished { created: true });
-        assert!(settled
-            .note
-            .is_some_and(|note| note.contains(INCOMPLETE_LEFT_IN_PLACE)));
-        assert_eq!(std::fs::metadata(&kept).unwrap().len(), 11);
-        assert_eq!(mtime_seconds(&kept), UNFINISHED_STAMP_SECONDS);
-
-        // Through a handle, as a write that cannot remove its target does.
-        let held = tmp.path().join("held.bin");
-        let handle = std::fs::File::create(&held).unwrap();
-        mark_unfinished(&handle, 4).unwrap();
-        drop(handle);
-        assert_eq!(std::fs::metadata(&held).unwrap().len(), 5);
-        assert_eq!(mtime_seconds(&held), UNFINISHED_STAMP_SECONDS);
-
-        // Anything written to it afterwards is no longer that copy.
-        std::fs::write(&held, b"mine").unwrap();
-        assert_ne!(mtime_seconds(&held), UNFINISHED_STAMP_SECONDS);
-
-        // The stamp is a whole even second: a filesystem that keeps times
-        // to two seconds holds it exactly.
-        assert_eq!(UNFINISHED_STAMP_SECONDS % 2, 0);
     }
 }

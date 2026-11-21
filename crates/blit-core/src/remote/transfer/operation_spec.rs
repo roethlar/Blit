@@ -94,7 +94,11 @@ use crate::generated::{
 ///     daemon that does not know the field reads the retry of an
 ///     `ignore_existing` run's own incomplete copies as any other list,
 ///     skips each as a file to keep, and reports the path copied.
-pub const SUPPORTED_SPEC_VERSION: u32 = 11;
+///   - 12: `FilterSpec.files_from_left` means something else (cr-ecm13-1):
+///     nothing that stands at a listed path is written over. A daemon of
+///     version 11 would replace a file there that carries the mark that
+///     version stamped on an incomplete copy.
+pub const SUPPORTED_SPEC_VERSION: u32 = 12;
 
 /// Normalized, internal-friendly view of a transfer operation. Folds
 /// proto-`Unspecified` into concrete defaults, converts `FilterSpec`
@@ -1048,9 +1052,10 @@ mod tests {
     /// cr-ecm12-2: a request whose list is of this run's own incomplete
     /// copies carries a version a daemon of spec version 10 refuses — that
     /// daemon would skip each as a file to keep — and what the list is
-    /// reaches the filter.
+    /// reaches the filter. cr-ecm13-1: and one a daemon of version 11
+    /// refuses, which would replace a file at such a path by a mark.
     #[test]
-    fn a_request_for_the_runs_own_incomplete_copies_is_version_11_or_later() {
+    fn a_request_for_the_runs_own_incomplete_copies_is_version_12_or_later() {
         for left in [true, false] {
             let mut spec = empty_spec();
             spec.filter = Some(ProtoFilterSpec {
@@ -1063,15 +1068,22 @@ mod tests {
             let accepted = NormalizedTransferOperation::from_spec(spec).expect("this build's own");
             assert_eq!(accepted.filter.expect("a filter").files_from_left, left);
         }
-        let mut spec = empty_spec();
-        spec.spec_version = 10;
-        let error = NormalizedTransferOperation::from_spec(spec).unwrap_err();
-        assert!(error.to_string().contains("spec_version 10"), "{error:#}");
+        for earlier in [10, 11] {
+            let mut spec = empty_spec();
+            spec.spec_version = earlier;
+            let error = NormalizedTransferOperation::from_spec(spec).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("spec_version {earlier}")),
+                "{error:#}"
+            );
+        }
         // Read at run time: the number is what a daemon is told.
         let version = std::hint::black_box(SUPPORTED_SPEC_VERSION);
         assert!(
-            version >= 11,
-            "a request for the run's own incomplete copies is version 11 or later, not {version}"
+            version >= 12,
+            "a request for the run's own incomplete copies is version 12 or later, not {version}"
         );
     }
 
