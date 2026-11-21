@@ -1900,19 +1900,31 @@ async fn source_recv_half(
 }
 
 /// The paths a destination's summary says did not land, as a move's
-/// account is told of them (cr-uv4-1): each failed path's text, and the
-/// exact bytes of each that is not text. `None` when the summary's list
-/// is not whole — there is then no saying what landed.
+/// account is told of them (cr-uv4-1): ONE identity for each failed path
+/// (cr-uv5-4) — the exact bytes the summary gives at that path's place
+/// when its name is not text, or is a name refused for sharing its text
+/// with another; its text otherwise. Each was struck by its text AND its
+/// bytes: with `dup` and the byte `FF` failed and `dup` and U+FFFD
+/// landed, the landed file — whose name IS that text — was struck too,
+/// and stayed at the source.
+///
+/// `None` when the summary cannot say what landed: its list is cut short,
+/// or it names fewer paths than it counts failures — two names of one
+/// text that both failed are one entry in it, with one of their
+/// identities, and the other would be taken for landed.
 fn not_landed(summary: &TransferSummary) -> Option<Vec<Vec<u8>>> {
-    if summary.failed_paths_truncated {
+    if summary.failed_paths_truncated || summary.files_failed != summary.failed_paths.len() as u64 {
         return None;
     }
     Some(
         summary
             .failed_paths
             .iter()
-            .map(|path| path.clone().into_bytes())
-            .chain(summary.failed_paths_raw.iter().cloned())
+            .enumerate()
+            .map(|(at, text)| match summary.failed_paths_raw.get(at) {
+                Some(raw) if !raw.is_empty() => raw.clone(),
+                _ => text.clone().into_bytes(),
+            })
             .collect(),
     )
 }
@@ -10914,30 +10926,68 @@ mod own_incomplete_copy_tests {
         assert_eq!(sole.len(), 1);
     }
 
-    /// cr-uv4-1: what a destination's summary says did not land — every
-    /// failed path's text and the bytes of each that is not text — and
-    /// nothing at all when its list is not whole.
+    /// cr-uv4-1, cr-uv5-4: what a destination's summary says did not land
+    /// — ONE identity for each failed path: its bytes where the summary
+    /// gives them at its place, its text otherwise — and nothing at all
+    /// when the summary cannot say: its list cut short, or shorter than
+    /// its count of failures.
     #[test]
-    fn what_did_not_land_is_the_summarys_whole_list_or_nothing() {
+    fn what_did_not_land_is_one_identity_a_failed_path_or_nothing() {
+        // `a.txt` failed; and the name that is not text, shown as the
+        // text of ANOTHER file, which landed.
         let summary = TransferSummary {
             files_failed: 2,
-            failed_paths: vec!["a.txt".into(), "bad\u{fffd}.bin".into()],
-            failed_paths_raw: vec![b"bad\xff.bin".to_vec()],
+            failed_paths: vec!["a.txt".into(), "dup\u{fffd}".into()],
+            failed_paths_raw: vec![Vec::new(), b"dup\xff".to_vec()],
             ..TransferSummary::default()
         };
         assert_eq!(
             not_landed(&summary),
-            Some(vec![
-                b"a.txt".to_vec(),
-                "bad\u{fffd}.bin".as_bytes().to_vec(),
-                b"bad\xff.bin".to_vec(),
-            ])
+            Some(vec![b"a.txt".to_vec(), b"dup\xff".to_vec()]),
+            "the file whose name IS that text is not struck"
         );
+        // The other way round: the name that is text was the one refused,
+        // and is given by its own bytes.
+        let refused = TransferSummary {
+            files_failed: 1,
+            failed_paths: vec!["dup\u{fffd}".into()],
+            failed_paths_raw: vec!["dup\u{fffd}".as_bytes().to_vec()],
+            ..TransferSummary::default()
+        };
+        assert_eq!(
+            not_landed(&refused),
+            Some(vec!["dup\u{fffd}".as_bytes().to_vec()])
+        );
+        // Every name text: no list of bytes at all.
+        let plain = TransferSummary {
+            files_failed: 1,
+            failed_paths: vec!["a.txt".into()],
+            ..TransferSummary::default()
+        };
+        assert_eq!(not_landed(&plain), Some(vec![b"a.txt".to_vec()]));
         assert_eq!(not_landed(&TransferSummary::default()), Some(Vec::new()));
+        // A list that is not whole says nothing.
         assert_eq!(
             not_landed(&TransferSummary {
                 failed_paths_truncated: true,
-                ..summary
+                ..summary.clone()
+            }),
+            None
+        );
+        // Two names of one text that both failed are one entry: the
+        // count says two, and the list cannot say which of them it is.
+        assert_eq!(
+            not_landed(&TransferSummary {
+                files_failed: 2,
+                ..refused
+            }),
+            None
+        );
+        // Failures counted and not named at all.
+        assert_eq!(
+            not_landed(&TransferSummary {
+                files_failed: 3,
+                ..TransferSummary::default()
             }),
             None
         );

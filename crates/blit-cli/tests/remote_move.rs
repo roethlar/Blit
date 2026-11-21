@@ -629,3 +629,57 @@ fn a_move_of_many_files_removes_every_one_it_delivered() {
         "nor the directories it emptied\n{said}"
     );
 }
+
+/// cr-uv5-4: a move of two names of one text removes both once both have
+/// landed. A source holding `dup` and the byte `FF`, and `dup` and
+/// U+FFFD: the end that writes takes the first and refuses the second,
+/// and the retry lands it. The first session's account struck what was
+/// refused by its text AND its bytes — the file that had LANDED bears
+/// that text as its name, was struck with it, and stayed at the source:
+/// the reviewer saw `dup` and U+FFFD left behind, and exit 1.
+#[cfg(unix)]
+#[test]
+fn a_move_of_two_names_of_one_text_removes_both() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let ctx = TestContext::new();
+    let tree = ctx.module_dir.join("tree");
+    fs::create_dir_all(&tree).unwrap();
+    let raw = OsStr::from_bytes(b"dup\xff");
+    if fs::write(tree.join(raw), b"named by a byte").is_err() {
+        eprintln!("this filesystem refuses a name that is not text: nothing to tell apart");
+        return;
+    }
+    fs::write(tree.join("dup\u{fffd}"), b"named by the character").unwrap();
+    fs::write(tree.join("plain.txt"), b"beside them").unwrap();
+    let landed = ctx.workspace.join("landed");
+    let source = format!("127.0.0.1:{}:/test/tree/", ctx.daemon_port);
+    let (code, said) = blit(
+        &ctx,
+        &[
+            "move",
+            "-y",
+            "--retries",
+            "1",
+            "--diagnostics-no-retry-wait",
+            &source,
+            &format!("{}/", landed.display()),
+        ],
+    );
+    assert_eq!(code, Some(0), "{said}");
+    assert_eq!(
+        fs::read(landed.join(raw)).unwrap(),
+        b"named by a byte",
+        "{said}"
+    );
+    assert_eq!(
+        fs::read(landed.join("dup\u{fffd}")).unwrap(),
+        b"named by the character",
+        "{said}"
+    );
+    let left: Vec<_> = fs::read_dir(&tree)
+        .map(|entries| entries.flatten().map(|entry| entry.file_name()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "left at the source: {left:?}\n{said}");
+}
