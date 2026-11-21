@@ -1,9 +1,9 @@
 # cr-ecm7-3: A pattern the line only counted could be one `--ignore-case` narrows
 
 **Severity**: MEDIUM — the line described what the option adds for one pattern and said nothing of a later pattern that, with the option, stops protecting names; a mirror run with it deleted one
-**Status**: Fixed — awaiting review
+**Status**: Verified — `exclude-case-r8` (Codex openreview, 2026-11-21) reviewed `3bc3ee47..f4203c31`, which holds this fix, with `guard_confirmed: true`, and required nothing further on which pattern is shown (it found the narrowing itself attributed to the wrong class in a pattern of several alternatives — cr-ecm8-2, on the check cr-ecm7-4 added)
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm7-3`)
+**Commit**: `cce1f877`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r7` over `3bc3ee47..cbab0c39` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r7.codex.md`.
 
 ## Evidence

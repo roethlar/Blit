@@ -1,9 +1,9 @@
 # cr-ecm7-4: The line could show a pattern whose matches do not change
 
 **Severity**: MEDIUM — the line offered, as names the option "would also match", names the pattern matched already, and passed over the pattern whose protection does change
-**Status**: Fixed — awaiting review
+**Status**: Reviewed, found incomplete — `exclude-case-r8` (Codex openreview, 2026-11-21) reviewed `3bc3ee47..f4203c31`, which holds this fix, with `guard_confirmed: true`. What it shows is now borne out; what it LEAVES OUT was not: a pattern was dropped from the line whenever the names tried showed no difference, and for `{Σ,σ}` and `{[a-c],A,B}` a difference exists that they did not reach (`ς`, `C`); and a narrowing was credited to the first negated class when another alternative's class was the one. The remaining work is cr-ecm8-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm7-4`)
+**Commit**: `81e68509`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r7` over `3bc3ee47..cbab0c39` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r7.codex.md`.
 
 ## Evidence

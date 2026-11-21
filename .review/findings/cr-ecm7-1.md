@@ -1,9 +1,9 @@
 # cr-ecm7-1: A `--files-from` name went on the wire with the sender's separators
 
 **Severity**: HIGH — a list read on Windows reached a Linux peer naming other files than it named; under the name-list deletion rule the peer selected an unrelated file for deletion
-**Status**: Fixed — awaiting review
+**Status**: Verified — `exclude-case-r8` (Codex openreview, 2026-11-21) reviewed `3bc3ee47..f4203c31`, which holds this fix, with `guard_confirmed: true`, and required nothing further on the encoding or its versions (it found one more kind of line that must travel apart: a line holding a NUL was sent among the names, and the receiver refused the whole request — cr-ecm8-3)
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm7-1`)
+**Commit**: `5378b82b`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r7` over `3bc3ee47..cbab0c39` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r7.codex.md`.
 
 ## Evidence
