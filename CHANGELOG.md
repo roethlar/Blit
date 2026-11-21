@@ -182,6 +182,14 @@ part, and a job you can list, read, re-run and retry.
   success on two different files, and with an exclude naming the file it
   compared what `copy` left out. `copy` with the file named in
   `--files-from` copied it and then exited 2 reporting it missing.
+- A single-file copy whose file fails and is retried (`--retries`) is
+  retried: the retry looked for it under an empty name, sent nothing,
+  reported `source: missing at retry` and exited 2 with the file there
+  and its destination free. `blit jobs retry` of such a run likewise.
+- `check` of a single file against a destination of another name
+  compares the two. With the source named in `--files-from`, or a
+  pattern naming either file, it looked for one file's name on the
+  other side and reported the copy "Missing on destination".
 - An `--exclude` reported as unable to match anything (an absolute path
   outside the source, or any absolute path when the source is on a
   daemon) is no longer part of the filter or sent to the daemon. It was

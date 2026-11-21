@@ -303,7 +303,12 @@ pub(crate) async fn job_to_retry(target: &str) -> Result<Option<JobToRun>> {
             }
         }
         let (names, raw_names) = retry_names(failed.iter());
-        args.retry_only = Some(names);
+        // cr-ecm10-3: in the names a list holds — a source that is one
+        // file failed under the empty path, and is listed by its name.
+        args.retry_only = Some(crate::transfers::retry::named_for_a_list(
+            names,
+            &args.source,
+        ));
         args.retry_only_raw = Some(raw_names);
         "copy"
     };

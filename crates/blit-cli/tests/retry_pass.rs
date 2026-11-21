@@ -162,6 +162,68 @@ fn a_file_freed_during_the_wait_lands_on_the_retry_pass() {
     assert_eq!(counter_lines(&counters, "retry_wait_seconds"), vec![4]);
 }
 
+/// cr-ecm10-3: a source that is ONE FILE, blocked and then freed, lands
+/// on the retry — with the file named in `--files-from` and without. The
+/// retry was handed the empty path its failure is recorded under; a list
+/// reads that as a line naming nothing, so the pass sent nothing, said
+/// `source: missing at retry`, and exited 2 with the file there and its
+/// destination free.
+#[test]
+fn a_single_file_freed_during_the_wait_lands_on_the_retry_pass() {
+    for listed in [false, true] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let src = temp.path().join("Report.txt");
+        fs::write(&src, b"lands on retry").expect("write the source");
+        // Copied INTO `out/`, where a directory stands at the file's place.
+        let out = temp.path().join("out");
+        let dst = out.join("Report.txt");
+        fs::create_dir_all(&dst).expect("block the destination path");
+        let list = temp.path().join("list.txt");
+        fs::write(&list, "Report.txt\n").expect("write the list");
+        let counters = temp.path().join("counters.txt");
+
+        let mut cmd = cli_command();
+        cmd.arg("--diagnostics-counter-file").arg(&counters);
+        cmd.args(["copy", "--yes", "--retries", "1", "--retry-wait", "4"]);
+        if listed {
+            cmd.arg("--files-from").arg(&list);
+        }
+        cmd.arg(&src).arg(format!("{}/", out.display()));
+        let child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn blit");
+        wait_for_counter(&counters, "retry_wait_seconds", Duration::from_secs(60));
+        fs::remove_dir_all(&dst).expect("free the blocked path");
+        let output = finish(child);
+        let (stdout, stderr) = (stdout_of(&output), stderr_of(&output));
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "listed {listed}: the retry landed the file\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert_eq!(
+            fs::read(&dst).expect("landed on retry"),
+            b"lands on retry",
+            "listed {listed}"
+        );
+        assert!(
+            !stdout.contains("did not land") && !stdout.contains("missing at retry"),
+            "listed {listed}: no failure after a successful retry\n{stdout}"
+        );
+        assert!(
+            stderr.contains("retrying 1 file(s) (pass 1 of 1)"),
+            "listed {listed}: the pass is announced\n{stderr}"
+        );
+        assert_eq!(
+            counter_lines(&counters, "retry_pass"),
+            vec![1],
+            "listed {listed}"
+        );
+    }
+}
+
 /// A20 (b): a file that fails on every pass is reported once, marked
 /// `(retried)`, after exactly `--retries` passes; exit 2.
 #[test]
