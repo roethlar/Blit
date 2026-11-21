@@ -46,9 +46,24 @@ pub const TICKET_BYTES: usize = 16;
 /// well inside it.
 const KEPT_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// The most files all kept accounts hold between them. Past it the oldest
-/// account goes, and a removal that presents its ticket is refused.
-const MOST_FILES_KEPT: usize = 64 * 1024 * 1024;
+/// What a process keeps of moves, at most (cr-uv4-5).
+#[derive(Debug, Clone, Copy)]
+struct Bounds {
+    /// The files all kept accounts hold between them. Past it the oldest
+    /// account goes, and a removal that presents its ticket is refused.
+    /// An account that by itself holds more is not kept at all.
+    files: usize,
+    /// The accounts kept, however few files each holds: a ticket costs
+    /// something even for a session that sent nothing.
+    accounts: usize,
+}
+
+/// 64 million files — two gibibytes of digests while their sessions are
+/// open, one once they have ended — in at most 4,096 accounts.
+const BOUNDS: Bounds = Bounds {
+    files: 64 * 1024 * 1024,
+    accounts: 4096,
+};
 
 /// A file as it stood when it was looked at: what a removal must find
 /// again, unchanged, to take it.
@@ -211,6 +226,8 @@ impl State {
 struct Kept {
     state: State,
     since: Instant,
+    /// The order accounts were kept in: the least is the oldest.
+    order: u64,
 }
 
 fn kept() -> &'static Mutex<HashMap<[u8; TICKET_BYTES], Kept>> {
@@ -248,33 +265,64 @@ fn new_ticket() -> [u8; TICKET_BYTES] {
     ticket
 }
 
-/// Keep a session's account, and give the ticket that asks for it. It
-/// answers nothing until it is [`confirm`]ed. Accounts kept too long go
-/// first, then the oldest while there are more files held than
-/// [`MOST_FILES_KEPT`].
+/// Keep a session's account, and give the ticket that asks for it — or
+/// no ticket (an empty one) for an account that by itself holds more
+/// files than this process keeps: the move that asked for it then removes
+/// nothing, and says that it was given no account. A kept account answers
+/// nothing until it is [`confirm`]ed.
 pub fn keep(account: Account) -> Vec<u8> {
     let mut kept = kept()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match keep_within(&mut kept, account, BOUNDS) {
+        Some(ticket) => ticket.to_vec(),
+        None => Vec::new(),
+    }
+}
+
+/// [`keep`], among `kept` and within `bounds` (cr-uv4-5). An account
+/// that is too large by itself is refused BEFORE anything is made room
+/// for it: it used to push every older account out and then be kept
+/// whole. Otherwise accounts kept too long go first, then the oldest
+/// while there would be more files or more accounts than the bounds
+/// allow.
+fn keep_within(
+    kept: &mut HashMap<[u8; TICKET_BYTES], Kept>,
+    account: Account,
+    bounds: Bounds,
+) -> Option<[u8; TICKET_BYTES]> {
+    if account.len() > bounds.files {
+        log::warn!(
+            "a move's account of {} files is more than this daemon keeps ({}): no ticket is \
+             given for it, and the move will remove nothing",
+            account.len(),
+            bounds.files
+        );
+        return None;
+    }
     kept.retain(|_, held| held.since.elapsed() < KEPT_FOR);
     let mut files: usize = kept.values().map(|held| held.state.len()).sum();
-    while files + account.len() > MOST_FILES_KEPT && !kept.is_empty() {
+    while !kept.is_empty()
+        && (files + account.len() > bounds.files || kept.len() >= bounds.accounts)
+    {
         let oldest = *kept
             .iter()
-            .min_by_key(|(_, held)| held.since)
+            .min_by_key(|(_, held)| held.order)
             .map(|(ticket, _)| ticket)
             .expect("not empty");
         files -= kept.remove(&oldest).map_or(0, |held| held.state.len());
     }
+    static ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let ticket = new_ticket();
     kept.insert(
         ticket,
         Kept {
             state: State::Open(account),
             since: Instant::now(),
+            order: ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         },
     );
-    ticket.to_vec()
+    Some(ticket)
 }
 
 /// The session the account under `ticket` was written in has ended well,
@@ -594,6 +642,56 @@ mod tests {
             assert_eq!(put_back.mtime_nanos, first.mtime_nanos);
             assert_eq!(put_back.inode, first.inode);
             assert_ne!(put_back.ctime_nanos, first.ctime_nanos);
+        }
+    }
+
+    /// cr-uv4-5: what is kept of moves stays within its bounds. An
+    /// account that by itself holds more files than may be kept gets no
+    /// ticket and pushes nothing out — it used to push every older
+    /// account out and be kept whole. Otherwise the oldest accounts make
+    /// room, for the files and for the number of accounts alike, and a
+    /// session still open counts like any other.
+    #[test]
+    fn what_is_kept_of_moves_stays_within_its_bounds() {
+        let bounds = Bounds {
+            files: 10,
+            accounts: 3,
+        };
+        let of = |files: usize| {
+            let mut account = Account::of(Path::new("/srv/m/src"));
+            for at in 0..files {
+                account.record(format!("f{at}").as_bytes(), &version(1, at as i128));
+            }
+            account
+        };
+        let mut kept: HashMap<[u8; TICKET_BYTES], Kept> = HashMap::new();
+        let first = keep_within(&mut kept, of(4), bounds).expect("kept");
+        let second = keep_within(&mut kept, of(4), bounds).expect("kept");
+        // One account over the bound by itself: no ticket, and both
+        // older accounts are still there.
+        assert!(keep_within(&mut kept, of(11), bounds).is_none());
+        assert_eq!(kept.len(), 2);
+        assert!(kept.contains_key(&first) && kept.contains_key(&second));
+        // One that fits only without the oldest: the oldest goes.
+        let third = keep_within(&mut kept, of(5), bounds).expect("kept");
+        assert!(!kept.contains_key(&first), "the oldest made room");
+        assert!(kept.contains_key(&second) && kept.contains_key(&third));
+        let held: usize = kept.values().map(|held| held.state.len()).sum();
+        assert_eq!(held, 9);
+        // One the size of the bound itself is kept, alone.
+        let whole = keep_within(&mut kept, of(10), bounds).expect("kept");
+        assert_eq!(kept.len(), 1);
+        assert!(kept.contains_key(&whole));
+
+        // The number of accounts is bounded too, whatever they hold: a
+        // session that sent nothing has a ticket all the same.
+        let mut kept: HashMap<[u8; TICKET_BYTES], Kept> = HashMap::new();
+        let tickets: Vec<_> = (0..5)
+            .map(|_| keep_within(&mut kept, of(0), bounds).expect("kept"))
+            .collect();
+        assert_eq!(kept.len(), 3);
+        for (at, ticket) in tickets.iter().enumerate() {
+            assert_eq!(kept.contains_key(ticket), at >= 2, "the {at}th");
         }
     }
 }
