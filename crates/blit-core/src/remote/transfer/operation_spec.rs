@@ -61,7 +61,12 @@ use crate::generated::{
 ///     under version 4. A version-4 daemon discards it, reads a list
 ///     that holds no name as no list, and its mirror deletes what the
 ///     list kept out of scope.
-pub const SUPPORTED_SPEC_VERSION: u32 = 5;
+///   - 6: no new field — the destination's deletion rule under a name
+///     list changed (cr-ecm5-5, cr-ecm6-3): a directory the list does not
+///     name is no longer a candidate. A version-5 daemon, handed the same
+///     request, still removes such a directory when it is empty; the
+///     request names the version of the rule it expects.
+pub const SUPPORTED_SPEC_VERSION: u32 = 6;
 
 /// Normalized, internal-friendly view of a transfer operation. Folds
 /// proto-`Unspecified` into concrete defaults, converts `FilterSpec`
@@ -797,6 +802,30 @@ mod tests {
         assert!(
             version >= 5,
             "a spec that carries the empty-list marker is version 5 or later, not {version}"
+        );
+    }
+
+    /// cr-ecm6-3: a request whose mirror is scoped by a name list is
+    /// answered by the rule of spec version 6 — a directory the list does
+    /// not name is never deleted — and a daemon of version 5, which plans
+    /// otherwise, is not asked: it refuses the version, and this build
+    /// refuses a version-5 request in turn.
+    #[test]
+    fn a_request_under_the_name_list_deletion_rule_is_version_6_or_later() {
+        let mut spec = empty_spec();
+        spec.filter = Some(ProtoFilterSpec {
+            files_from_set: true,
+            ..ProtoFilterSpec::default()
+        });
+        NormalizedTransferOperation::from_spec(spec.clone()).expect("this build's own version");
+        spec.spec_version = 5;
+        let error = NormalizedTransferOperation::from_spec(spec).unwrap_err();
+        assert!(error.to_string().contains("spec_version 5"), "{error:#}");
+        // Read at run time: the number is what a daemon is told.
+        let version = std::hint::black_box(SUPPORTED_SPEC_VERSION);
+        assert!(
+            version >= 6,
+            "a request under the name-list deletion rule is version 6 or later, not {version}"
         );
     }
 

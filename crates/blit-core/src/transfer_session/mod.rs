@@ -124,7 +124,15 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// the reasoning that no release carried that contract; a daemon built
 /// from a contract-9 revision already published on the development branch
 /// accepted this side and deleted a destination-only file.
-pub const CONTRACT_VERSION: u32 = 10;
+/// v11: no new field — a changed RULE (cr-ecm5-5, cr-ecm6-3). Under a list
+/// of exact names the DESTINATION no longer takes a directory the list
+/// does not name for a deletion candidate. Which end plans a mirror's
+/// deletions depends on the route, so two builds that plan them
+/// differently give one command two results: a contract-10 destination,
+/// handed an empty list by this build, still removed a destination-only
+/// empty directory. A rule that decides what is deleted is part of the
+/// contract whether or not a field carries it.
+pub const CONTRACT_VERSION: u32 = 11;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames
@@ -6841,6 +6849,22 @@ mod tests {
         assert!(
             contract >= 10,
             "a wire that carries the empty-list marker is contract 10 or later, not {contract}"
+        );
+    }
+
+    /// cr-ecm6-3: the rule that a directory a name list does not name is
+    /// never deleted (cr-ecm5-5) is the DESTINATION's, and a destination
+    /// of contract 10 does not follow it. A peer that would plan other
+    /// deletions for the same request is refused at HELLO: the contract
+    /// is 11 or later.
+    #[test]
+    fn the_name_list_deletion_rule_holds_only_under_contract_11_or_later() {
+        // Read at run time: the number is what a peer is told at HELLO.
+        let contract = std::hint::black_box(CONTRACT_VERSION);
+        assert!(
+            contract >= 11,
+            "a peer that plans deletions under a name list by this rule is contract 11 or \
+             later, not {contract}"
         );
     }
 

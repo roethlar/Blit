@@ -2,8 +2,10 @@
 
 **Status**: Active (contract; the session is the ONLY remote transfer
 path since cutover, otp-10c-2)
-**Contract version**: 10 (a list of exact names in force though it
-holds no name, `FilterSpec.files_from_set`; v9 = the case mode in the
+**Contract version**: 11 (under a list of exact names a mirror deletes
+no directory the list does not name — a rule, no field; v10 = a list of
+exact names in force though it holds no name,
+`FilterSpec.files_from_set`; v9 = the case mode in the
 open's filter, `FilterSpec.ignore_case`; v8 = `ManifestPruned`, the paths a filtered
 mirror's source pruned; v7 = source-side per-file containment, run identity,
 exact failure and leftover sets, raw name bytes; v6 = `TransferSummary`
@@ -203,6 +205,14 @@ field set and both lists empty, nothing passes. The field has a contract
 of its own because a contract-9 peer discards it: the request that names a
 daemon-to-daemon transfer carries it under spec version 5 for the same
 reason.
+
+Contract v11 changes a rule and no field: with a list of exact names in
+force (`files_from_set`), the DESTINATION's delete pass takes a directory
+for a candidate only when the list names it. Before, every directory its
+walk admitted was one, and an empty directory nobody listed was removed.
+The rule has a contract (and spec version 6) of its own because the end
+that plans the deletions depends on the route: two builds that plan them
+differently would give one command two results.
 
 ## Frame set and field numbers
 
