@@ -345,8 +345,8 @@ async fn run_command(
 
 /// The parts a command runs as: itself, or — a `jobs retry` of an
 /// `--ignore-existing` job whose failed writes left this run's own
-/// incomplete copies (review cr-jl4-1) — those paths with the flag off,
-/// then the rest with it, as the in-command retry passes split them.
+/// incomplete copies (review cr-jl4-1) — those paths apart, as such
+/// (cr-ecm12-2), then the rest, as the in-command retry passes split them.
 fn retry_parts(args: &TransferArgs) -> Vec<TransferArgs> {
     use std::collections::HashSet;
     let (Some(left), Some(all)) = (&args.retry_left_in_place, &args.retry_only) else {
@@ -361,7 +361,8 @@ fn retry_parts(args: &TransferArgs) -> Vec<TransferArgs> {
     let mut own = args.clone();
     own.retry_only = Some(left.clone());
     own.retry_only_raw = Some(left_raw.clone());
-    own.ignore_existing = false;
+    // cr-ecm12-2: said to be this run's own copies, with the option on.
+    own.retry_left = true;
     own.retry_left_in_place = None;
     own.retry_left_in_place_raw = None;
     let rest: HashSet<std::path::PathBuf> = all.difference(left).cloned().collect();
@@ -469,6 +470,7 @@ mod retry_parts_tests {
                 PathBuf::from("own.txt"),
                 PathBuf::from("rest.txt"),
             ])),
+            retry_left: false,
             retry_only_raw: Some(HashSet::from([b"own\xff".to_vec(), b"rest\xff".to_vec()])),
             retry_left_in_place: Some(HashSet::from([PathBuf::from("own.txt")])),
             retry_left_in_place_raw: Some(HashSet::from([b"own\xff".to_vec()])),
@@ -476,7 +478,8 @@ mod retry_parts_tests {
         };
         let parts = retry_parts(&args);
         assert_eq!(parts.len(), 2);
-        assert!(!parts[0].ignore_existing);
+        // cr-ecm12-2: the option stays on; the part says what its paths are.
+        assert!(parts[0].ignore_existing && parts[0].retry_left);
         assert_eq!(
             parts[0].retry_only,
             Some(HashSet::from([PathBuf::from("own.txt")]))
@@ -485,7 +488,7 @@ mod retry_parts_tests {
             parts[0].retry_only_raw,
             Some(HashSet::from([b"own\xff".to_vec()]))
         );
-        assert!(parts[1].ignore_existing);
+        assert!(parts[1].ignore_existing && !parts[1].retry_left);
         assert_eq!(
             parts[1].retry_only,
             Some(HashSet::from([PathBuf::from("rest.txt")]))

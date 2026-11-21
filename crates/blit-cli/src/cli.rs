@@ -475,10 +475,16 @@ pub struct TransferArgs {
     pub retry_left_in_place_raw: Option<std::collections::HashSet<Vec<u8>>>,
     /// JOB_LOGS review cr-jl4-1 internal: the paths of a `jobs retry` set
     /// whose failed write left this run's own incomplete copy; under
-    /// `--ignore-existing` they are retried with the flag off. Never a
-    /// flag.
+    /// `--ignore-existing` they are retried apart, as such
+    /// (`retry_left`). Never a flag.
     #[arg(skip)]
     pub retry_left_in_place: Option<std::collections::HashSet<PathBuf>>,
+    /// cr-ecm12-2 internal: this pass's `retry_only` paths are those at
+    /// which a failed write of this run left its own incomplete copy. The
+    /// end that writes replaces a file there only while it bears the mark
+    /// of one, and keeps any other. Never a flag.
+    #[arg(skip)]
+    pub retry_left: bool,
     /// JOB_LOGS jl-2 internal: this command's run, made once per command
     /// and shared by every pass and rerun. Never a flag.
     #[arg(skip)]

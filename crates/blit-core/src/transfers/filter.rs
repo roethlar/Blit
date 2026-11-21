@@ -45,6 +45,9 @@ pub struct FilterInputs<'a> {
     /// any host can send them; only a host that holds such names turns them
     /// into its own paths.
     pub retry_only_raw: Option<&'a std::collections::HashSet<Vec<u8>>>,
+    /// cr-ecm12-2: the retry's paths are those at which this run left its
+    /// own incomplete copy (`FileFilter.files_from_left`).
+    pub retry_left: bool,
     /// audit-19: the source root when the source is local. An absolute
     /// `--exclude` under it is made source-relative before use (see
     /// [`resolve_excludes`]); `None` for a remote source, where no
@@ -205,6 +208,8 @@ pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
     }
     // cr-ecm12-1: a retry's list is of exact paths.
     filter.files_from_exact = inputs.retry_only.is_some() || inputs.retry_only_raw.is_some();
+    // cr-ecm12-2: and of what.
+    filter.files_from_left = inputs.retry_left;
     if let Some(raw) = inputs.retry_only_raw {
         let listed = filter.files_from.get_or_insert_with(Default::default);
         listed.extend(raw.iter().filter_map(|raw| {
@@ -376,6 +381,8 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
         files_from_root: false,
         // cr-ecm12-1: a retry's list is of exact paths.
         files_from_exact: inputs.retry_only.is_some() || inputs.retry_only_raw.is_some(),
+        // cr-ecm12-2: and of what.
+        files_from_left: inputs.retry_left,
         // EXCLUDE_CASE_MATCHING slice 3 (contract 9): the case mode goes
         // with the patterns, so the peer reads them as this side does.
         ignore_case: inputs.ignore_case,
@@ -2045,6 +2052,7 @@ mod tests {
             files_from: None,
             files_from_read: None,
             retry_only: Some(&names),
+            retry_left: false,
             retry_only_raw: Some(&raw),
             source_root: None,
             ignore_case: false,
@@ -2121,6 +2129,19 @@ mod tests {
             );
             assert!(filter.allows_entry(Some(Path::new("Report.txt")), root, 1, None));
         }
+        // cr-ecm12-2: and whether its paths are those of this run's own
+        // incomplete copies is said with it, here and at the peer.
+        for left in [false, true] {
+            retried.retry_left = left;
+            assert_eq!(build(&retried).unwrap().files_from_left, left);
+            assert_eq!(
+                filter_from_spec(build_spec(&retried).unwrap())
+                    .unwrap()
+                    .files_from_left,
+                left
+            );
+        }
+        retried.retry_left = false;
         // A list a person wrote names a single-file source by its name.
         let mut listed = inputs(&[], &[]);
         listed.files_from_read = Some(Ok("Report.txt\n"));
@@ -2150,6 +2171,7 @@ mod tests {
             files_from: None,
             files_from_read: None,
             retry_only: None,
+            retry_left: false,
             retry_only_raw: None,
             source_root: None,
             ignore_case: false,

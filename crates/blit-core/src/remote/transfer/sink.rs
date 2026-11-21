@@ -2083,6 +2083,21 @@ fn run_after_copy_fault_hook(_dst: &Path) -> std::io::Result<()> {
 /// asked to keep.
 pub const INCOMPLETE_LEFT_IN_PLACE: &str = "an incomplete copy was left at the destination";
 
+/// cr-ecm12-2: the modification time every incomplete copy is stamped with
+/// when a failed write leaves it at the destination — 1985-06-11T20:11:14Z,
+/// a whole even second, which every filesystem this runs on can hold and
+/// no copy sets. It is how this tool tells its own incomplete copy from
+/// any other file, without having kept anything: a file written to, or put
+/// in its place, has another time. A retry under `--ignore-existing`
+/// replaces a file at a path it left a copy at only while the file still
+/// bears this.
+pub const UNFINISHED_STAMP_SECONDS: i64 = 487_368_674;
+
+/// cr-ecm12-2: why a retry under `--ignore-existing` left a file where a
+/// failed write of the run had left its own incomplete copy.
+pub const NOT_THIS_RUNS_COPY: &str = "the file at the destination is not the incomplete copy \
+     this run left there, and --ignore-existing keeps it";
+
 /// What a write that fails after touching its in-place target does with
 /// it (D-2026-09-29-2: "nothing that looks finished is left behind").
 #[derive(Clone, Copy, Debug)]
@@ -2098,8 +2113,20 @@ enum OnFailure {
 /// Make `file` one byte longer than its source: no compare — size, mtime
 /// or content — can then match it, while a resume still finds every
 /// block it already landed.
+///
+/// cr-ecm12-2: and stamped [`UNFINISHED_STAMP_SECONDS`], after the length
+/// and whether or not the length could be set — a write that failed for
+/// want of room leaves a file it cannot lengthen either, and that file is
+/// this run's incomplete copy all the same. The result is the length's, as
+/// it was: the stamp serves the retry, and a copy without it is one the
+/// retry keeps and reports.
 fn mark_unfinished(file: &std::fs::File, source_size: u64) -> std::io::Result<()> {
-    file.set_len(source_size.saturating_add(1))
+    let sized = file.set_len(source_size.saturating_add(1));
+    let stamp = filetime::FileTime::from_unix_time(UNFINISHED_STAMP_SECONDS, 0);
+    if let Err(error) = filetime::set_file_handle_times(file, None, Some(stamp)) {
+        log::warn!("could not stamp an incomplete copy as unfinished: {error}");
+    }
+    sized
 }
 
 /// cr-win-1: hold a resume partial one byte longer than its source before
@@ -6934,5 +6961,49 @@ mod cr_win_1_tests {
             outcome.failures
         );
         assert_eq!(std::fs::read(dst.join("a.bin/inner.txt")).unwrap(), b"kept");
+    }
+}
+
+#[cfg(test)]
+mod unfinished_stamp_tests {
+    use super::*;
+
+    fn mtime_seconds(path: &Path) -> i64 {
+        filetime::FileTime::from_last_modification_time(&std::fs::metadata(path).unwrap())
+            .unix_seconds()
+    }
+
+    /// cr-ecm12-2: an incomplete copy that stays at the destination bears
+    /// the stamp, however it came to stay — kept for a resume, or marked
+    /// through the write's own handle — and nothing else does.
+    #[test]
+    fn an_incomplete_copy_left_in_place_is_stamped_as_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kept = tmp.path().join("kept.bin");
+        std::fs::write(&kept, b"par").unwrap();
+        assert_ne!(mtime_seconds(&kept), UNFINISHED_STAMP_SECONDS);
+        let settled =
+            settle_failed_target(&kept, None, 10, OnFailure::KeepUnfinished { created: true });
+        assert!(settled
+            .note
+            .is_some_and(|note| note.contains(INCOMPLETE_LEFT_IN_PLACE)));
+        assert_eq!(std::fs::metadata(&kept).unwrap().len(), 11);
+        assert_eq!(mtime_seconds(&kept), UNFINISHED_STAMP_SECONDS);
+
+        // Through a handle, as a write that cannot remove its target does.
+        let held = tmp.path().join("held.bin");
+        let handle = std::fs::File::create(&held).unwrap();
+        mark_unfinished(&handle, 4).unwrap();
+        drop(handle);
+        assert_eq!(std::fs::metadata(&held).unwrap().len(), 5);
+        assert_eq!(mtime_seconds(&held), UNFINISHED_STAMP_SECONDS);
+
+        // Anything written to it afterwards is no longer that copy.
+        std::fs::write(&held, b"mine").unwrap();
+        assert_ne!(mtime_seconds(&held), UNFINISHED_STAMP_SECONDS);
+
+        // The stamp is a whole even second: a filesystem that keeps times
+        // to two seconds holds it exactly.
+        assert_eq!(UNFINISHED_STAMP_SECONDS % 2, 0);
     }
 }

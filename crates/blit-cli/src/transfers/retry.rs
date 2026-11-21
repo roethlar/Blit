@@ -451,7 +451,9 @@ where
         // exception is --ignore-existing: a path whose failure left this
         // run's own incomplete copy at the destination exists there now,
         // and that copy is not one the user asked to keep — those paths
-        // retry with it off. cr-rework-1: they come from the exact set the
+        // retry apart, as such (cr-ecm12-2: the end that writes replaces
+        // the file there only while it bears the mark of an incomplete
+        // copy). cr-rework-1: they come from the exact set the
         // destination sends beside the failed paths, never the capped
         // report; if even that set did not fit, the paths it does not
         // name cannot be classified — retried with the flag a leftover is
@@ -518,7 +520,10 @@ where
                 let rest: HashSet<PathBuf> = set.difference(&left).cloned().collect();
                 let mut left_args = pass_args.clone();
                 left_args.retry_only = Some(left);
-                left_args.ignore_existing = false;
+                // cr-ecm12-2: said to be this run's own copies, with the
+                // option still on. Run with it off, the pass replaced
+                // whatever stood at these paths by then.
+                left_args.retry_left = true;
                 let mut result = Box::pin(run(left_args)).await?;
                 if !rest.is_empty() {
                     pass_args.retry_only = Some(rest);
@@ -580,6 +585,17 @@ async fn wait_before_pass(args: &TransferArgs, _pass: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cr-ecm12-2: whether `--ignore-existing` holds for every file of a
+    /// pass — `false` for the pass of this run's own incomplete copies,
+    /// which says what they are (`retry_left`) and has a file replaced
+    /// only while it bears the mark of one. The option itself is never
+    /// turned off: these passes ran without it, and replaced whatever
+    /// stood at their paths.
+    fn keeps_every_file(pass: &TransferArgs) -> bool {
+        assert!(pass.ignore_existing, "the option stays on in every pass");
+        !pass.retry_left
+    }
 
     fn failure(path: &str) -> FileFailure {
         FileFailure {
@@ -649,7 +665,7 @@ mod tests {
     /// leftovers come from the exact set the destination sends — never
     /// the capped report, whose reasons here say nothing about them.
     #[tokio::test]
-    async fn ignore_existing_retries_this_runs_own_leftovers_without_it() {
+    async fn ignore_existing_retries_this_runs_own_leftovers_as_such() {
         let mut a = args(1);
         a.ignore_existing = true;
         let mut main = failures(&["left", "other"]);
@@ -663,7 +679,7 @@ mod tests {
                 .into_iter()
                 .collect();
             set.sort();
-            sessions.push((set, pass_args.ignore_existing));
+            sessions.push((set, keeps_every_file(&pass_args)));
             async move { Ok(clean(1)) }
         })
         .await
@@ -755,7 +771,7 @@ mod tests {
         main.left_in_place = vec!["left".to_string()];
         let mut sessions: Vec<bool> = Vec::new();
         let out = run_retry_passes(&a, main, |pass_args| {
-            sessions.push(pass_args.ignore_existing);
+            sessions.push(keeps_every_file(&pass_args));
             let pass = sessions.len();
             async move {
                 if pass == 1 {
@@ -776,7 +792,7 @@ mod tests {
         assert_eq!(
             sessions,
             vec![false, false],
-            "both retries re-send the leftover without --ignore-existing"
+            "both retries re-send the leftover as this run's own copy"
         );
         assert_eq!(out.passes_run, 2);
         assert_eq!(out.final_failures.files_failed, 0);
@@ -795,7 +811,7 @@ mod tests {
         main.left_in_place = vec!["left".to_string()];
         let mut sessions: Vec<bool> = Vec::new();
         run_retry_passes(&a, main, |pass_args| {
-            sessions.push(pass_args.ignore_existing);
+            sessions.push(keeps_every_file(&pass_args));
             let pass = sessions.len();
             async move {
                 if pass == 1 {
@@ -818,7 +834,7 @@ mod tests {
         assert_eq!(
             sessions,
             vec![false, true],
-            "retry 2 keeps --ignore-existing once the copy is gone"
+            "retry 2 no longer lists it as the run's own once the copy is gone"
         );
     }
 
@@ -835,7 +851,7 @@ mod tests {
         main.left_in_place = vec!["left".to_string()];
         let mut sessions: Vec<bool> = Vec::new();
         let out = run_retry_passes(&a, main, |pass_args| {
-            sessions.push(pass_args.ignore_existing);
+            sessions.push(keeps_every_file(&pass_args));
             async move {
                 let mut failed = failures(&["left"]);
                 failed.removed_incomplete_truncated = true;
@@ -872,7 +888,7 @@ mod tests {
         let mut sessions: Vec<(usize, bool)> = Vec::new();
         run_retry_passes(&a, main, |pass_args| {
             let n = pass_args.retry_only.as_ref().expect("retry set").len();
-            sessions.push((n, pass_args.ignore_existing));
+            sessions.push((n, keeps_every_file(&pass_args)));
             async move { Ok(clean(n as u64)) }
         })
         .await
@@ -880,7 +896,7 @@ mod tests {
         assert_eq!(
             sessions,
             vec![(70, false)],
-            "all 70 leftovers retry without --ignore-existing"
+            "all 70 leftovers retry as the run's own copies"
         );
     }
 
@@ -904,7 +920,7 @@ mod tests {
                 .into_iter()
                 .collect();
             set.sort();
-            sessions.push((set, pass_args.ignore_existing));
+            sessions.push((set, keeps_every_file(&pass_args)));
             async move { Ok(clean(1)) }
         })
         .await

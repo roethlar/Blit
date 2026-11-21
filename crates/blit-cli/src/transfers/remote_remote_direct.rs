@@ -382,6 +382,7 @@ mod delegated_options_tests {
             resolved_excludes: None,
             save: None,
             export: None,
+            retry_left: false,
             retry_only_raw: None,
             retry_left_in_place_raw: None,
         }

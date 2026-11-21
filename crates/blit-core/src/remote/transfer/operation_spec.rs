@@ -90,7 +90,11 @@ use crate::generated::{
 ///     a daemon that does not know the field reads a retry's list as a
 ///     list of names, and lets a source that has become one file answer
 ///     to a child's name.
-pub const SUPPORTED_SPEC_VERSION: u32 = 10;
+///   - 11: `FilterSpec.files_from_left` (cr-ecm12-2), by the same rule: a
+///     daemon that does not know the field reads the retry of an
+///     `ignore_existing` run's own incomplete copies as any other list,
+///     skips each as a file to keep, and reports the path copied.
+pub const SUPPORTED_SPEC_VERSION: u32 = 11;
 
 /// Normalized, internal-friendly view of a transfer operation. Folds
 /// proto-`Unspecified` into concrete defaults, converts `FilterSpec`
@@ -292,6 +296,8 @@ pub(crate) fn filter_from_spec(spec: ProtoFilterSpec) -> Result<FileFilter> {
         filter.files_from = Some(listed);
         // cr-ecm12-1: what kind of list it is travels with it.
         filter.files_from_exact = spec.files_from_exact;
+        // cr-ecm12-2: and of what.
+        filter.files_from_left = spec.files_from_left;
     }
     filter
         .validate_globs()
@@ -793,6 +799,7 @@ mod tests {
             files_from_unnamed: Vec::new(),
             files_from_root: false,
             files_from_exact: false,
+            files_from_left: false,
             ignore_case: false,
             files_from_set: false,
         });
@@ -819,6 +826,7 @@ mod tests {
             files_from_unnamed: Vec::new(),
             files_from_root: false,
             files_from_exact: false,
+            files_from_left: false,
             ignore_case: false,
             files_from_set: false,
         });
@@ -1037,6 +1045,36 @@ mod tests {
         );
     }
 
+    /// cr-ecm12-2: a request whose list is of this run's own incomplete
+    /// copies carries a version a daemon of spec version 10 refuses — that
+    /// daemon would skip each as a file to keep — and what the list is
+    /// reaches the filter.
+    #[test]
+    fn a_request_for_the_runs_own_incomplete_copies_is_version_11_or_later() {
+        for left in [true, false] {
+            let mut spec = empty_spec();
+            spec.filter = Some(ProtoFilterSpec {
+                files_from: vec!["Report.txt".to_string()],
+                files_from_set: true,
+                files_from_exact: true,
+                files_from_left: left,
+                ..ProtoFilterSpec::default()
+            });
+            let accepted = NormalizedTransferOperation::from_spec(spec).expect("this build's own");
+            assert_eq!(accepted.filter.expect("a filter").files_from_left, left);
+        }
+        let mut spec = empty_spec();
+        spec.spec_version = 10;
+        let error = NormalizedTransferOperation::from_spec(spec).unwrap_err();
+        assert!(error.to_string().contains("spec_version 10"), "{error:#}");
+        // Read at run time: the number is what a daemon is told.
+        let version = std::hint::black_box(SUPPORTED_SPEC_VERSION);
+        assert!(
+            version >= 11,
+            "a request for the run's own incomplete copies is version 11 or later, not {version}"
+        );
+    }
+
     /// cr-ecm6-3: a request whose mirror is scoped by a name list is
     /// answered by the rule of spec version 6 — a directory the list does
     /// not name is never deleted — and a daemon of version 5, which plans
@@ -1118,6 +1156,7 @@ mod tests {
             files_from_unnamed: Vec::new(),
             files_from_root: false,
             files_from_exact: false,
+            files_from_left: false,
             ignore_case: false,
             files_from_set: false,
         });

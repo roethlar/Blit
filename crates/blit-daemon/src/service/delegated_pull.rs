@@ -857,6 +857,7 @@ mod tests {
             files_from_unnamed: Vec::new(),
             files_from_root: false,
             files_from_exact: false,
+            files_from_left: false,
             ignore_case: false,
             files_from_set: false,
         });

@@ -2425,6 +2425,7 @@ mod retry_name_tests {
                 exclude: &[],
                 files_from: None,
                 retry_only: Some(&names),
+                retry_left: false,
                 retry_only_raw: Some(&raw_names),
                 source_root: None,
                 ignore_case: false,

@@ -29,6 +29,35 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// The time a failed write stamps on the incomplete copy it leaves
+/// (cr-ecm12-2).
+fn unfinished_stamp() -> filetime::FileTime {
+    filetime::FileTime::from_unix_time(
+        blit_core::remote::transfer::sink::UNFINISHED_STAMP_SECONDS,
+        0,
+    )
+}
+
+/// `blit`, with no file allowed to grow past `kib` KiB: a write that would
+/// fails, as on a volume with no room. (`ulimit -f` counts 512-byte
+/// blocks; the signal a process is sent for it is ignored, so the write
+/// returns its error.)
+#[cfg(unix)]
+fn blit_with_no_room_past(ctx: &TestContext, kib: u32, args: &[&str]) -> Output {
+    let mut cmd = Command::new("sh");
+    cmd.current_dir(&ctx.workspace)
+        .arg("-c")
+        .arg(format!(
+            "trap '' XFSZ; ulimit -f {}; exec \"$0\" \"$@\"",
+            kib * 2
+        ))
+        .arg(cli_bin())
+        .arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .args(args);
+    run_with_timeout(cmd, Duration::from_secs(60))
+}
+
 /// Two source files; one cannot land because a folder occupies its
 /// destination path. Removing the folder frees it.
 fn blocked_fixture(ctx: &TestContext) -> (PathBuf, PathBuf) {
@@ -468,6 +497,7 @@ fn an_ignore_existing_retry_replaces_only_its_own_incomplete_copies() {
     fs::write(&record_file, serde_json::to_vec(&record).unwrap()).unwrap();
     fs::remove_dir_all(dst.join("own.txt")).unwrap();
     fs::write(dst.join("own.txt"), b"the whole").unwrap();
+    filetime::set_file_mtime(dst.join("own.txt"), unfinished_stamp()).unwrap();
     fs::remove_dir_all(dst.join("kept.txt")).unwrap();
     fs::write(dst.join("kept.txt"), b"mine").unwrap();
 
@@ -541,6 +571,7 @@ fn an_ignore_existing_retry_of_a_single_file_replaces_its_own_incomplete_copy() 
             record["left_in_place"] = serde_json::json!([""]);
             fs::write(&record_file, serde_json::to_vec(&record).unwrap()).unwrap();
             fs::write(&dst, b"the whole").unwrap();
+            filetime::set_file_mtime(&dst, unfinished_stamp()).unwrap();
         } else {
             // A file someone put there since: theirs to keep.
             fs::write(&dst, b"mine").unwrap();
@@ -625,5 +656,81 @@ fn a_retry_of_a_child_does_not_take_a_file_of_its_name_for_it() {
             b"not the run's to touch",
             "daemon {from_a_daemon}: the file there is not the child\n{said}"
         );
+    }
+}
+
+/// cr-ecm12-2: the copy a retry replaces under `--ignore-existing` is the
+/// one the failed write left, and nothing put in its place. A write that
+/// ran out of room left an empty `big.bin`, recorded as this run's own
+/// incomplete copy; someone then put another file there; and `jobs retry`
+/// — which sent such paths with the option off — wrote 128 KiB over it
+/// and exited 0. The copy is stamped when it is left, and the retry
+/// replaces a file there only while it still bears the stamp: a file
+/// renamed over it, or written into it, is kept, and the path is reported
+/// as not copied.
+#[cfg(unix)]
+#[test]
+fn an_ignore_existing_retry_keeps_a_file_put_in_place_of_its_incomplete_copy() {
+    for put in [
+        "nothing",
+        "a file renamed over it",
+        "a file written into it",
+    ] {
+        let ctx = TestContext::new();
+        let src = ctx.workspace.join("big.bin");
+        let dst = ctx.workspace.join("dst");
+        let whole = vec![b'w'; 128 * 1024];
+        fs::write(&src, &whole).unwrap();
+        let first = blit_with_no_room_past(
+            &ctx,
+            64,
+            &[
+                "copy",
+                "--resume",
+                "--ignore-existing",
+                "--retries",
+                "0",
+                &src.display().to_string(),
+                &arg(&dst),
+            ],
+        );
+        let said = format!("{}{}", text(&first.stdout), text(&first.stderr));
+        assert_eq!(first.status.code(), Some(EXIT_PARTIAL_FAILURE), "{said}");
+        assert!(said.contains("an incomplete copy was left"), "{said}");
+        let left = dst.join("big.bin");
+        let meta = fs::metadata(&left).expect("the write left its incomplete copy");
+        assert!(meta.len() < whole.len() as u64, "{put}: {}", meta.len());
+        assert_eq!(
+            filetime::FileTime::from_last_modification_time(&meta),
+            unfinished_stamp(),
+            "{put}: the copy is stamped as one, though it could not be lengthened"
+        );
+        let run_id = jobs(&ctx)[0]["run_id"].as_str().unwrap().to_string();
+
+        match put {
+            "a file renamed over it" => {
+                fs::write(dst.join("theirs"), b"someone's").unwrap();
+                fs::rename(dst.join("theirs"), &left).unwrap();
+            }
+            "a file written into it" => fs::write(&left, b"someone's").unwrap(),
+            _ => {}
+        }
+        let retried = blit(&ctx, &["jobs", "retry", &run_id]);
+        let said = format!("{}{}", text(&retried.stdout), text(&retried.stderr));
+        if put == "nothing" {
+            assert!(retried.status.success(), "{put}: {said}");
+            assert!(fs::read(&left).unwrap() == whole, "{put}: {said}");
+        } else {
+            assert_eq!(
+                retried.status.code(),
+                Some(EXIT_PARTIAL_FAILURE),
+                "{put}: {said}"
+            );
+            assert!(
+                said.contains("is not the incomplete copy this run left there"),
+                "{put}: {said}"
+            );
+            assert_eq!(fs::read(&left).unwrap(), b"someone's", "{put}: {said}");
+        }
     }
 }

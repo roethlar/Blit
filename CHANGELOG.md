@@ -21,7 +21,7 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `files_from_unnamed`; `client::connect_with_timeout` and
 `connect_transfer_client` return a `BlitClient<client::BlitChannel>`
 (the channel behind `client::BoundedResponses`). The wire
-protocol is contract 22: a peer on any other contract version (every 0.1.x
+protocol is contract 23: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
 
@@ -118,7 +118,7 @@ part, and a job you can list, read, re-run and retry.
   be written the transfer still completes and the report says the log is
   incomplete.
 - A dry run or `--null` run is logged as what it planned, not as copies.
-- Wire protocol (contract 22): the job ID rides the session-open and
+- Wire protocol (contract 23): the job ID rides the session-open and
   delegated-pull requests; `GetJobLog` returns a daemon's log by ID; the
   finished-job record carries the failed-file count. In a filtered mirror,
   `ManifestPruned` tells the destination which source paths were excluded,
@@ -214,6 +214,14 @@ part, and a job you can list, read, re-run and retry.
   no other: if the directory has since become one file of the same
   name, the retry reports the path missing — it used to send that file
   over whatever stood at the destination's root.
+- A retry of an `--ignore-existing` run (`--retries`, `blit jobs retry`)
+  replaces the incomplete copy a failed write left, and nothing put in
+  its place. It used to send such a path with the option off, and wrote
+  over whatever stood there by then. An incomplete copy that stays at
+  the destination is now stamped when it is left — its modification
+  time reads 1985-06-11 20:11:14 UTC — and the retry replaces a file
+  there only while it still bears the stamp. Any other file is kept, and
+  the path is reported as not copied.
 - `check` of a single file against a destination of another name
   compares the two. With the source named in `--files-from`, or a
   pattern naming either file, it looked for one file's name on the

@@ -71,6 +71,7 @@ fn filter_inputs<'a>(args: &'a TransferArgs, source_root: Option<&'a Path>) -> F
             Err(why) => Err(why.as_str()),
         }),
         retry_only: args.retry_only.as_ref(),
+        retry_left: args.retry_left,
         retry_only_raw: args.retry_only_raw.as_ref(),
         source_root,
         ignore_case: args.ignore_case,
@@ -1694,6 +1695,7 @@ mod tests {
             resolved_excludes: None,
             save: None,
             export: None,
+            retry_left: false,
             retry_only_raw: None,
             retry_left_in_place_raw: None,
         };
@@ -1770,6 +1772,7 @@ mod tests {
             resolved_excludes: None,
             save: None,
             export: None,
+            retry_left: false,
             retry_only_raw: None,
             retry_left_in_place_raw: None,
         };
@@ -1852,6 +1855,7 @@ mod tests {
             resolved_excludes: None,
             save: None,
             export: None,
+            retry_left: false,
             retry_only_raw: None,
             retry_left_in_place_raw: None,
         }

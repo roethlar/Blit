@@ -62,6 +62,7 @@ pub async fn run_check(args: &CheckArgs) -> Result<ExitCode> {
         files_from: args.files_from.as_ref(),
         files_from_read: None,
         retry_only: None,
+        retry_left: false,
         retry_only_raw: None,
         source_root: Some(&src),
         ignore_case: args.ignore_case,
