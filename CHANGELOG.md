@@ -371,10 +371,13 @@ asks before it deletes.
   copied — and so would a file that arrived after the source had been
   read. The daemon now keeps an account of what each of the move's
   sessions sent and removes that: each file, if it is still THE FILE IT
-  WAS — its size, the time it was last written to the nanosecond, the
-  time it was last changed in any way and which file it is, so that one
-  rewritten with as many bytes in the same second, or put back under an
-  older time, stays — and each directory this leaves empty. An account
+  WAS when the daemon first looked at it, before a byte of it was read
+  or hashed — its size, the time it was last written to the nanosecond,
+  the time it was last changed in any way and which file it is, so that
+  one rewritten with as many bytes in the same second, or put back under
+  an older time, stays, whenever in the move that was done — and each
+  directory this leaves empty. (A daemon on Windows holds a file by its
+  size and the time it was last written only.) An account
   is of the path its session read and answers for no other, and it
   answers only once that session has ended well, with whatever the
   receiving end says did not land struck from it. Anything else stays
@@ -385,8 +388,11 @@ asks before it deletes.
   machine is unchanged. (As first built on the development branch, the
   account missed every file the destination had asked for before the
   listing was complete: a move of more than 128 files delivered all of
-  them, left part of the source in place and exited 1. No release has
-  that.)
+  them, left part of the source in place and exited 1. And it held each
+  file as a second look found it once the listing was complete, so a
+  file rewritten in between — as many bytes, its time put back — went
+  from the source with exit 0 though its new bytes had been sent to
+  nobody. No release has either.)
 - **Every entry that could not be removed is named**, as the daemon meets
   it — a tree with a million of them prints a million lines, as `rm`
   does. If a daemon's answer stops before it says it is done, what it

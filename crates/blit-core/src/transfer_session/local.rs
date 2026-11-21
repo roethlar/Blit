@@ -680,6 +680,10 @@ impl TransferSource for DestSubtreeExcludedSource {
     fn root(&self) -> &Path {
         self.inner.root()
     }
+
+    fn sightings(&self) -> Option<Arc<crate::moved::Sightings>> {
+        self.inner.sightings()
+    }
 }
 
 impl DestSubtreeExcludedSource {

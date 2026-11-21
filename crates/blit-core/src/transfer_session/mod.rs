@@ -1929,34 +1929,6 @@ fn not_landed(summary: &TransferSummary) -> Option<Vec<Vec<u8>>> {
     )
 }
 
-/// A move's account of what a session read from `root` (cr-uv3-1,
-/// cr-uv4-1): each file on the manifest as it stands on this disk NOW —
-/// but only while it is still the regular file the manifest wrote, of
-/// that size and that second. One written to since the walk read it, one
-/// that has gone, a link put in its place: none is in the account, and
-/// the removal that ends the move leaves it where it is.
-fn account_of(root: &Path, headers: &[FileHeader]) -> crate::moved::Account {
-    let mut account = crate::moved::Account::of(root);
-    for header in headers {
-        let at = crate::raw_name::source_path(root, header);
-        let Ok(metadata) = std::fs::symlink_metadata(&at) else {
-            continue;
-        };
-        if !metadata.is_file()
-            || metadata.len() != header.size
-            || crate::wire_metadata::mtime_seconds(&metadata) != Some(header.mtime_seconds)
-        {
-            continue;
-        }
-        let path = match header.raw_relative_path.as_deref() {
-            Some(raw) if !raw.is_empty() => raw,
-            _ => header.relative_path.as_bytes(),
-        };
-        account.record(path, &crate::moved::Version::of(&metadata));
-    }
-    account
-}
-
 /// otp-7a: the send half's resume bookkeeping. A resume-flagged need is
 /// HELD until its `BlockHashList` arrives (the contract's strict
 /// ordering — the source must not send a byte of that file first); the
@@ -2175,21 +2147,32 @@ async fn source_send_half(
         // session returns; the wire behavior is identical either way.
         let unreadable: Arc<StdMutex<Vec<String>>> =
             instruments.unreadable.clone().unwrap_or_default();
+        // cr-uv5-2: a move's account is written from what the walk SEES of
+        // each file, and the walk is asked to record it before it begins.
+        let moving = negotiated.open.source_removed_after
+            && negotiated.open.initiator_role() == TransferRole::Destination;
+        let sightings = if moving {
+            scan_source.sightings()
+        } else {
+            None
+        };
+        if let Some(sightings) = &sightings {
+            sightings.begin();
+        }
         let (mut header_rx, mut scan) = scan_source.scan(None, Arc::clone(&unreadable));
         // cr-ecm14-1: the names a LISTED scan found, each by its own
         // bytes — what the account of what was not found is taken from.
         let listed = scan_source.files_from_scope().is_some();
         let mut names_found: HashSet<Vec<u8>> = HashSet::new();
         // The entries a MOVE's account is written from: every one put on
-        // the manifest, kept as it goes — its name, size and time, no
-        // more. The map of the manifest (`sent`) is no record of them: a
-        // need takes its entry out of it, and needs arrive while the
-        // manifest is still being sent. Read at the manifest's end, it
-        // held what had not been asked for yet — past the first 128
-        // files, a move left at its source what it had already delivered.
-        let moving = negotiated.open.source_removed_after
-            && negotiated.open.initiator_role() == TransferRole::Destination;
-        let mut listed_for_account: Vec<FileHeader> = Vec::new();
+        // the manifest, kept as it goes — by its name, no more (cr-uv5-2:
+        // what the file WAS is the walk's to say). The map of the
+        // manifest (`sent`) is no record of them: a need takes its entry
+        // out of it, and needs arrive while the manifest is still being
+        // sent. Read at the manifest's end, it held what had not been
+        // asked for yet — past the first 128 files, a move left at its
+        // source what it had already delivered.
+        let mut listed_for_account: Vec<u128> = Vec::new();
         // The TCP carrier owns a separate authenticated lane, so an ordinary
         // copy can restore the old push driver's scan/transfer overlap as soon
         // as DESTINATION has authorized a batch through NeedBatch. Mirror and
@@ -2294,13 +2277,7 @@ async fn source_send_half(
                     names_found.insert(own_name(&header).to_vec());
                 }
                 if moving {
-                    listed_for_account.push(FileHeader {
-                        relative_path: header.relative_path.clone(),
-                        raw_relative_path: header.raw_relative_path.clone(),
-                        size: header.size,
-                        mtime_seconds: header.mtime_seconds,
-                        ..FileHeader::default()
-                    });
+                    listed_for_account.push(crate::moved::name_key(own_name(&header)));
                 }
                 if let Some(probe) = &small_file_probe {
                     let wait_started = probe.start();
@@ -2387,21 +2364,28 @@ async fn source_send_half(
         // end keeps the account of it — the removal used to take whatever
         // stood at the source by then.
         //
-        // cr-uv4-1: each file goes into the account as THE FILE IT IS
-        // NOW, read from this end's own disk — and only if it is still
-        // the regular file the manifest wrote, of that size and second.
+        // cr-uv5-2: each file goes into the account AS THE WALK SAW IT —
+        // the look its size and time on this manifest came from, before
+        // its bytes or its checksum were read. It went in as a second
+        // look found it here, at the manifest's end (cr-uv4-1), and that
+        // look took a file rewritten in between — as many bytes, the same
+        // second — for the file that was sent. A source whose walk keeps
+        // no such record gives no account: the move then removes
+        // nothing, and says it was given none.
         // The account answers nothing until this session has ended well
         // (below, where the destination's summary arrives).
-        let sent_ticket = if moving {
-            let root = scan_source.root().to_path_buf();
-            let headers = std::mem::take(&mut listed_for_account);
-            // One look at each file: off the runtime's own threads.
-            let account = tokio::task::spawn_blocking(move || account_of(&root, &headers))
-                .await
-                .map_err(|join| eyre::eyre!("writing the move's account: {join}"))?;
-            crate::moved::keep(account)
-        } else {
-            Vec::new()
+        let sent_ticket = match sightings {
+            Some(sightings) => {
+                let root = scan_source.root().to_path_buf();
+                let listed = std::mem::take(&mut listed_for_account);
+                // One lookup for each file: off the runtime's own threads.
+                let account =
+                    tokio::task::spawn_blocking(move || sightings.account(&root, &listed))
+                        .await
+                        .map_err(|join| eyre::eyre!("writing the move's account: {join}"))?;
+                crate::moved::keep(account)
+            }
+            None => Vec::new(),
         };
         let move_ticket = sent_ticket.clone();
         tx.send(frame(Frame::ManifestComplete(ManifestComplete {
@@ -10835,49 +10819,82 @@ mod own_incomplete_copy_tests {
         assert!(!tmp.path().join("nowhere").exists());
     }
 
-    /// cr-uv4-1: a move's account is written from this end's own disk —
-    /// each file on the manifest as it stands, and only while it is still
-    /// the regular file the manifest wrote. One written to since (another
-    /// size, another second), one that has gone and one with a link in
-    /// its place are not in it; a name that is not text is held by its
-    /// bytes.
+    /// cr-uv5-2: a move's account holds each file on the manifest AS THE
+    /// WALK SAW IT — the look the manifest's size and time came from,
+    /// before a byte of the file was read or hashed. Whatever is done to a
+    /// file after that look, it is no longer the file the account holds:
+    /// rewritten with as many bytes and its time put back (which a second
+    /// look, at the manifest's end, took for the file that was sent — the
+    /// reviewer's case), grown, given another time, gone, a link or
+    /// another file put in its place. A file the walk saw and the
+    /// manifest does not list is not in the account; a name that is not
+    /// text is held by its bytes.
     #[cfg(unix)]
-    #[test]
-    fn a_moves_account_holds_each_file_as_it_stands_on_this_disk() {
+    #[tokio::test]
+    async fn a_moves_account_holds_each_file_as_the_walk_saw_it() {
         use crate::moved::Version;
+        use crate::remote::transfer::source::FsTransferSource;
         use std::os::unix::ffi::OsStrExt as _;
+
+        /// What a walk of `root` puts on a manifest — all but `unlisted`,
+        /// as a filter would leave one out — and what it saw.
+        async fn walked(root: &Path) -> (Arc<crate::moved::Sightings>, Vec<u128>) {
+            let source = FsTransferSource::new(root.to_path_buf());
+            let sightings = source.sightings().expect("a source on a disk keeps them");
+            sightings.begin();
+            let (mut headers, mut scan) = source.scan(None, Arc::default());
+            let mut listed = Vec::new();
+            while let Some(header) = headers.recv().await {
+                if header.relative_path != "unlisted" {
+                    listed.push(crate::moved::name_key(own_name(&header)));
+                }
+            }
+            scan.finish().await.expect("the walk");
+            (sightings, listed)
+        }
+        let held_of = |account: crate::moved::Account| {
+            let ticket = crate::moved::keep(account);
+            crate::moved::confirm(&ticket, &[]);
+            crate::moved::held(&[ticket])
+                .expect("kept")
+                .pop()
+                .expect("one")
+        };
+        let now = |at: &Path| Version::of(&std::fs::symlink_metadata(at).unwrap());
+
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("src");
         std::fs::create_dir_all(root.join("sub")).unwrap();
         let raw_name = std::ffi::OsStr::from_bytes(b"bad\xff.bin");
-        for name in ["same", "grown", "touched", "gone", "linked", "sub/deep"] {
+        for name in [
+            "same",
+            "rewritten",
+            "grown",
+            "touched",
+            "gone",
+            "linked",
+            "replaced",
+            "sub/deep",
+            "unlisted",
+        ] {
             std::fs::write(root.join(name), b"1234").unwrap();
         }
         std::fs::write(root.join(raw_name), b"1234").unwrap();
-        let header = |name: &str, raw: Option<&[u8]>| {
-            let at = match raw {
-                Some(raw) => root.join(std::ffi::OsStr::from_bytes(raw)),
-                None => root.join(name),
-            };
-            let metadata = std::fs::metadata(at).unwrap();
-            FileHeader {
-                relative_path: name.to_string(),
-                size: metadata.len(),
-                mtime_seconds: crate::wire_metadata::mtime_seconds(&metadata).unwrap(),
-                raw_relative_path: raw.map(<[u8]>::to_vec),
-                ..FileHeader::default()
-            }
+        let (sightings, listed) = walked(&root).await;
+        assert_eq!(listed.len(), 9);
+
+        // Since the walk read them — and more than a tick of any system's
+        // clock later, so that the time a file was last changed moves
+        // wherever that time is kept coarsely.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let written = |name: &str| {
+            filetime::FileTime::from_last_modification_time(
+                &std::fs::metadata(root.join(name)).unwrap(),
+            )
         };
-        let headers = vec![
-            header("same", None),
-            header("grown", None),
-            header("touched", None),
-            header("gone", None),
-            header("linked", None),
-            header("sub/deep", None),
-            header("bad\u{fffd}.bin", Some(b"bad\xff.bin")),
-        ];
-        // Since the manifest was written:
+        let was = written("rewritten");
+        std::fs::write(root.join("rewritten"), b"4321").unwrap();
+        filetime::set_file_mtime(root.join("rewritten"), was).unwrap();
         std::fs::write(root.join("grown"), b"12345").unwrap();
         filetime::set_file_mtime(
             root.join("touched"),
@@ -10887,24 +10904,27 @@ mod own_incomplete_copy_tests {
         std::fs::remove_file(root.join("gone")).unwrap();
         std::fs::remove_file(root.join("linked")).unwrap();
         std::os::unix::fs::symlink("same", root.join("linked")).unwrap();
+        let was = written("replaced");
+        std::fs::write(root.join("another"), b"1234").unwrap();
+        filetime::set_file_mtime(root.join("another"), was).unwrap();
+        std::fs::rename(root.join("another"), root.join("replaced")).unwrap();
 
-        let account = account_of(&root, &headers);
-        assert_eq!(
-            account.len(),
-            3,
-            "same, sub/deep and the name that is not text"
-        );
-        let ticket = crate::moved::keep(account);
-        crate::moved::confirm(&ticket, &[]);
-        let accounts = crate::moved::held(&[ticket]).expect("kept");
-        let account = &accounts[0];
+        let account = sightings.account(&root, &listed);
+        assert_eq!(account.len(), 9, "each file on the manifest, as seen");
+        let account = held_of(account);
         assert!(account.is_of(&root));
-        let now = |at: &Path| Version::of(&std::fs::symlink_metadata(at).unwrap());
         assert!(account.holds(b"same", &now(&root.join("same"))));
         assert!(account.holds(b"sub/deep", &now(&root.join("sub/deep"))));
         assert!(account.holds(b"bad\xff.bin", &now(&root.join(raw_name))));
         assert!(!account.holds("bad\u{fffd}.bin".as_bytes(), &now(&root.join(raw_name))));
-        for changed in ["grown", "touched", "linked"] {
+        for changed in [
+            "rewritten",
+            "grown",
+            "touched",
+            "linked",
+            "replaced",
+            "unlisted",
+        ] {
             assert!(
                 !account.holds(changed.as_bytes(), &now(&root.join(changed))),
                 "{changed}"
@@ -10914,16 +10934,10 @@ mod own_incomplete_copy_tests {
         // A source that is itself the file is held under no name.
         let one = tmp.path().join("one.txt");
         std::fs::write(&one, b"x").unwrap();
-        let metadata = std::fs::metadata(&one).unwrap();
-        let sole = account_of(
-            &one,
-            &[FileHeader {
-                size: 1,
-                mtime_seconds: crate::wire_metadata::mtime_seconds(&metadata).unwrap(),
-                ..FileHeader::default()
-            }],
-        );
+        let (sightings, listed) = walked(&one).await;
+        let sole = sightings.account(&one, &listed);
         assert_eq!(sole.len(), 1);
+        assert!(held_of(sole).holds(b"", &now(&one)));
     }
 
     /// cr-uv4-1, cr-uv5-4: what a destination's summary says did not land

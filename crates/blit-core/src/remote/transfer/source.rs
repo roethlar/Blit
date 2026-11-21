@@ -221,6 +221,16 @@ pub trait TransferSource: Send + Sync {
     fn files_from_exact(&self) -> bool {
         false
     }
+
+    /// cr-uv5-2: where this source's walk records each file AS IT SAW IT
+    /// — the look a manifest entry's size and time come from — for a
+    /// move's account (`moved::Sightings`). A walk records only once it
+    /// has been asked to (`Sightings::begin`). Wrappers delegate; a
+    /// source that reads no disk answers `None`, and a move from it is
+    /// given no account and removes nothing.
+    fn sightings(&self) -> Option<Arc<crate::moved::Sightings>> {
+        None
+    }
 }
 
 /// One opened source file (contract v7, SOURCE_SIDE_CONTAINMENT D-A):
@@ -387,6 +397,9 @@ pub struct FsTransferSource {
     /// per-file hydration failure is a skip, never a session fault.
     hydrator: crate::remote::transfer::payload::Hydrator,
     excluded_subtree: Option<PathBuf>,
+    /// cr-uv5-2: what this source's walk saw of each file, recorded once
+    /// a move has asked for it.
+    sightings: Arc<crate::moved::Sightings>,
 }
 
 impl FsTransferSource {
@@ -398,6 +411,7 @@ impl FsTransferSource {
             verbose: false,
             hydrator: crate::remote::transfer::payload::default_hydrator(),
             excluded_subtree: None,
+            sightings: Arc::default(),
         }
     }
 
@@ -457,6 +471,7 @@ impl TransferSource for FsTransferSource {
             self.phase_probe.clone(),
             open_for_scan,
             self.excluded_subtree.clone(),
+            self.sightings.wanted().then(|| Arc::clone(&self.sightings)),
         );
         (headers, SourceScan::new(task))
     }
@@ -475,6 +490,7 @@ impl TransferSource for FsTransferSource {
             self.phase_probe.clone(),
             open_for_scan,
             self.excluded_subtree.clone(),
+            self.sightings.wanted().then(|| Arc::clone(&self.sightings)),
         );
         (headers, SourceScan::new(task))
     }
@@ -499,6 +515,10 @@ impl TransferSource for FsTransferSource {
 
     fn root(&self) -> &Path {
         &self.root
+    }
+
+    fn sightings(&self) -> Option<Arc<crate::moved::Sightings>> {
+        Some(Arc::clone(&self.sightings))
     }
 }
 
@@ -656,6 +676,7 @@ fn spawn_manifest_task(
         phase_probe,
         open_for_scan,
         None,
+        None,
     )
 }
 
@@ -676,6 +697,7 @@ fn spawn_manifest_task_with(
     phase_probe: LocalPhaseProbe,
     scan_open: fn(&Path) -> std::io::Result<()>,
     excluded_subtree: Option<PathBuf>,
+    sightings: Option<Arc<crate::moved::Sightings>>,
 ) -> (
     mpsc::Receiver<FileHeader>,
     tokio::task::JoinHandle<Result<u64>>,
@@ -689,6 +711,9 @@ fn spawn_manifest_task_with(
         let enumerator = FileEnumerator::new(filter).with_excluded_subtree(excluded_subtree);
         heartbeat.begin();
         let mut enumerated: u64 = 0;
+        // cr-uv5-2: each file as this walk's own look finds it, for a
+        // move's account.
+        let mut seen: Vec<(u128, u128)> = Vec::new();
         let unreadable = unreadable;
         // ls-1: the walk's own wall clock. The bounded send below is measured
         // separately and subtracted, so this reads as enumeration work rather
@@ -737,6 +762,20 @@ fn spawn_manifest_task_with(
                     }
                 }
 
+                // cr-uv5-2: the file as THIS look found it — the look its
+                // size and time on the manifest come from, before anything
+                // of it is read. A move's account holds it so, and the
+                // removal takes it only while it still stands so.
+                if sightings.is_some() {
+                    let name = match raw_relative_path.as_deref() {
+                        Some(raw) if !raw.is_empty() => raw,
+                        _ => rel.as_bytes(),
+                    };
+                    seen.push(crate::moved::sighting(
+                        name,
+                        &crate::moved::Version::of(&entry.metadata),
+                    ));
+                }
                 let mtime = crate::wire_metadata::mtime_seconds(&entry.metadata).unwrap_or(0);
                 let permissions = crate::wire_metadata::permissions_mode(&entry.metadata);
                 let Some(mut header) = file_header_with_windows_metadata_policy(
@@ -782,6 +821,9 @@ fn spawn_manifest_task_with(
                 LocalPhase::Enumerate,
                 started.elapsed().saturating_sub(backpressure),
             );
+        }
+        if let Some(sightings) = &sightings {
+            sightings.publish(std::mem::take(&mut seen));
         }
         let scan_outcome = scan_outcome?;
         for suppressed in &scan_outcome.suppressed_errors {
@@ -933,6 +975,10 @@ impl TransferSource for WindowsMetadataDroppingSource {
     fn root(&self) -> &Path {
         self.inner.root()
     }
+
+    fn sightings(&self) -> Option<Arc<crate::moved::Sightings>> {
+        self.inner.sightings()
+    }
 }
 
 impl FilteredSource {
@@ -1009,6 +1055,10 @@ impl TransferSource for FilteredSource {
 
     fn root(&self) -> &Path {
         self.inner.root()
+    }
+
+    fn sightings(&self) -> Option<Arc<crate::moved::Sightings>> {
+        self.inner.sightings()
     }
 }
 
@@ -1126,6 +1176,10 @@ impl TransferSource for ChecksummingSource {
 
     fn root(&self) -> &Path {
         self.inner.root()
+    }
+
+    fn sightings(&self) -> Option<Arc<crate::moved::Sightings>> {
+        self.inner.sightings()
     }
 }
 
@@ -1429,6 +1483,7 @@ mod scan_open_tests {
             EnumerationHeartbeat::new(None, false),
             LocalPhaseProbe::disabled(),
             scan_open,
+            None,
             None,
         );
         let mut listed = Vec::new();

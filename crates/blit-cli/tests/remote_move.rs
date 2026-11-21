@@ -719,3 +719,96 @@ fn a_move_takes_every_name_of_a_file_with_several() {
         .unwrap_or_default();
     assert!(left.is_empty(), "left at the source: {left:?}\n{said}");
 }
+
+/// cr-uv5-2: a move never removes bytes nobody was sent. A file is
+/// rewritten by another hand — as many bytes, its time put back — while
+/// the move is still writing its manifest: after the file was read (here,
+/// hashed: the destination already holds its first bytes under another
+/// time, so by `--checksum` nothing of it is sent) and before the
+/// manifest's end, which files that take a while to hash put off.
+///
+/// The account of what a move may remove was written at the manifest's
+/// end, from a second look at each file, and that look took the rewritten
+/// file for the one that had been hashed: it went from the source with
+/// exit 0, and its bytes were nowhere. The account now holds each file as
+/// the walk first saw it, so a file changed after that look stays.
+///
+/// What is asserted holds whenever the rewrite lands: the rewritten bytes
+/// are at the source still, or at the destination. Against the code
+/// before this fix it fails when the rewrite lands between the hash and
+/// the manifest's end — which the sizes here make most of a second wide.
+#[cfg(unix)]
+#[test]
+fn a_move_never_removes_bytes_nobody_was_sent() {
+    let ctx = TestContext::new();
+    let tree = ctx.module_dir.join("tree");
+    let landed = ctx.workspace.join("landed");
+    for at in [&tree, &landed] {
+        fs::create_dir_all(at).unwrap();
+        // A while to hash, and nothing to store: all holes.
+        for n in 0..6 {
+            fs::File::create(at.join(format!("big{n}.bin")))
+                .and_then(|big| big.set_len(512 * 1024 * 1024))
+                .unwrap();
+        }
+        // Made last, and first by name: a walk that reads a directory
+        // newest first meets it first, and so does one that reads by name.
+        fs::write(at.join("a-small.txt"), b"1234").unwrap();
+    }
+    // Another time at the destination: only the checksum says the two are
+    // one file.
+    filetime::set_file_mtime(
+        landed.join("a-small.txt"),
+        filetime::FileTime::from_unix_time(1_000_000_000, 0),
+    )
+    .unwrap();
+    let small = tree.join("a-small.txt");
+    let written = filetime::FileTime::from_last_modification_time(&fs::metadata(&small).unwrap());
+
+    let mover = {
+        let (cli, config) = (ctx.cli_bin.clone(), ctx.config_dir.clone());
+        let source = format!("127.0.0.1:{}:/test/tree/", ctx.daemon_port);
+        let destination = format!("{}/", landed.display());
+        std::thread::spawn(move || {
+            let mut cmd = Command::new(cli);
+            cmd.arg("--config-dir")
+                .arg(config)
+                .args(["move", "-y", "--checksum"])
+                .arg(source)
+                .arg(destination);
+            run_with_timeout(cmd, Duration::from_secs(180))
+        })
+    };
+    std::thread::sleep(Duration::from_millis(250));
+    // Another hand: as many bytes, and the time put back.
+    fs::write(&small, b"4321").unwrap();
+    filetime::set_file_mtime(&small, written).unwrap();
+    let output = mover.join().expect("the move");
+    let said = format!(
+        "exit {:?}\n{}{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let at_source = fs::read(&small).ok();
+    let at_destination = fs::read(landed.join("a-small.txt")).unwrap();
+    assert!(
+        at_source.as_deref() == Some(&b"4321"[..]) || at_destination == b"4321",
+        "the rewritten bytes are nowhere: gone from the source, and the destination holds \
+         {:?}\n{said}",
+        String::from_utf8_lossy(&at_destination)
+    );
+    match at_source {
+        // Left where it was: said, and the move did not end well.
+        Some(_) => {
+            assert_eq!(output.status.code(), Some(1), "{said}");
+            assert!(said.contains("a-small.txt"), "{said}");
+        }
+        None => assert_eq!(output.status.code(), Some(0), "{said}"),
+    }
+    // What was not touched went, either way.
+    for n in 0..6 {
+        assert!(!tree.join(format!("big{n}.bin")).exists(), "big{n}\n{said}");
+    }
+}

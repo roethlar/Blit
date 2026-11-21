@@ -20,6 +20,11 @@
 //! held by its size and whole second, a file rewritten with as many bytes
 //! within the same second passed for the one that was sent).
 //!
+//! And the file it was is the file THE WALK SAW ([`Sightings`],
+//! cr-uv5-2): the look its size and time on the manifest came from,
+//! before a byte of it was read or hashed. Whatever is done to it after
+//! that look, whenever, the removal finds another file.
+//!
 //! An account is for ONE PLACE — the path its session read — and answers
 //! a removal of that path alone.
 //!
@@ -177,6 +182,82 @@ impl Account {
     pub fn is_empty(&self) -> bool {
         self.sent.is_empty()
     }
+}
+
+/// What a walk saw of the files it put on a manifest, each AS THE WALK'S
+/// OWN LOOK FOUND IT (cr-uv5-2) — the look its size and its time on the
+/// manifest were taken from, before anything of the file was read: not
+/// its bytes, not its checksum.
+///
+/// A move's account is written from these. It was written from a second
+/// look, at the manifest's end, which took any file still of the size and
+/// the second the manifest wrote: a file rewritten after it had been read
+/// or hashed — as many bytes, within that second — went into the account
+/// as rewritten, and the removal took bytes that had been sent to nobody.
+/// Held as the first look found it, a file changed in any way since is
+/// another file to the removal, whenever the change came.
+#[derive(Debug, Default)]
+pub struct Sightings {
+    wanted: std::sync::atomic::AtomicBool,
+    /// By a name's digest: the digest of the name with the file as seen.
+    seen: Mutex<HashMap<u128, u128>>,
+}
+
+impl Sightings {
+    /// From here on a walk records what it sees. What an earlier walk saw
+    /// is dropped.
+    pub fn begin(&self) {
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.wanted
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether a walk is to record what it sees: only a move asks.
+    pub fn wanted(&self) -> bool {
+        self.wanted.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// What a walk saw, each as [`sighting`] makes one.
+    pub fn publish(&self, seen: Vec<(u128, u128)>) {
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(seen);
+    }
+
+    /// The account of the files a session put on its manifest from `root`
+    /// — `listed`, each by its [`name_key`] — every one as the walk saw
+    /// it. A file the walk saw and the manifest does not list is not in
+    /// it, and neither is a name the walk recorded nothing for: both stay
+    /// where they are.
+    pub fn account(&self, root: &Path, listed: &[u128]) -> Account {
+        let seen = self
+            .seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Account {
+            root: place(root),
+            sent: listed
+                .iter()
+                .filter_map(|name| seen.get(name).map(|whole| (*name, *whole)))
+                .collect(),
+        }
+    }
+}
+
+/// One file as a walk saw it, for [`Sightings::publish`]: its path below
+/// the source, as [`Account::record`] takes one, and the file.
+pub fn sighting(path: &[u8], version: &Version) -> (u128, u128) {
+    (path_digest(path), digest(path, version))
+}
+
+/// What a file on a manifest is listed by, for [`Sightings::account`]:
+/// its path below the source, as [`Account::record`] takes one.
+pub fn name_key(path: &[u8]) -> u128 {
+    path_digest(path)
 }
 
 /// A session's account, closed: the session ended well, and what did not
@@ -418,6 +499,48 @@ mod tests {
     use super::*;
 
     const SECOND: i128 = 1_000_000_000;
+
+    /// cr-uv5-2: an account written from what a walk saw holds each file
+    /// on the manifest as the walk saw it — changed in any way since, it
+    /// is another file — and holds neither a file the walk saw that the
+    /// manifest does not list, nor a name the walk never saw. A walk
+    /// records nothing until it is asked to, and a new walk starts from
+    /// nothing.
+    #[test]
+    fn an_account_is_written_from_what_the_walk_saw() {
+        let seen = Version {
+            size: 4,
+            mtime_nanos: 1_700_000_000 * SECOND + 5,
+            ctime_nanos: 1_700_000_000 * SECOND + 7,
+            device: 1,
+            inode: 9,
+        };
+        let sightings = Sightings::default();
+        assert!(!sightings.wanted());
+        sightings.begin();
+        assert!(sightings.wanted());
+        sightings.publish(vec![sighting(b"a", &seen), sighting(b"left-out", &seen)]);
+        let root = Path::new("/srv/walked");
+        let account = sightings.account(root, &[name_key(b"a"), name_key(b"never-seen")]);
+        assert_eq!(account.len(), 1, "what is listed AND was seen");
+        let ticket = keep(account);
+        confirm(&ticket, &[]);
+        let accounts = held(&[ticket]).expect("kept");
+        assert!(accounts[0].is_of(root));
+        assert!(accounts[0].holds(b"a", &seen));
+        // Rewritten since with as many bytes, its time put back: only the
+        // time it was last changed says so.
+        let rewritten = Version {
+            ctime_nanos: seen.ctime_nanos + 1,
+            ..seen
+        };
+        assert!(!accounts[0].holds(b"a", &rewritten));
+        assert!(!accounts[0].holds(b"left-out", &seen));
+        assert!(!accounts[0].holds(b"never-seen", &seen));
+
+        sightings.begin();
+        assert!(sightings.account(root, &[name_key(b"a")]).is_empty());
+    }
 
     fn version(size: u64, mtime_nanos: i128) -> Version {
         Version {
