@@ -700,6 +700,10 @@ message TransferOperationSpec {
   // present Windows metadata rejects the entry before granting payload or
   // resume work.
   bool drop_windows_metadata = 13;
+  // Spec version 9 (cr-uv3-6): the asker will REMOVE the source when the
+  // transfer ends well — a move. Said in so many words: it was read off
+  // `require_complete_scan`, which a caller may want for a copy.
+  bool source_removed_after = 14;
 }
 
 // Source-side filter rules. Applied at the origin's TransferSource
@@ -1341,6 +1345,13 @@ message SessionOpen {
   // The session's number within that run, from 1: the main pass, then
   // each retry session. 0 when no run ID is given.
   uint32 attempt = 15;
+  // Contract 21 (cr-uv3-6): the initiator will REMOVE the source when the
+  // session ends well — a move. The end that holds the source then
+  // refuses one the removal could not take as typed (a link typed as a
+  // directory). It was read off `require_complete_scan`, which says
+  // only that a partial scan is to be refused, and which a caller may
+  // set for a copy.
+  bool source_removed_after = 16;
 }
 
 // Responder's reply. Refusals are SessionError frames, never silent

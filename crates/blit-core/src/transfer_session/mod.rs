@@ -193,7 +193,13 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// went by the file's name, which a directory put in the file's place
 /// answers to with whatever it holds of that name. A peer of contract 19
 /// would not read the mark and would send nothing for it.
-pub const CONTRACT_VERSION: u32 = 20;
+/// v21: `SessionOpen.source_removed_after` (cr-uv3-6) — the initiator says
+/// in so many words that it will remove the source when the session ends
+/// well. The end holding the source read that off `require_complete_scan`
+/// and refused a COPY of `link/` that asked for a complete scan. A peer
+/// of contract 20 would not read the field, and would serve a move
+/// through a link typed as a directory.
+pub const CONTRACT_VERSION: u32 = 21;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames

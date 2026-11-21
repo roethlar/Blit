@@ -311,6 +311,10 @@ pub struct PullExecution {
     /// refuses a partial source scan (`ScanIncomplete` at
     /// ManifestComplete) BEFORE the caller deletes the remote source.
     pub require_complete_scan: bool,
+    /// cr-uv3-6: the caller WILL delete the remote source when the pull
+    /// ends well. `blit move` sets both; a caller that only wants a whole
+    /// scan sets the one above.
+    pub source_removed_after: bool,
     /// Explicitly discard Windows attributes and named data streams at the
     /// source before manifest emission.
     pub drop_windows_metadata: bool,
@@ -369,6 +373,7 @@ pub async fn run_remote_pull(
         compare_mode: execution.compare_mode,
         ignore_existing: execution.ignore_existing,
         require_complete_scan: execution.require_complete_scan,
+        source_removed_after: execution.source_removed_after,
         drop_windows_metadata: execution.drop_windows_metadata,
         // `--force-grpc`: the session's in-stream byte carrier is the
         // gRPC-fallback lane (otp-8).

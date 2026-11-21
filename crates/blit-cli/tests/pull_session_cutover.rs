@@ -49,6 +49,7 @@ fn pull_execution(port: u16, dest_root: &Path) -> PullExecution {
         force_grpc: false,
         trace_data_plane: false,
         require_complete_scan: false,
+        source_removed_after: false,
         drop_windows_metadata: false,
         resume: false,
         resume_block_size: 0,
@@ -630,4 +631,47 @@ fn pull_verb_resume_patches_changed_partials_blockwise() {
         totals.bytes,
         v3.len()
     );
+}
+
+/// cr-uv3-6: "the source will be removed" is said, not inferred. A pull
+/// that asks for a complete scan and removes nothing — a library caller's
+/// copy — goes through a link typed as a directory, as any copy does; the
+/// daemon refused it, taking the complete-scan flag for a move's. A pull
+/// that says its source will be removed is still refused before copying.
+#[cfg(unix)]
+#[test]
+fn a_complete_scan_is_not_a_promise_to_remove_the_source() {
+    let ctx = TestContext::new();
+    fs::create_dir_all(ctx.module_dir.join("real")).expect("directory");
+    fs::write(ctx.module_dir.join("real/inner.txt"), b"inner").expect("file");
+    std::os::unix::fs::symlink("real", ctx.module_dir.join("link")).expect("link");
+    let through_the_link = |dest: &Path, removed_after: bool| {
+        let mut execution = PullExecution {
+            require_complete_scan: true,
+            source_removed_after: removed_after,
+            ..pull_execution(ctx.daemon_port, dest)
+        };
+        execution.remote.path = RemotePath::Module {
+            module: "test".to_string(),
+            rel_path: PathBuf::from("link/"),
+        };
+        runtime().block_on(async { run_remote_pull(execution, None).await })
+    };
+
+    let copied = ctx.workspace.join("copied");
+    through_the_link(&copied, false).expect("a copy that wants a complete scan");
+    assert_eq!(
+        fs::read(copied.join("inner.txt")).expect("copied"),
+        b"inner"
+    );
+
+    let moved = ctx.workspace.join("moved");
+    let Err(refused) = through_the_link(&moved, true) else {
+        panic!("a source that will be removed cannot be a link typed as a directory");
+    };
+    assert!(
+        format!("{refused:#}").contains("symbolic link to a directory"),
+        "{refused:#}"
+    );
+    assert!(!moved.join("inner.txt").exists(), "nothing was copied");
 }

@@ -82,7 +82,11 @@ use crate::generated::{
 ///     newer pair, asked by an older CLI, were sent no mark and did the
 ///     same. The contract version gates the two daemons against each
 ///     other, never the machine that asks.
-pub const SUPPORTED_SPEC_VERSION: u32 = 8;
+///   - 9: `source_removed_after` (cr-uv3-6), by the rule of version 4: a
+///     daemon that does not know the field would not learn that a move's
+///     source is to be removed, and would serve a move through a link
+///     typed as a directory — everything copied, nothing removed.
+pub const SUPPORTED_SPEC_VERSION: u32 = 9;
 
 /// Normalized, internal-friendly view of a transfer operation. Folds
 /// proto-`Unspecified` into concrete defaults, converts `FilterSpec`
@@ -125,6 +129,8 @@ pub struct NormalizedTransferOperation {
     /// purge dest extras) but carries the same scan-completeness
     /// requirement that a mirror operation does.
     pub require_complete_scan: bool,
+    /// cr-uv3-6: the asker removes the source when the transfer ends well.
+    pub source_removed_after: bool,
     /// Explicitly discard Windows attributes and named data streams at the
     /// SOURCE. False preserves strictly.
     pub drop_windows_metadata: bool,
@@ -176,6 +182,7 @@ impl NormalizedTransferOperation {
             force_grpc: spec.force_grpc,
             ignore_existing: spec.ignore_existing,
             require_complete_scan: spec.require_complete_scan,
+            source_removed_after: spec.source_removed_after,
             drop_windows_metadata: spec.drop_windows_metadata,
         })
     }
@@ -388,6 +395,8 @@ pub struct DelegatedSpecOptions {
     /// scan was incomplete. Set for a move-shaped delegation (the
     /// caller deletes the source after the transfer succeeds).
     pub require_complete_scan: bool,
+    /// cr-uv3-6: a move — the source is removed when the transfer ends well.
+    pub source_removed_after: bool,
     /// Explicitly discard Windows attributes and named data streams at the
     /// source daemon before it emits the manifest.
     pub drop_windows_metadata: bool,
@@ -460,6 +469,7 @@ pub fn delegated_spec_from_options(
         force_grpc: options.force_grpc,
         ignore_existing: options.ignore_existing,
         require_complete_scan: options.require_complete_scan,
+        source_removed_after: options.source_removed_after,
         drop_windows_metadata: options.drop_windows_metadata,
     })
 }
@@ -615,6 +625,7 @@ mod delegated_spec_tests {
             force_grpc: true,
             ignore_existing: true,
             require_complete_scan: true,
+            source_removed_after: true,
             drop_windows_metadata: true,
             resume: true,
             block_size: 4096,
@@ -625,6 +636,7 @@ mod delegated_spec_tests {
         assert!(spec.force_grpc);
         assert!(spec.ignore_existing);
         assert!(spec.require_complete_scan);
+        assert!(spec.source_removed_after, "and that the source is removed");
         assert!(spec.drop_windows_metadata);
         let resume = spec.resume.expect("resume settings present");
         assert!(resume.enabled);
@@ -692,6 +704,7 @@ mod tests {
             force_grpc: false,
             ignore_existing: false,
             require_complete_scan: false,
+            source_removed_after: false,
             drop_windows_metadata: false,
         }
     }
@@ -952,6 +965,39 @@ mod tests {
         assert!(
             version >= 8,
             "a request that says how its source was typed is version 8 or later, not {version}"
+        );
+    }
+
+    /// cr-uv3-6: a request that says its source will be removed carries a
+    /// version a daemon of spec version 8 refuses — that daemon read the
+    /// intent off the complete-scan flag and does not know the field —
+    /// and the field reaches the normalized operation as it was sent,
+    /// whatever the complete-scan flag says.
+    #[test]
+    fn a_request_that_says_its_source_is_removed_is_version_9_or_later() {
+        for (removed, complete) in [(true, true), (false, true), (true, false), (false, false)] {
+            let mut spec = empty_spec();
+            spec.source_removed_after = removed;
+            spec.require_complete_scan = complete;
+            let accepted = NormalizedTransferOperation::from_spec(spec).expect("this build's own");
+            assert_eq!(
+                (
+                    accepted.source_removed_after,
+                    accepted.require_complete_scan
+                ),
+                (removed, complete)
+            );
+        }
+        let mut spec = empty_spec();
+        spec.source_removed_after = true;
+        spec.spec_version = 8;
+        let error = NormalizedTransferOperation::from_spec(spec).unwrap_err();
+        assert!(error.to_string().contains("spec_version 8"), "{error:#}");
+        // Read at run time: the number is what a daemon is told.
+        let version = std::hint::black_box(SUPPORTED_SPEC_VERSION);
+        assert!(
+            version >= 9,
+            "a request that says its source is removed is version 9 or later, not {version}"
         );
     }
 

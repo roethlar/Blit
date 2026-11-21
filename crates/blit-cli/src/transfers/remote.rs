@@ -673,6 +673,8 @@ async fn run_remote_pull_transfer_inner(
         // source is deleted after this returns. Mirror needs no flag:
         // the session refuses an incomplete-scan mirror on its own.
         require_complete_scan: move_verb,
+        // cr-uv3-6: and says that the source will be removed.
+        source_removed_after: move_verb,
         drop_windows_metadata: args.drop_windows_metadata,
         resume: args.resume,
         resume_block_size: 0, // destination default (1 MiB)

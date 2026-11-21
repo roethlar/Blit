@@ -390,11 +390,11 @@ pub(crate) fn make_open_resolver(
         let default_root = default_root.clone();
         let module_name = open.module.clone();
         let wire_path = open.path.clone();
-        // The initiator writes, so this end is read from; and it removes
-        // what it read when the session ends well — a move is the one
-        // operation that asks a SOURCE for a complete scan.
+        // The initiator writes, so this end is read from; and it says so
+        // when it will remove what it read (cr-uv3-6). That was taken from
+        // `require_complete_scan`, which a caller may set for a copy.
         let read_from = open.initiator_role() == TransferRole::Destination;
-        let removed_after = open.require_complete_scan;
+        let removed_after = open.source_removed_after;
         Box::pin(async move {
             let config = resolve_module(&modules, default_root.as_ref(), &module_name)
                 .await

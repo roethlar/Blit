@@ -448,6 +448,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
             .unwrap_or(ComparisonMode::SizeMtime),
         ignore_existing: spec.ignore_existing,
         require_complete_scan: spec.require_complete_scan,
+        source_removed_after: spec.source_removed_after,
         drop_windows_metadata: spec.drop_windows_metadata,
         in_stream_bytes: spec.force_grpc,
         resume: spec.resume.as_ref().is_some_and(|r| r.enabled),
@@ -737,6 +738,7 @@ mod tests {
             force_grpc: false,
             ignore_existing: false,
             require_complete_scan: false,
+            source_removed_after: false,
             drop_windows_metadata: false,
         }
     }

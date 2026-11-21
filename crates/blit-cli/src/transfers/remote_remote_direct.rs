@@ -76,6 +76,8 @@ fn delegated_pull_options(
         resume: args.resume,
         block_size: 0,
         require_complete_scan: move_verb,
+        // cr-uv3-6: and says that the source will be removed.
+        source_removed_after: move_verb,
         drop_windows_metadata: args.drop_windows_metadata,
     }
 }
@@ -403,6 +405,7 @@ mod delegated_options_tests {
         let opts = delegated_pull_options(&args(false, false), FilterSpec::default(), false, true);
         assert!(opts.ignore_times, "move must force ignore_times");
         assert!(opts.require_complete_scan, "move refuses partial scans");
+        assert!(opts.source_removed_after, "and says its source is removed");
         assert_eq!(wire_compare(&opts), ComparisonMode::IgnoreTimes as i32);
 
         let with_checksum =
@@ -424,6 +427,7 @@ mod delegated_options_tests {
         let opts = delegated_pull_options(&args(false, true), FilterSpec::default(), false, false);
         assert!(!opts.ignore_times);
         assert!(!opts.require_complete_scan);
+        assert!(!opts.source_removed_after);
         assert_eq!(wire_compare(&opts), ComparisonMode::SizeOnly as i32);
 
         let default_opts =

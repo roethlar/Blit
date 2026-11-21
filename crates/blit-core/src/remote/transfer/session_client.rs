@@ -320,6 +320,10 @@ pub struct PullSessionOptions {
     pub compare_mode: ComparisonMode,
     pub ignore_existing: bool,
     pub require_complete_scan: bool,
+    /// cr-uv3-6: the caller will remove the source when the session ends
+    /// well (`blit move`). Said apart from `require_complete_scan`, which
+    /// only refuses a partial scan and is any caller's to ask for.
+    pub source_removed_after: bool,
     /// Explicitly discard Windows attributes and named data streams at the
     /// SOURCE. False preserves strictly and may reject a non-Windows target.
     pub drop_windows_metadata: bool,
@@ -374,6 +378,7 @@ impl Default for PullSessionOptions {
             compare_mode: ComparisonMode::SizeMtime,
             ignore_existing: false,
             require_complete_scan: false,
+            source_removed_after: false,
             drop_windows_metadata: false,
             in_stream_bytes: false,
             resume: false,
@@ -448,6 +453,7 @@ pub async fn run_pull_session_with_client(
         compare_mode: options.compare_mode as i32,
         ignore_existing: options.ignore_existing,
         require_complete_scan: options.require_complete_scan,
+        source_removed_after: options.source_removed_after,
         drop_windows_metadata: options.drop_windows_metadata,
         // otp-5b: default to the TCP data plane; the SOURCE responder
         // grants it in SessionAccept unless this asks for the in-stream
