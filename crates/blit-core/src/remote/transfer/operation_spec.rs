@@ -98,7 +98,19 @@ use crate::generated::{
 ///     nothing that stands at a listed path is written over. A daemon of
 ///     version 11 would replace a file there that carries the mark that
 ///     version stamped on an incomplete copy.
-pub const SUPPORTED_SPEC_VERSION: u32 = 12;
+///   - 13: no new field in the request — the ANSWER to it changed, twice,
+///     under version 12, and the request names the version of the answer
+///     its asker will read (cr-ecm14-3). `DelegatedPullSummary` gained
+///     `failed_paths_raw` (cr-ecm13-3): a CLI of that build and two
+///     daemons of the build before agreed on 12, the daemons left the
+///     list out, and the CLI's retry asked for a failed name that is not
+///     text by its text — another file. And what its `source_ticket`
+///     stands for changed (cr-uv4-1): an earlier pair's account lets a
+///     removal take a file rewritten within its second. The version is of
+///     the whole exchange: what is asked, and what is answered. Nothing
+///     else gates it — the contract version is compared between the two
+///     daemons, never with the machine that asks.
+pub const SUPPORTED_SPEC_VERSION: u32 = 13;
 
 /// Normalized, internal-friendly view of a transfer operation. Folds
 /// proto-`Unspecified` into concrete defaults, converts `FilterSpec`
@@ -1019,6 +1031,33 @@ mod tests {
             version >= 9,
             "a request that says its source is removed is version 9 or later, not {version}"
         );
+    }
+
+    /// cr-ecm14-3: the version is of the answer too. A daemon of spec
+    /// version 12 — whose summary gives no bytes for a failed name that is
+    /// not text, and whose move account is the loose one — is not asked by
+    /// this build, and does not answer it: each refuses the other's
+    /// number, naming both.
+    #[test]
+    fn a_request_names_the_version_of_the_answer_it_reads() {
+        // Read at run time: the number is what a daemon is told.
+        let version = std::hint::black_box(SUPPORTED_SPEC_VERSION);
+        assert!(
+            version >= 13,
+            "the answer carries the bytes of a failed name since version 13, not {version}"
+        );
+        NormalizedTransferOperation::from_spec(empty_spec()).expect("this build's own");
+        for other in [12, version + 1] {
+            let mut spec = empty_spec();
+            spec.spec_version = other;
+            let error = NormalizedTransferOperation::from_spec(spec).unwrap_err();
+            let said = error.to_string();
+            assert!(
+                said.contains(&format!("spec_version {other}"))
+                    && said.contains(&format!("expected {version}")),
+                "{said}"
+            );
+        }
     }
 
     /// cr-ecm12-1: a request whose list is of exact paths carries a
