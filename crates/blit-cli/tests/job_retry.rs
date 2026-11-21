@@ -272,6 +272,85 @@ fn a_run_whose_failures_are_not_all_known_is_not_retried() {
     );
 }
 
+/// cr-ecm11-1: a retry asks for what failed AS IT FAILED. A source that
+/// is one file fails under no name — it is the source itself — and its
+/// retry was given the file's name instead (cr-ecm10-3). With the file
+/// replaced since by a DIRECTORY holding another `Report.txt`, the retry
+/// took the inner file for the one that failed, wrote it to
+/// `out/Report.txt/Report.txt` and exited 0. The source itself is no
+/// longer a file: there is nothing to retry, and the retry says so.
+#[test]
+fn a_retry_of_a_single_file_does_not_take_a_directory_of_its_name() {
+    // From this machine, and from a daemon — where the mark for the
+    // source itself crosses the wire.
+    for from_a_daemon in [false, true] {
+        let ctx = TestContext::new();
+        let (src, typed) = if from_a_daemon {
+            (
+                ctx.module_dir.join("Report.txt"),
+                format!("127.0.0.1:{}:/test/Report.txt", ctx.daemon_port),
+            )
+        } else {
+            let src = ctx.workspace.join("Report.txt");
+            (src.clone(), src.display().to_string())
+        };
+        let out = ctx.workspace.join("out");
+        let dst = out.join("Report.txt");
+        fs::write(&src, b"the file that failed").unwrap();
+        // A folder stands where the file is to land, and holds a file of
+        // the source's name: what a retry by name would overwrite.
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(dst.join("Report.txt"), b"not the run's to touch").unwrap();
+        let first = blit(&ctx, &["copy", "--retries", "0", &typed, &arg(&out)]);
+        assert_eq!(
+            first.status.code(),
+            Some(EXIT_PARTIAL_FAILURE),
+            "daemon {from_a_daemon}: {}",
+            text(&first.stderr)
+        );
+        let run_id = jobs(&ctx)[0]["run_id"].as_str().unwrap().to_string();
+
+        // The source becomes a directory holding another file of its name.
+        fs::remove_file(&src).unwrap();
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("Report.txt"), b"another file altogether").unwrap();
+        let retried = blit(&ctx, &["jobs", "retry", &run_id]);
+        let said = format!("{}{}", text(&retried.stdout), text(&retried.stderr));
+        assert_eq!(
+            retried.status.code(),
+            Some(EXIT_PARTIAL_FAILURE),
+            "daemon {from_a_daemon}: {said}"
+        );
+        assert!(
+            said.contains("missing at retry"),
+            "daemon {from_a_daemon}: {said}"
+        );
+        assert_eq!(
+            fs::read(dst.join("Report.txt")).unwrap(),
+            b"not the run's to touch",
+            "daemon {from_a_daemon}: nothing of the directory was sent\n{said}"
+        );
+
+        // And put back as the file it was, with its place freed, it lands.
+        fs::remove_dir_all(&src).unwrap();
+        fs::write(&src, b"the file that failed").unwrap();
+        fs::remove_dir_all(&dst).unwrap();
+        let again = jobs(&ctx)[0]["run_id"].as_str().unwrap().to_string();
+        let retried = blit(&ctx, &["jobs", "retry", &again]);
+        assert!(
+            retried.status.success(),
+            "daemon {from_a_daemon}: {}{}",
+            text(&retried.stdout),
+            text(&retried.stderr)
+        );
+        assert_eq!(
+            fs::read(&dst).unwrap(),
+            b"the file that failed",
+            "daemon {from_a_daemon}"
+        );
+    }
+}
+
 /// Review cr-jl4-3: when a record's failure list was cut short, its log
 /// completes it with the run's terminal state — a file a later retry pass
 /// landed is not retried again.

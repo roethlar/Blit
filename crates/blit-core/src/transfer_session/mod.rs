@@ -188,7 +188,12 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// one — before anything is copied. No message changed. A daemon of
 /// contract 18 would drop the mark and copy the file, and the removal
 /// that ends the move would then find no directory to remove.
-pub const CONTRACT_VERSION: u32 = 19;
+/// v20: `FilterSpec.files_from_root` (cr-ecm11-1) — a retry's list names
+/// the source ITSELF, a source that is one file, by a mark of its own. It
+/// went by the file's name, which a directory put in the file's place
+/// answers to with whatever it holds of that name. A peer of contract 19
+/// would not read the mark and would send nothing for it.
+pub const CONTRACT_VERSION: u32 = 20;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames
@@ -6990,6 +6995,35 @@ mod tests {
         assert!(requested_but_unscanned(None, &unnamed, &sent, None, &[])
             .0
             .is_empty());
+    }
+
+    /// cr-ecm11-1: a retry lists the source ITSELF by the empty path —
+    /// the path its one file is sent under. Sent, it is accounted for;
+    /// not sent — the source is a directory now — it is reported missing
+    /// under that same path, whatever else was sent.
+    #[test]
+    fn the_source_itself_is_missing_unless_it_was_sent() {
+        let scope: HashSet<PathBuf> = [PathBuf::new()].into();
+        let missing = |sent: &[&str], sole: Option<&str>| -> Vec<(String, String)> {
+            let sent: HashMap<String, FileHeader> = sent
+                .iter()
+                .map(|path| (path.to_string(), FileHeader::default()))
+                .collect();
+            requested_but_unscanned(Some(&scope), &[], &sent, sole, &[])
+                .0
+                .into_iter()
+                .map(|failure| (failure.relative_path, failure.reason))
+                .collect()
+        };
+        assert!(missing(&[""], Some("Report.txt")).is_empty());
+        let not_found = "source: missing at retry (not found by the retry scan)".to_string();
+        for sent in [&[][..], &["Report.txt"][..]] {
+            assert_eq!(
+                missing(sent, Some("Report.txt")),
+                [(String::new(), not_found.clone())],
+                "{sent:?}"
+            );
+        }
     }
 
     /// cr-ecm9-3: a source that is one file is sent under the empty path

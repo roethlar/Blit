@@ -111,9 +111,13 @@ fn split_listed(listed: &std::collections::HashSet<PathBuf>) -> (Vec<&PathBuf>, 
     let (mut names, mut unnamed) = (Vec::new(), Vec::new());
     for line in listed {
         let mut components = line.components().peekable();
-        let names_an_entry = components.peek().is_some()
-            && components.all(|c| matches!(c, std::path::Component::Normal(_)))
-            && !crate::fs_enum::match_bytes(line.as_os_str()).contains(&0);
+        // cr-ecm11-1: the empty path is no line of a list — a blank line
+        // is skipped where a list is read — and is a retry's mark for the
+        // source itself. It stays with the names: it is asked for.
+        let names_an_entry = line.as_os_str().is_empty()
+            || (components.peek().is_some()
+                && components.all(|c| matches!(c, std::path::Component::Normal(_)))
+                && !crate::fs_enum::match_bytes(line.as_os_str()).contains(&0));
         if names_an_entry {
             names.push(line);
         } else {
@@ -367,6 +371,7 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
         files_from: Vec::new(),
         files_from_raw: Vec::new(),
         files_from_unnamed: Vec::new(),
+        files_from_root: false,
         // EXCLUDE_CASE_MATCHING slice 3 (contract 9): the case mode goes
         // with the patterns, so the peer reads them as this side does.
         ignore_case: inputs.ignore_case,
@@ -407,6 +412,13 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
         let mut entries: Vec<String> = Vec::new();
         let mut raw_entries: Vec<Vec<u8>> = Vec::new();
         for path in names {
+            // cr-ecm11-1: the mark for the source itself has a field of
+            // its own; among the names it would be an empty one, which a
+            // receiver refuses.
+            if path.as_os_str().is_empty() {
+                spec.files_from_root = true;
+                continue;
+            }
             match crate::raw_name::raw_relative_bytes(path) {
                 Some(raw) => raw_entries.push(raw),
                 None => entries.push(crate::path_posix::relative_path_to_posix(path)),
@@ -2044,6 +2056,54 @@ mod tests {
         assert!(listed
             .iter()
             .any(|path| path.as_os_str().as_bytes() == b"bad\xff.txt"));
+    }
+
+    /// cr-ecm11-1: a retry's list holds the source ITSELF as the empty
+    /// path. It is no name and no line that names nothing: it stays in
+    /// the list here, crosses the wire in a field of its own, and is in
+    /// the list again at the peer. A list read from a file cannot hold it.
+    #[test]
+    fn a_retry_lists_the_source_itself_by_a_mark_of_its_own() {
+        use crate::remote::transfer::operation_spec::filter_from_spec;
+        let retry: std::collections::HashSet<PathBuf> =
+            [PathBuf::new(), PathBuf::from("sub/b.txt")].into();
+        let mut retried = inputs(&[], &[]);
+        retried.retry_only = Some(&retry);
+
+        let local = build(&retried).unwrap();
+        assert_eq!(local.files_from.as_ref(), Some(&retry));
+        assert!(
+            local.files_from_unnamed.is_empty(),
+            "no line that names nothing"
+        );
+        assert!(local.lists_the_source_itself());
+
+        let spec = build_spec(&retried).unwrap();
+        assert!(spec.files_from_root && spec.files_from_set);
+        assert_eq!(spec.files_from, ["sub/b.txt"], "never an empty name");
+        assert!(spec.files_from_unnamed.is_empty());
+        let received = filter_from_spec(spec).unwrap();
+        assert_eq!(received.files_from.as_ref(), Some(&retry));
+        assert!(received.files_from_unnamed.is_empty());
+
+        // The mark alone is a list in force.
+        let alone: std::collections::HashSet<PathBuf> = [PathBuf::new()].into();
+        retried.retry_only = Some(&alone);
+        let received = filter_from_spec(build_spec(&retried).unwrap()).unwrap();
+        assert_eq!(received.files_from.as_ref(), Some(&alone));
+        // What it lets pass: the source itself, and no entry by any name.
+        let root = Path::new("/srv/Report.txt");
+        assert!(received.allows_root_file(Some(Path::new("Report.txt")), root, 1, None));
+        assert!(!received.allows_entry(Some(Path::new("Report.txt")), root, 1, None));
+        // A list of names holds no such mark: a blank line is no line.
+        assert!(FileFilter::files_from_text("\n   \n\nname.txt\n")
+            .iter()
+            .all(|name| !name.as_os_str().is_empty()));
+        let named: std::collections::HashSet<PathBuf> = [PathBuf::from("Report.txt")].into();
+        retried.retry_only = Some(&named);
+        let spec = build_spec(&retried).unwrap();
+        assert!(!spec.files_from_root);
+        assert!(!filter_from_spec(spec).unwrap().lists_the_source_itself());
     }
 
     fn inputs<'a>(include: &'a [String], exclude: &'a [String]) -> FilterInputs<'a> {

@@ -1111,6 +1111,31 @@ impl FileFilter {
         })
     }
 
+    /// Whether the source ITSELF passes, when the source is one file
+    /// (cr-ecm11-1). It has no path below its root: it is asked about
+    /// under its own `name`, as any entry is under its path — and it
+    /// passes besides when a list holds the EMPTY PATH, which is a
+    /// retry's mark for it and nothing a list of names can hold
+    /// (cr-ecm7-1). A retry used to ask for the file by its name; a
+    /// directory put in the file's place since then answered with
+    /// whatever it held of that name.
+    pub fn allows_root_file(
+        &self,
+        name: Option<&Path>,
+        abs_path: &Path,
+        size: u64,
+        mtime: Option<SystemTime>,
+    ) -> bool {
+        self.lists_the_source_itself() || self.allows_entry(name, abs_path, size, mtime)
+    }
+
+    /// A list is in force and holds the mark for the source itself.
+    pub fn lists_the_source_itself(&self) -> bool {
+        self.files_from
+            .as_ref()
+            .is_some_and(|listed| listed.contains(Path::new("")))
+    }
+
     /// Full filter check. `rel_path` enables `files_from` matching;
     /// `mtime` enables age filtering. Both default to permissive when
     /// `None` (so back-compat callers via `allows_file` still work).

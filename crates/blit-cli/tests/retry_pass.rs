@@ -224,6 +224,54 @@ fn a_single_file_freed_during_the_wait_lands_on_the_retry_pass() {
     }
 }
 
+/// cr-ecm11-1: the same within one command. The file that failed is
+/// replaced, during the wait, by a directory holding another file of its
+/// name: the retry pass asks for the source itself, finds no file there,
+/// and reports it — it used to send the inner file into the destination
+/// and exit 0.
+#[test]
+fn a_single_file_replaced_by_a_directory_during_the_wait_is_not_retried_into() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let src = temp.path().join("Report.txt");
+    fs::write(&src, b"the file that failed").expect("write the source");
+    let out = temp.path().join("out");
+    let dst = out.join("Report.txt");
+    fs::create_dir_all(&dst).expect("block the destination path");
+    fs::write(dst.join("Report.txt"), b"not the run's to touch").expect("a file of that name");
+    let counters = temp.path().join("counters.txt");
+
+    let mut cmd = cli_command();
+    cmd.arg("--diagnostics-counter-file").arg(&counters);
+    cmd.args(["copy", "--yes", "--retries", "1", "--retry-wait", "4"]);
+    cmd.arg(&src).arg(format!("{}/", out.display()));
+    let child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn blit");
+    wait_for_counter(&counters, "retry_wait_seconds", Duration::from_secs(60));
+    fs::remove_file(&src).expect("the source goes");
+    fs::create_dir_all(&src).expect("a directory in its place");
+    fs::write(src.join("Report.txt"), b"another file altogether").expect("its own file");
+    let output = finish(child);
+    let (stdout, stderr) = (stdout_of(&output), stderr_of(&output));
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_PARTIAL_FAILURE),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("missing at retry") || stderr.contains("missing at retry"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        fs::read(dst.join("Report.txt")).expect("still there"),
+        b"not the run's to touch",
+        "nothing of the directory was sent"
+    );
+    assert_eq!(counter_lines(&counters, "retry_pass"), vec![1]);
+}
+
 /// A20 (b): a file that fails on every pass is reported once, marked
 /// `(retried)`, after exactly `--retries` passes; exit 2.
 #[test]

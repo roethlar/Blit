@@ -293,7 +293,10 @@ impl FileEnumerator {
                         .map(|name| path.with_file_name(name));
                     let asked = renamed.as_deref().unwrap_or(path);
                     let named = asked.file_name().map(Path::new).unwrap_or(&rel);
-                    if filter.allows_entry(Some(named), asked, size, mtime) {
+                    // cr-ecm11-1: or because a retry's list holds the
+                    // source itself — which only a root that IS a file
+                    // answers to, here and nowhere below.
+                    if filter.allows_root_file(Some(named), asked, size, mtime) {
                         visit(EnumeratedEntry {
                             absolute_path: path.to_path_buf(),
                             // Empty relative path so src_root.join(rel) === src_root
@@ -529,6 +532,38 @@ mod tests {
         assert_eq!(pruned.take(), vec!["ignored.log".to_string()]);
     }
 
+    /// cr-ecm11-1: a retry's mark for the source itself is answered by a
+    /// root that is a file, and by NOTHING in a root that is a directory —
+    /// not by an entry of the name the file had. With `Report.txt`
+    /// replaced by a directory holding another `Report.txt`, the retry
+    /// asked for the name, was given the inner file, and wrote it to
+    /// `out/Report.txt/Report.txt`.
+    #[test]
+    fn the_source_itself_is_not_an_entry_of_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Report.txt");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("Report.txt"), b"another file").unwrap();
+        std::fs::write(root.join("sub/Report.txt"), b"another file").unwrap();
+        let visited = |names: &[&str]| -> Vec<PathBuf> {
+            let mut filter = FileFilter::default();
+            filter.files_from = Some(names.iter().map(PathBuf::from).collect());
+            let mut seen = Vec::new();
+            FileEnumerator::new(filter)
+                .enumerate_local_streaming(&root, |entry| {
+                    if matches!(entry.kind, EntryKind::File { .. }) {
+                        seen.push(entry.relative_path.clone());
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            seen
+        };
+        assert_eq!(visited(&[""]), Vec::<PathBuf>::new());
+        // A name still names the entry of that name.
+        assert_eq!(visited(&["Report.txt"]), [PathBuf::from("Report.txt")]);
+    }
+
     /// cr-ecm9-3: a root that is one file is filtered under the file's own
     /// name — by a list, by a rule that names it, in either case mode —
     /// and emitted under the empty relative path. Asked about the empty
@@ -564,6 +599,8 @@ mod tests {
         );
         assert_eq!(visited(listing(&["other.txt"])), Vec::<PathBuf>::new());
         assert_eq!(visited(listing(&[])), Vec::<PathBuf>::new());
+        // cr-ecm11-1: and by a retry's mark for the source itself.
+        assert_eq!(visited(listing(&[""])), emitted, "listed as itself");
         let excluding = |pattern: &str, ignore_case: bool| {
             let mut filter = FileFilter::default();
             filter.exclude_files = vec![pattern.to_string()];

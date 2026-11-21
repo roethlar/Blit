@@ -512,16 +512,16 @@ where
         // out of this loop's state and its caller's frame.
         let pass_run = async {
             if left.is_empty() {
-                pass_args.retry_only = Some(named_for_a_list(set, &args.source));
+                pass_args.retry_only = Some(set);
                 Box::pin(run(pass_args)).await
             } else {
                 let rest: HashSet<PathBuf> = set.difference(&left).cloned().collect();
                 let mut left_args = pass_args.clone();
-                left_args.retry_only = Some(named_for_a_list(left, &args.source));
+                left_args.retry_only = Some(left);
                 left_args.ignore_existing = false;
                 let mut result = Box::pin(run(left_args)).await?;
                 if !rest.is_empty() {
-                    pass_args.retry_only = Some(named_for_a_list(rest, &args.source));
+                    pass_args.retry_only = Some(rest);
                     result.merge(Box::pin(run(pass_args)).await?);
                 }
                 Ok(result)
@@ -565,50 +565,6 @@ where
     })
 }
 
-/// The paths a pass is limited to, in the names a LIST holds (cr-ecm10-3).
-///
-/// A source that is one file has one entry, and a transfer knows it by the
-/// EMPTY relative path: that is what a failure of it is recorded under,
-/// and so what the next pass is asked to retry. A list knows that file by
-/// its own name (cr-ecm7-1, cr-ecm9-3). Handed the empty path as it
-/// stood, the list held a line that names nothing — the pass sent
-/// nothing and reported the file `missing at retry`, though it was there
-/// and its destination had been freed.
-pub(crate) fn named_for_a_list(set: HashSet<PathBuf>, source: &str) -> HashSet<PathBuf> {
-    if !set.contains(std::path::Path::new("")) {
-        return set;
-    }
-    let Some(name) = source_name(source) else {
-        return set;
-    };
-    set.into_iter()
-        .map(|path| {
-            if path.as_os_str().is_empty() {
-                name.clone()
-            } else {
-                path
-            }
-        })
-        .collect()
-}
-
-/// The last name of a transfer's source as typed: what a list calls a
-/// source that is one file.
-fn source_name(source: &str) -> Option<PathBuf> {
-    use blit_core::endpoints::{parse_transfer_endpoint, Endpoint};
-    use blit_core::remote::RemotePath;
-    let name = match parse_transfer_endpoint(source).ok()? {
-        Endpoint::Local(path) => path.file_name()?.to_os_string(),
-        Endpoint::Remote(remote) => match remote.path {
-            RemotePath::Module { rel_path, .. } | RemotePath::Root { rel_path } => {
-                rel_path.file_name()?.to_os_string()
-            }
-            RemotePath::Discovery => return None,
-        },
-    };
-    Some(PathBuf::from(name))
-}
-
 /// Honour `--retry-wait` before a pass. The requested wait is always
 /// recorded to the diagnostics counter file (when one is installed);
 /// the hidden diagnostics switch replaces the sleep itself so tests
@@ -631,40 +587,6 @@ mod tests {
             reason: "source: cannot open: boom".to_string(),
             raw_relative_path: None,
         }
-    }
-
-    /// cr-ecm10-3: what a pass is limited to is given to a LIST, and a
-    /// list knows a source that is one file by its name — the empty path
-    /// a failure of it is recorded under names nothing there. Every other
-    /// path goes as it is, and so does the empty one when the source has
-    /// no last name to go by.
-    #[test]
-    fn the_one_file_of_a_single_file_source_is_retried_by_its_name() {
-        let set =
-            |paths: &[&str]| -> HashSet<PathBuf> { paths.iter().map(PathBuf::from).collect() };
-        for (source, name) in [
-            ("/srv/data/Report.txt", "Report.txt"),
-            ("relative/Report.txt", "Report.txt"),
-            ("./Report.txt", "Report.txt"),
-            ("srv:/module/sub/Report.txt", "Report.txt"),
-            ("srv://sub/Report.txt", "Report.txt"),
-        ] {
-            assert_eq!(
-                named_for_a_list(set(&[""]), source),
-                set(&[name]),
-                "{source}"
-            );
-        }
-        // A tree's failures are paths below it: nothing to translate.
-        assert_eq!(
-            named_for_a_list(set(&["a.txt", "sub/b.txt"]), "/srv/data"),
-            set(&["a.txt", "sub/b.txt"])
-        );
-        // No name to go by: the path stands.
-        assert_eq!(named_for_a_list(set(&[""]), "srv:/module/"), set(&[""]));
-        assert_eq!(named_for_a_list(set(&[""]), "/"), set(&[""]));
-        // A bare word is a daemon to blit, never a file here.
-        assert_eq!(named_for_a_list(set(&[""]), "Report.txt"), set(&[""]));
     }
 
     fn failures(paths: &[&str]) -> PassFailures {

@@ -1222,14 +1222,16 @@ async fn filter_headers(
         // globs work — otherwise filename derives from PathBuf::new(),
         // which has no file_name(), and `--include '*.txt'` rejects
         // every single-file push regardless of the actual filename.
-        let (rel_for_filter, abs_for_filter): (Option<&Path>, &Path) = if rel.as_os_str().is_empty()
-        {
+        //
+        // cr-ecm11-1: and such an entry — the source itself — passes a
+        // retry's list by the mark that list has for it.
+        let allowed = if rel.as_os_str().is_empty() {
             let root_name = source_root.file_name().map(Path::new);
-            (root_name, source_root.as_path())
+            filter.allows_root_file(root_name, source_root.as_path(), header.size, mtime)
         } else {
-            (Some(rel.as_path()), rel.as_path())
+            filter.allows_entry(Some(rel.as_path()), rel.as_path(), header.size, mtime)
         };
-        if !filter.allows_entry(rel_for_filter, abs_for_filter, header.size, mtime) {
+        if !allowed {
             continue;
         }
         if tx.send(header).await.is_err() {

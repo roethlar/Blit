@@ -241,11 +241,16 @@ pub(crate) fn filter_from_spec(spec: ProtoFilterSpec) -> Result<FileFilter> {
     // holds — an empty one lets nothing pass, exactly as it does where it
     // was read. (The two lists alone cannot tell "empty" from "none".)
     if spec.files_from_set
+        || spec.files_from_root
         || !spec.files_from.is_empty()
         || !spec.files_from_raw.is_empty()
         || !spec.files_from_unnamed.is_empty()
     {
         let mut listed = std::collections::HashSet::new();
+        // cr-ecm11-1: the source itself, by the mark a list has for it.
+        if spec.files_from_root {
+            listed.insert(std::path::PathBuf::new());
+        }
         let mut unnamed = spec.files_from_unnamed;
         for name in spec.files_from {
             match listed_name(&name, cfg!(windows))? {
@@ -749,6 +754,7 @@ mod tests {
             files_from: vec![],
             files_from_raw: Vec::new(),
             files_from_unnamed: Vec::new(),
+            files_from_root: false,
             ignore_case: false,
             files_from_set: false,
         });
@@ -773,6 +779,7 @@ mod tests {
             files_from: vec![],
             files_from_raw: Vec::new(),
             files_from_unnamed: Vec::new(),
+            files_from_root: false,
             ignore_case: false,
             files_from_set: false,
         });
@@ -975,6 +982,7 @@ mod tests {
             files_from: vec![],
             files_from_raw: Vec::new(),
             files_from_unnamed: Vec::new(),
+            files_from_root: false,
             ignore_case: false,
             files_from_set: false,
         });

@@ -756,6 +756,14 @@ message FilterSpec {
   // source reports each as a listed name it did not find, as it does a
   // name whose file is gone.
   repeated string files_from_unnamed = 11;
+  // Contract 20 (cr-ecm11-1): the list names the SOURCE ITSELF — the one
+  // entry of a source that is one file, which has no name below its root.
+  // Only a retry sets it: that file's failure is recorded under the empty
+  // path, and its retry asks for exactly that. A source that is a
+  // directory holds no such entry and sends nothing for it, whatever in it
+  // bears the file's old name. Never an entry of `files_from`, where an
+  // empty name is refused.
+  bool files_from_root = 12;
 }
 
 // How the origin decides which files need transfer when both sides
