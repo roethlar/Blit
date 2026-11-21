@@ -316,6 +316,12 @@ asks before it deletes.
   answer at all — the connection lost once it was sent — is unfinished
   too, and no path is said to be still there; only what a daemon answers
   before it acts (a read-only module, another build) is a refusal.
+- **`rm` asks of a directory what `rm` asks.** A directory on the way to
+  a path is searched, not read: in one that may be written and not
+  listed (mode 0300) `blit rm` answered `Permission denied` where `rm`
+  removes the file. And a directory that cannot be read is removed when
+  it is empty, as `rm` removes it; with something in it, it is named
+  and left.
 - **A removal stops when its asker does.** `blit rm` interrupted, or its
   connection lost, ends the removal on the daemon at the entry it has
   reached; it used to run on to the end.

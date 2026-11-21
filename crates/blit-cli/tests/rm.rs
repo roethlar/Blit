@@ -328,6 +328,210 @@ fn rm_equals_the_system_rm() {
     }
 }
 
+/// cr-uv2-4, where the system command IS the reference: `blit rm` asks of
+/// a directory what `rm` asks of it. A directory on the way to an operand
+/// is searched, not read — in one of mode 0300 `rm` removes a file named
+/// to it, and blit answered `Permission denied` and left it. A directory
+/// that cannot be read is removed when it is empty, and reported when it
+/// is not. For each tree: the same lines, the same status, the same
+/// entries left.
+#[cfg(target_os = "linux")]
+#[test]
+fn rm_asks_of_a_directory_what_the_system_rm_asks() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let ctx = TestContext::new();
+    let system_root = ctx.workspace.join("system");
+    if Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|o| o.stdout == b"0\n")
+        .unwrap_or(false)
+    {
+        eprintln!("running as root: no mode stops anything; nothing to compare");
+        return;
+    }
+    /// Files to write, directories to make, modes to set — the deepest
+    /// first — and what is typed.
+    struct Case {
+        files: &'static [&'static str],
+        dirs: &'static [&'static str],
+        modes: &'static [(&'static str, u32)],
+        options: &'static [&'static str],
+        operands: &'static [&'static str],
+    }
+    let cases = [
+        // Write and search, no read: the reviewer's case, then a tree,
+        // then two such levels.
+        Case {
+            files: &["t/w/known"],
+            dirs: &[],
+            modes: &[("t/w", 0o300)],
+            options: &[],
+            operands: &["t/w/known"],
+        },
+        Case {
+            files: &["t/w/sub/file"],
+            dirs: &[],
+            modes: &[("t/w", 0o300)],
+            options: &["-r"],
+            operands: &["t/w/sub"],
+        },
+        Case {
+            files: &["t/w/v/known"],
+            dirs: &[],
+            modes: &[("t/w/v", 0o300), ("t/w", 0o300)],
+            options: &[],
+            operands: &["t/w/v/known"],
+        },
+        // What does stop `rm`: no write, or no search.
+        Case {
+            files: &["t/x/known"],
+            dirs: &[],
+            modes: &[("t/x", 0o100)],
+            options: &[],
+            operands: &["t/x/known"],
+        },
+        Case {
+            files: &["t/r/known"],
+            dirs: &[],
+            modes: &[("t/r", 0o500)],
+            options: &[],
+            operands: &["t/r/known"],
+        },
+        Case {
+            files: &["t/n/known"],
+            dirs: &[],
+            modes: &[("t/n", 0o600)],
+            options: &[],
+            operands: &["t/n/known"],
+        },
+        // A directory that cannot be read: empty, it goes.
+        Case {
+            files: &[],
+            dirs: &["t/u"],
+            modes: &[("t/u", 0o300)],
+            options: &["-r"],
+            operands: &["t/u"],
+        },
+        Case {
+            files: &[],
+            dirs: &["t/z"],
+            modes: &[("t/z", 0o000)],
+            options: &["-r"],
+            operands: &["t/z"],
+        },
+        Case {
+            files: &["t/in/a"],
+            dirs: &["t/in/z"],
+            modes: &[("t/in/z", 0o000)],
+            options: &["-r"],
+            operands: &["t/in"],
+        },
+        // With something in it, it stays and is named.
+        Case {
+            files: &["t/v/inner"],
+            dirs: &[],
+            modes: &[("t/v", 0o300)],
+            options: &["-r"],
+            operands: &["t/v"],
+        },
+        Case {
+            files: &["t/in/a", "t/in/v/inner"],
+            dirs: &[],
+            modes: &[("t/in/v", 0o300)],
+            options: &["-r"],
+            operands: &["t/in"],
+        },
+        Case {
+            files: &["t/in/a", "t/in/v/inner"],
+            dirs: &[],
+            modes: &[("t/in/v", 0o300)],
+            options: &["-r", "-f"],
+            operands: &["t/in", "t/missing"],
+        },
+    ];
+    fn unlock(dir: &Path) {
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                unlock(&entry.path());
+            }
+        }
+    }
+    fn left(dir: &Path, base: &Path, out: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            out.push(path.strip_prefix(base).unwrap().display().to_string());
+            if path.is_dir() && !path.is_symlink() {
+                left(&path, base, out);
+            }
+        }
+    }
+    for case in cases {
+        let what = format!(
+            "rm {:?} {:?} with {:?}",
+            case.options, case.operands, case.modes
+        );
+        for root in [&system_root, &ctx.module_dir] {
+            if root.join("t").exists() {
+                unlock(&root.join("t"));
+                fs::remove_dir_all(root.join("t")).unwrap();
+            }
+            for file in case.files {
+                write(root, file);
+            }
+            for dir in case.dirs {
+                fs::create_dir_all(root.join(dir)).unwrap();
+            }
+            for (dir, mode) in case.modes {
+                fs::set_permissions(root.join(dir), fs::Permissions::from_mode(*mode)).unwrap();
+            }
+        }
+        let system = Command::new("rm")
+            .args(case.options)
+            .args(case.operands)
+            .current_dir(&system_root)
+            .env("LC_ALL", "C.UTF-8")
+            .stdin(Stdio::null())
+            .output()
+            .expect("the system rm");
+        let typed: Vec<String> = case
+            .operands
+            .iter()
+            .map(|operand| remote(&ctx, operand))
+            .collect();
+        let mut args = vec!["rm", "-y"];
+        args.extend(case.options);
+        args.extend(typed.iter().map(String::as_str));
+        let ours = blit(&ctx, &args, None);
+        let mut remain = [Vec::new(), Vec::new()];
+        for (root, out) in [&system_root, &ctx.module_dir].into_iter().zip(&mut remain) {
+            unlock(&root.join("t"));
+            left(&root.join("t"), root, out);
+            out.sort();
+        }
+
+        let mut theirs: Vec<String> = String::from_utf8_lossy(&system.stderr)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let mut said: Vec<String> = ours
+            .stderr
+            .lines()
+            .map(|line| {
+                line.replacen("blit rm: ", "rm: ", 1)
+                    .replace(&remote(&ctx, ""), "")
+            })
+            .collect();
+        theirs.sort();
+        said.sort();
+        assert_eq!(said, theirs, "{what}\n{}", ours.all());
+        assert_eq!(ours.code, system.status.code(), "{what}\n{}", ours.all());
+        assert_eq!(remain[1], remain[0], "{what}: what is left on disk");
+    }
+}
+
 /// AC-12, on every Unix: a name that is not valid text is removed as the
 /// name it is, with the tree that holds it.
 #[cfg(unix)]

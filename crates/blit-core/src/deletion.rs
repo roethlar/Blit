@@ -353,7 +353,9 @@ impl Report<'_> {
 /// opened IN the directory before it and never through a link; every
 /// directory of the tree is opened the same way, IN the one that listed
 /// it; and a directory is listed, and emptied, through the one descriptor
-/// it was opened with (`anchored::Dir`). What cannot be opened so — a
+/// it was opened with (`anchored::Dir`). The directories on the way to
+/// the operand are opened to be searched and no more (`anchored::Passage`,
+/// cr-uv2-4): `rm` asks nothing else of them. What cannot be opened so — a
 /// directory that became a link, one that cannot be read — is one
 /// reported failure, and nothing is removed by its path instead.
 ///
@@ -453,6 +455,7 @@ fn remove_operand(
     called_off: Option<&dyn Fn() -> bool>,
     removal: &mut Report<'_>,
 ) -> Result<(), DeletionError> {
+    use anchored::ByName as _;
     use std::os::unix::ffi::OsStrExt as _;
 
     let called_off = || called_off.is_some_and(|called_off| called_off());
@@ -494,7 +497,7 @@ fn remove_operand(
     };
     // Never "not there": the directory was there a moment ago, and one
     // that cannot be reached now is reported, `-f` or not.
-    let above = match anchored::Dir::open_canonical(&canonical, canonical_root) {
+    let above = match anchored::Passage::open_canonical(&canonical, canonical_root) {
         Ok(above) => above,
         Err(error) => {
             removal.fail(PathBuf::new(), error);
@@ -553,6 +556,15 @@ fn remove_operand(
             dir,
             kept: false,
         }),
+        // It cannot be read, so it cannot be emptied — and it may be
+        // empty: `rm` finds out by removing it (cr-uv2-4).
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            match above.remove(&name, true) {
+                Ok(()) => removal.removed += 1,
+                Err(_) => removal.fail(PathBuf::new(), error),
+            }
+            return Ok(());
+        }
         Err(error) => {
             removal.fail(PathBuf::new(), error);
             return Ok(());
@@ -575,7 +587,10 @@ fn remove_operand(
             drop(dir);
             if !kept {
                 // By its name, in the directory that listed it.
-                let within = frames.last().map_or(&above, |above| &above.dir);
+                let within: &dyn anchored::ByName = match frames.last() {
+                    Some(frame) => &frame.dir,
+                    None => &above,
+                };
                 match within.remove(&name, true) {
                     Ok(()) => removal.removed += 1,
                     Err(error) => {
@@ -623,6 +638,18 @@ fn remove_operand(
                     // No directory stands there any more: whatever does —
                     // a link put in its place — is removed as what it is.
                     Err(error) if anchored::is_no_directory(&error) => {}
+                    // Not to be read: removed if it is empty, as `rm`
+                    // removes it, and reported if it is not (cr-uv2-4).
+                    Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                        match frame.dir.remove(&name, true) {
+                            Ok(()) => removal.removed += 1,
+                            Err(_) => {
+                                frame.kept = true;
+                                removal.fail(relative_path, error);
+                            }
+                        }
+                        continue;
+                    }
                     Err(error) => {
                         frame.kept = true;
                         removal.fail(relative_path, error);
@@ -757,7 +784,7 @@ mod anchored {
     use std::ffi::{CStr, CString};
     use std::io;
     use std::os::unix::ffi::OsStrExt as _;
-    use std::os::unix::io::RawFd;
+    use std::os::unix::io::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
     use std::path::{Component, Path};
     use std::ptr::NonNull;
 
@@ -766,17 +793,104 @@ mod anchored {
     #[cfg(target_os = "linux")]
     use libc::{fstatat64 as fstatat, readdir64 as readdir, stat64 as stat};
 
-    /// One open directory. Its entries are listed from it, opened in it
-    /// and removed from it, each by its name there: the directory is
-    /// found once, when it is opened, and never looked up again.
-    pub(super) struct Dir {
-        /// The listing stream; it owns the descriptor.
-        stream: NonNull<libc::DIR>,
-        /// The listing has ended, or failed and will not be read again.
-        ended: bool,
+    /// How a directory is opened to be SEARCHED and no more (cr-uv2-4):
+    /// entries in it can then be opened, looked at and removed by name,
+    /// and it need not be readable. That is all `rm` asks of the
+    /// directories on the way to its operand; each of them was opened to
+    /// be read, so a file in a directory of mode 0300 — which `rm`
+    /// removes — was `Permission denied`. Where the system has no such
+    /// way to open a directory, it is opened to be read, as before.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const TO_SEARCH: libc::c_int = libc::O_PATH;
+    #[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
+    const TO_SEARCH: libc::c_int = libc::O_SEARCH;
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        target_os = "freebsd"
+    )))]
+    const TO_SEARCH: libc::c_int = libc::O_RDONLY;
+
+    /// What is done IN an open directory, by a name there: the directory
+    /// is found once, when it is opened, and never looked up again.
+    pub(super) trait ByName {
+        /// The open directory. It stays open while `self` lives.
+        fn descriptor(&self) -> RawFd;
+
+        /// The directory called `name` here, opened to be listed and
+        /// emptied — itself, never what a link by that name points to.
+        fn open_child(&self, name: &CStr) -> io::Result<Dir> {
+            // SAFETY: the descriptor is this open directory's for the
+            // length of the call and `name` is a NUL-terminated string
+            // that outlives it; `openat` reads both and keeps neither.
+            let fd = unsafe {
+                libc::openat(
+                    self.descriptor(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            Dir::from_descriptor(fd)
+        }
+
+        /// Whether the entry called `name` in this directory is a
+        /// directory — the entry itself, a link being a link.
+        fn is_directory(&self, name: &CStr) -> io::Result<bool> {
+            let mut found = std::mem::MaybeUninit::<stat>::uninit();
+            // SAFETY: the descriptor is this open directory's, `name` is a
+            // NUL-terminated string and `found` is room for one record,
+            // all for the length of the call.
+            let answered = unsafe {
+                fstatat(
+                    self.descriptor(),
+                    name.as_ptr(),
+                    found.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if answered != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: the call succeeded, so the record is filled in.
+            let mode = unsafe { found.assume_init() }.st_mode;
+            Ok(mode & libc::S_IFMT == libc::S_IFDIR)
+        }
+
+        /// Whether the entry called `name` here is a directory once a link
+        /// is resolved. Asked only to choose the words of a refusal.
+        fn points_to_directory(&self, name: &CStr) -> bool {
+            let mut found = std::mem::MaybeUninit::<stat>::uninit();
+            // SAFETY: as in `is_directory`.
+            let answered =
+                unsafe { fstatat(self.descriptor(), name.as_ptr(), found.as_mut_ptr(), 0) };
+            // SAFETY: read only when the call succeeded and filled it in.
+            answered == 0 && unsafe { found.assume_init() }.st_mode & libc::S_IFMT == libc::S_IFDIR
+        }
+
+        /// Remove the entry called `name` in this directory: an empty
+        /// directory when `directory`, anything else otherwise — a link
+        /// as the link it is.
+        fn remove(&self, name: &CStr, directory: bool) -> io::Result<()> {
+            let flags = if directory { libc::AT_REMOVEDIR } else { 0 };
+            // SAFETY: the descriptor is this open directory's for the
+            // length of the call, and `name` is a NUL-terminated string
+            // that outlives it; `unlinkat` reads both and keeps neither.
+            if unsafe { libc::unlinkat(self.descriptor(), name.as_ptr(), flags) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
     }
 
-    impl Dir {
+    /// A directory on the way to an operand: searched, and never listed
+    /// (cr-uv2-4). It needs no permission to be read.
+    pub(super) struct Passage {
+        fd: OwnedFd,
+    }
+
+    impl Passage {
         /// The directory a canonical path names, reached without trusting
         /// what a path names twice. `canonical` — a path resolved to its
         /// canonical form, no link in it — must lie in `root`; it is
@@ -797,7 +911,7 @@ mod anchored {
                 let Component::Normal(name) = component else {
                     return Err(io::Error::from(io::ErrorKind::InvalidInput));
                 };
-                dir = dir.open_child(&CString::new(name.as_bytes())?)?;
+                dir = dir.through(&CString::new(name.as_bytes())?)?;
             }
             Ok(dir)
         }
@@ -810,15 +924,15 @@ mod anchored {
             let fd = unsafe {
                 libc::open(
                     path.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                    TO_SEARCH | libc::O_DIRECTORY | libc::O_CLOEXEC,
                 )
             };
             Self::from_descriptor(fd)
         }
 
         /// The directory called `name` IN this one — itself, never what a
-        /// link by that name points to.
-        pub(super) fn open_child(&self, name: &CStr) -> io::Result<Self> {
+        /// link by that name points to — to be passed through in turn.
+        fn through(&self, name: &CStr) -> io::Result<Self> {
             // SAFETY: the descriptor is this open directory's for the
             // length of the call and `name` is a NUL-terminated string
             // that outlives it; `openat` reads both and keeps neither.
@@ -826,12 +940,46 @@ mod anchored {
                 libc::openat(
                     self.descriptor(),
                     name.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    TO_SEARCH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                 )
             };
             Self::from_descriptor(fd)
         }
 
+        fn from_descriptor(fd: RawFd) -> io::Result<Self> {
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: `fd` is an open descriptor that nothing else owns.
+            Ok(Self {
+                fd: unsafe { OwnedFd::from_raw_fd(fd) },
+            })
+        }
+    }
+
+    impl ByName for Passage {
+        fn descriptor(&self) -> RawFd {
+            self.fd.as_raw_fd()
+        }
+    }
+
+    /// One directory being listed and emptied. Its entries are listed
+    /// from it, opened in it and removed from it, each by its name there.
+    pub(super) struct Dir {
+        /// The listing stream; it owns the descriptor.
+        stream: NonNull<libc::DIR>,
+        /// The listing has ended, or failed and will not be read again.
+        ended: bool,
+    }
+
+    impl ByName for Dir {
+        fn descriptor(&self) -> RawFd {
+            // SAFETY: the stream is open until this value is dropped.
+            unsafe { libc::dirfd(self.stream.as_ptr()) }
+        }
+    }
+
+    impl Dir {
         fn from_descriptor(fd: RawFd) -> io::Result<Self> {
             if fd < 0 {
                 return Err(io::Error::last_os_error());
@@ -851,11 +999,6 @@ mod anchored {
                     Err(error)
                 }
             }
-        }
-
-        fn descriptor(&self) -> RawFd {
-            // SAFETY: the stream is open until this value is dropped.
-            unsafe { libc::dirfd(self.stream.as_ptr()) }
         }
 
         /// The next entry of this directory: its name, and whether it is
@@ -897,55 +1040,6 @@ mod anchored {
                     _ => Some(false),
                 };
                 return Some(Ok((name, is_dir)));
-            }
-        }
-
-        /// Whether the entry called `name` in this directory is a
-        /// directory — the entry itself, a link being a link.
-        pub(super) fn is_directory(&self, name: &CStr) -> io::Result<bool> {
-            let mut found = std::mem::MaybeUninit::<stat>::uninit();
-            // SAFETY: the descriptor is this open directory's, `name` is a
-            // NUL-terminated string and `found` is room for one record,
-            // all for the length of the call.
-            let answered = unsafe {
-                fstatat(
-                    self.descriptor(),
-                    name.as_ptr(),
-                    found.as_mut_ptr(),
-                    libc::AT_SYMLINK_NOFOLLOW,
-                )
-            };
-            if answered != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            // SAFETY: the call succeeded, so the record is filled in.
-            let mode = unsafe { found.assume_init() }.st_mode;
-            Ok(mode & libc::S_IFMT == libc::S_IFDIR)
-        }
-
-        /// Whether the entry called `name` here is a directory once a link
-        /// is resolved. Asked only to choose the words of a refusal.
-        pub(super) fn points_to_directory(&self, name: &CStr) -> bool {
-            let mut found = std::mem::MaybeUninit::<stat>::uninit();
-            // SAFETY: as in `is_directory`.
-            let answered =
-                unsafe { fstatat(self.descriptor(), name.as_ptr(), found.as_mut_ptr(), 0) };
-            // SAFETY: read only when the call succeeded and filled it in.
-            answered == 0 && unsafe { found.assume_init() }.st_mode & libc::S_IFMT == libc::S_IFDIR
-        }
-
-        /// Remove the entry called `name` in this directory: an empty
-        /// directory when `directory`, anything else otherwise — a link
-        /// as the link it is.
-        pub(super) fn remove(&self, name: &CStr, directory: bool) -> io::Result<()> {
-            let flags = if directory { libc::AT_REMOVEDIR } else { 0 };
-            // SAFETY: the descriptor is this open directory's for the
-            // length of the call, and `name` is a NUL-terminated string
-            // that outlives it; `unlinkat` reads both and keeps neither.
-            if unsafe { libc::unlinkat(self.descriptor(), name.as_ptr(), flags) } == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
             }
         }
     }
@@ -1629,7 +1723,12 @@ mod rm_tests {
     fn a_held_directory_lists_and_removes_its_own_entries() {
         let (_tmp, root) = tree();
         std::os::unix::fs::symlink(root.join("dir"), root.join("to-dir")).unwrap();
-        let mut held = anchored::Dir::open_canonical(&root, Some(&root)).unwrap();
+        use anchored::ByName as _;
+        let here = std::ffi::CString::new(".").unwrap();
+        let mut held = anchored::Passage::open_canonical(&root, Some(&root))
+            .unwrap()
+            .open_child(&here)
+            .unwrap();
         let mut listed = Vec::new();
         while let Some(entry) = held.next_entry() {
             let (name, is_dir) = entry.unwrap();
@@ -1662,10 +1761,95 @@ mod rm_tests {
         // Outside the root is not reachable from it.
         let elsewhere = tempfile::tempdir().unwrap();
         let outside = fs::canonicalize(elsewhere.path()).unwrap();
-        let refused = anchored::Dir::open_canonical(&outside, Some(&root))
+        let refused = anchored::Passage::open_canonical(&outside, Some(&root))
             .err()
             .expect("outside the root");
         assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    /// cr-uv2-4: `rm` asks of a directory only what it needs of it. On the
+    /// way to an operand that is to be SEARCHED: every such directory was
+    /// opened to be read, and a file in a directory of mode 0300 — which
+    /// `rm` removes — was `Permission denied`. And a directory that cannot
+    /// be read is still removed when it is empty, as `rm` removes it.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_is_asked_only_for_what_rm_needs_of_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (_tmp, root) = tree();
+        let mode = |rel: &str, mode: u32| {
+            fs::set_permissions(root.join(rel), fs::Permissions::from_mode(mode)).unwrap()
+        };
+        for dir in [
+            "w/v/sub",
+            "full/sub",
+            "holds/sealed-empty",
+            "blind",
+            "searched",
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        for file in [
+            "w/known",
+            "w/v/known",
+            "w/v/sub/file",
+            "full/sub/inner",
+            "holds/a",
+            "searched/known",
+        ] {
+            fs::write(root.join(file), b"x").unwrap();
+        }
+        mode("w/v", 0o300);
+        mode("w", 0o300);
+        if fs::read_dir(root.join("w")).is_ok() {
+            mode("w", 0o755);
+            mode("w/v", 0o755);
+            eprintln!("skipping: running privileged, no mode stops a listing");
+            return;
+        }
+
+        // Write and search, no read, one level and two above the operand.
+        assert!(reasons(&rm(&root, "w/known", false, false)).is_empty());
+        assert!(reasons(&rm(&root, "w/v/known", false, false)).is_empty());
+        let tree_below = rm(&root, "w/v/sub", true, false);
+        assert!(reasons(&tree_below).is_empty());
+        assert_eq!(tree_below.removed, 2);
+        mode("w", 0o755);
+        mode("w/v", 0o755);
+        assert_eq!(fs::read_dir(root.join("w/v")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(root.join("w")).unwrap().count(), 1);
+
+        // Search without write removes nothing, as ever.
+        mode("searched", 0o100);
+        let kept = rm(&root, "searched/known", false, false);
+        mode("searched", 0o755);
+        assert_eq!(
+            reasons(&kept),
+            [(String::new(), std::io::ErrorKind::PermissionDenied)]
+        );
+        assert!(root.join("searched/known").exists());
+
+        // Not to be read, and empty: removed — as an operand, and below one.
+        mode("blind", 0o000);
+        let blind = rm(&root, "blind", true, false);
+        assert!(reasons(&blind).is_empty() && blind.removed == 1);
+        assert!(!root.join("blind").exists());
+        mode("holds/sealed-empty", 0o000);
+        let holds = rm(&root, "holds", true, false);
+        assert!(reasons(&holds).is_empty(), "{:?}", reasons(&holds));
+        assert_eq!(holds.removed, 3);
+        assert!(!root.join("holds").exists());
+
+        // Not to be read, and not empty: reported in those words, and left.
+        mode("full/sub", 0o300);
+        let full = rm(&root, "full", true, false);
+        mode("full/sub", 0o755);
+        assert_eq!(
+            reasons(&full),
+            [("sub".to_string(), std::io::ErrorKind::PermissionDenied)]
+        );
+        assert!(root.join("full/sub/inner").exists());
+        assert_eq!(full.removed, 0);
     }
 }
 
