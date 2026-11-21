@@ -484,3 +484,74 @@ async fn a_connection_carries_no_more_streams_at_once_than_the_policy_allows() {
         "as many at once as the limit, and no more"
     );
 }
+
+/// cr-ecm8-4: what a client holds unread is bounded where the stream limit
+/// does not reach — responses that have ENDED. Eight one-row listings are
+/// asked of a real daemon on one channel and none is read: each stream
+/// has ended and given up its place among the streams, while its body
+/// sits in the connection. A ninth was simply answered, and a tenth, with
+/// nothing to stop the hundredth. It now waits, until one of the eight is
+/// read to its end or dropped.
+#[test]
+fn a_ninth_listing_waits_while_eight_complete_ones_are_unread() {
+    let ctx = common::TestContext::new();
+    std::fs::write(ctx.module_dir.join("one.txt"), b"x").unwrap();
+    let limit = blit_core::remote::grpc_server::HTTP2_MAX_CONCURRENT_STREAMS as usize;
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let client = blit_core::client::connect_with_timeout(format!(
+            "http://127.0.0.1:{}",
+            ctx.daemon_port
+        ))
+        .await
+        .expect("connect");
+        let ask = || {
+            let mut client = client.clone();
+            async move {
+                client
+                    .find(blit_core::generated::FindRequest {
+                        module: "test".into(),
+                        case_sensitive: true,
+                        include_files: true,
+                        ..Default::default()
+                    })
+                    .await
+                    .expect("the listing opens")
+                    .into_inner()
+            }
+        };
+        let soon = Duration::from_millis(500);
+
+        let mut unread = Vec::new();
+        for _ in 0..limit {
+            unread.push(ask().await);
+        }
+        // Each is one row and its end; let them arrive.
+        tokio::time::sleep(soon).await;
+        let mut ninth = Box::pin(ask());
+        assert!(
+            tokio::time::timeout(soon, &mut ninth).await.is_err(),
+            "eight complete listings unread: the ninth must wait"
+        );
+
+        // One of them read to its end, and kept: its place is free.
+        let mut rows = 0;
+        while unread[0].message().await.expect("a row").is_some() {
+            rows += 1;
+        }
+        assert_eq!(rows, 1);
+        let ninth = tokio::time::timeout(Duration::from_secs(20), &mut ninth)
+            .await
+            .expect("read to its end: a place was given back");
+        unread.push(ninth);
+
+        // Eight unread again; one dropped: its place is free.
+        let mut tenth = Box::pin(ask());
+        assert!(tokio::time::timeout(soon, &mut tenth).await.is_err());
+        drop(unread.pop());
+        let mut tenth = tokio::time::timeout(Duration::from_secs(20), &mut tenth)
+            .await
+            .expect("dropped: a place was given back");
+        assert!(tenth.message().await.expect("its row").is_some());
+    });
+}

@@ -47,6 +47,9 @@ rand = "0.10"
 
 # gRPC dependencies
 tonic = "0.14"
+# cr-ecm8-4: the response body a client's place is held with
+# (`client::BoundedResponses`) — the crate tonic's own bodies are made of.
+http-body = "1"
 tonic-prost = "0.14"
 prost = "0.14"
 tokio = { version = "1", features = ["full"] }

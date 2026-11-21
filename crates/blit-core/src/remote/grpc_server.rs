@@ -61,9 +61,18 @@ pub const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 ///
 /// cr-ecm6-5: the connection window used to be what bounded the payload a
 /// connection held unread. At its maximum it bounds nothing, so the bound
-/// is stated instead: [`HTTP2_MAX_CONCURRENT_STREAMS`] streams, each
-/// holding at most its own stream window — 8 MiB on a server, 16 MiB on a
-/// client, per connection.
+/// is stated instead: [`HTTP2_MAX_CONCURRENT_STREAMS`] bodies at a time,
+/// each holding at most its own stream window — 8 MiB on a server, 16 MiB
+/// on a client, per connection.
+///
+/// cr-ecm8-4: and it is a bound on BODIES NOT YET READ, which a limit on
+/// streams does not give by itself — a stream that has ended gives up its
+/// place while its body can still be held, unread. On a client the bound
+/// is therefore enforced where responses are handed out
+/// ([`crate::client::BoundedResponses`]): a place is held until a
+/// response's body is read to its end or dropped. On a server a request's
+/// body belongs to the call that is answering it and goes when that call
+/// ends, with its stream.
 pub const HTTP2_CONNECTION_WINDOW: u32 = (1 << 31) - 1;
 
 /// The most streams one connection carries at once (cr-ecm6-5). A server
@@ -71,11 +80,14 @@ pub const HTTP2_CONNECTION_WINDOW: u32 = (1 << 31) - 1;
 /// client — it is not refused. tonic's own default is no limit at all.
 ///
 /// It is the other half of the window policy: with the connection window
-/// at its maximum, this is what bounds the payload one connection can
-/// hold unread (streams times a stream window), and it is the number the
-/// small-frame budget is proved against. Blit opens one or two streams on
-/// a connection; a front end that multiplexes more than eight long-lived
-/// streams on one channel must open another.
+/// at its maximum, this is the number that bounds the payload one
+/// connection can hold unread (that many stream windows), and the number
+/// the small-frame budget is proved against. On a client it is also the
+/// most responses that may be unread at once, ended or not
+/// ([`crate::client::BoundedResponses`], cr-ecm8-4). Blit opens one or two
+/// streams on a connection; a front end that multiplexes more than eight
+/// long-lived streams on one channel, or keeps more than eight responses
+/// unread, must open another.
 pub const HTTP2_MAX_CONCURRENT_STREAMS: u32 = 8;
 
 /// The per-stream window a Blit client advertises: hyper's client

@@ -18,7 +18,9 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `transfers::filter::FilterInputs` gained `source_root`, `ignore_case`,
 `files_from_read` and `resolved`; `fs_enum::FileFilter` gained
 `ignore_case` and `files_from_unnamed`, and `TransferSource` a provided
-`files_from_unnamed`. The wire
+`files_from_unnamed`; `client::connect_with_timeout` and
+`connect_transfer_client` return a `BlitClient<client::BlitChannel>`
+(the channel behind `client::BoundedResponses`). The wire
 protocol is contract 12: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
@@ -203,9 +205,12 @@ part, and a job you can list, read, re-run and retry.
   that limit, is now the largest HTTP/2 allows on both ends. Present on
   the development branch since 2026-10-17 and in no release. With it, a
   connection carries at most eight streams at once (a ninth request waits
-  its turn), which bounds what one connection can hold unread: 8 MiB on a
-  daemon, 16 MiB on a client. A program built on `blit-core` that
-  multiplexes more long-lived streams on one channel needs another.
+  its turn), and a client holds at most eight responses it has not read
+  to the end or dropped — a ninth request waits for one of them, whether
+  or not their streams have ended. That bounds what one connection can
+  hold unread: 8 MiB on a daemon, 16 MiB on a client. A program built on
+  `blit-core` that multiplexes more long-lived streams on one channel, or
+  keeps more than eight responses unread, needs another channel.
 - A local single-file copy armed its failure cleanup before opening the
   destination, so a destination it could not open (a read-only file, a
   folder in the way) could be deleted without a byte written. The cleanup

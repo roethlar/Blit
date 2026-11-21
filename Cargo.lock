@@ -226,6 +226,7 @@ dependencies = [
  "futures",
  "globset",
  "hostname",
+ "http-body",
  "libc",
  "log",
  "md5",

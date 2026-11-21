@@ -22,10 +22,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::client::BlitChannel;
 use eyre::{eyre, Result};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::Channel;
 
 use crate::generated::blit_client::BlitClient;
 use crate::generated::{
@@ -424,7 +424,7 @@ pub async fn run_pull_session(
 /// its own error phase (`ConnectSource`) structurally, without string
 /// matching on the session error.
 pub async fn run_pull_session_with_client(
-    mut client: BlitClient<Channel>,
+    mut client: BlitClient<BlitChannel>,
     endpoint: &RemoteEndpoint,
     dest_root: PathBuf,
     mut options: PullSessionOptions,
@@ -911,7 +911,7 @@ fn rpc_status_outcome(status: &tonic::Status) -> TransferLifecycleOutcome {
 /// drivers' connect path).
 /// `pub` since otp-9b: the delegated dst daemon connects separately
 /// from running the session so connect failures keep their own phase.
-pub async fn connect_transfer_client(endpoint: &RemoteEndpoint) -> Result<BlitClient<Channel>> {
+pub async fn connect_transfer_client(endpoint: &RemoteEndpoint) -> Result<BlitClient<BlitChannel>> {
     connect_transfer_client_with_trace(endpoint, &TransferLifecycleTrace::disabled()).await
 }
 
@@ -920,7 +920,7 @@ pub async fn connect_transfer_client(endpoint: &RemoteEndpoint) -> Result<BlitCl
 pub async fn connect_transfer_client_with_trace(
     endpoint: &RemoteEndpoint,
     lifecycle_trace: &TransferLifecycleTrace,
-) -> Result<BlitClient<Channel>> {
+) -> Result<BlitClient<BlitChannel>> {
     let uri = endpoint.control_plane_uri();
     lifecycle_trace.record("control_connect_begin", None);
     // h2-small-frames: through the one client endpoint, for its HTTP/2
@@ -947,5 +947,6 @@ pub async fn connect_transfer_client_with_trace(
         "control_connect_end",
         Some(TransferLifecycleOutcome::Success),
     );
-    Ok(BlitClient::new(channel))
+    // cr-ecm8-4: behind the bound on what one connection holds unread.
+    Ok(BlitClient::new(crate::client::bounded(channel)))
 }
