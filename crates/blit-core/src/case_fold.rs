@@ -237,8 +237,10 @@ pub(crate) struct Noted<'a> {
 /// - else the first pattern with a spelling that really is matched only
 ///   with the option — for `{a,A}` the line offered `{a,a}` and `{A,A}`,
 ///   both matched already;
-/// - a pattern whose reading the option does not change at all is neither
-///   shown nor counted.
+/// - a pattern whose reading the option does not change at all is not
+///   shown. (cr-ecm11-5: it is COUNTED with the others, by its text; it
+///   was left out of the count only when it had been asked about, which
+///   depended on where it stood.)
 ///
 /// cr-ecm10-1 — an eighth round, and what the seven before it show. Each
 /// made the line check more of what it says against the filter, and each
@@ -281,9 +283,6 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
     ) -> Option<Spellings<'a>> {
         Spellings::of_role(noted.read_as, noted.role, windows, whole)
     }
-    // What asking found of a pattern: `true`, the option reads it
-    // otherwise; `false`, its two readings are proved the same.
-    let mut found: std::collections::HashMap<usize, bool> = std::collections::HashMap::new();
     let mut shown: Option<(usize, Spellings)> = None;
     // A loss first: a pattern the option would NARROW, wherever it stands
     // — borne out by a name if one can be, and said with `may` if not.
@@ -297,7 +296,6 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
         let Some(spellings) = read(noted, windows, &whole) else {
             continue;
         };
-        found.insert(at, true);
         if spellings.narrowed.is_some() && spellings.narrowing_borne_out {
             shown = Some((at, spellings));
             break;
@@ -312,19 +310,16 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
     if shown.is_none() {
         let mut in_words: Option<(usize, Spellings)> = None;
         for (at, noted) in candidates.iter().enumerate().take(MOST_PATTERNS_ASKED) {
-            match read(noted, windows, &whole) {
-                None => {
-                    found.insert(at, false);
-                }
-                Some(spellings) => {
-                    found.insert(at, true);
-                    if !spellings.others.is_empty() {
-                        shown = Some((at, spellings));
-                        break;
-                    }
-                    in_words.get_or_insert((at, spellings));
-                }
+            // A pattern whose own two readings are proved the same
+            // (`{a,A}`) has nothing to show.
+            let Some(spellings) = read(noted, windows, &whole) else {
+                continue;
+            };
+            if !spellings.others.is_empty() {
+                shown = Some((at, spellings));
+                break;
             }
+            in_words.get_or_insert((at, spellings));
         }
         shown = shown.or(in_words);
     }
@@ -340,28 +335,20 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
     }
     let (shown_at, spellings) = shown?;
     let (pattern, file) = (candidates[shown_at].typed, candidates[shown_at].file);
-    // The patterns that are only counted. One whose two readings are the
-    // same is not counted — and only a pattern that spells out its own
-    // alternatives, in braces or a class, can be such a one (`{a,A}`,
-    // `[Jj]`): those are asked about, the first few of them in the order
-    // typed, WHICHEVER pattern is shown (cr-ecm10-5: only the ones typed
-    // after it were, so the count changed with the order). Plain text and
-    // wildcards always read otherwise, and are counted unasked.
-    let mut asked = found.len();
-    for (at, noted) in candidates.iter().enumerate() {
-        if found.contains_key(&at) || !noted.read_as.contains(['{', '[']) {
-            continue;
-        }
-        if asked >= 2 * MOST_PATTERNS_ASKED {
-            break;
-        }
-        asked += 1;
-        found.insert(at, read(noted, windows, &whole).is_some());
-    }
+    // The patterns that are only counted: EVERY other one the option
+    // could read otherwise, by its text — which is what was typed, and
+    // costs nothing to tell.
+    //
+    // cr-ecm11-5: by the text and nothing else. A pattern whose two
+    // readings are the same (`{a,A}`) used to be left out of the count —
+    // when it had been asked about, and only so many are: with 33
+    // patterns the count was "1 more" or "2 more" by where `{z,2}`
+    // stood among them. What is counted is how many more patterns the
+    // rule is about, and the rule is about each of them.
     let noted = candidates
         .iter()
         .enumerate()
-        .filter(|(at, _)| *at != shown_at && found.get(at) != Some(&false))
+        .filter(|(at, _)| *at != shown_at)
         .map(|(_, noted)| (noted.typed, noted.file, ()));
     let shown_from = file.map_or(String::new(), |file| format!(" (from {file})"));
     let others: Vec<Option<&str>> = noted.map(|(_, file, _)| file).collect();
@@ -2666,11 +2653,12 @@ mod tests {
                  would stop matching A)."
             )
         );
-        // cr-ecm7-4: a pattern the option reads no differently is neither
-        // shown nor counted. For `{a,A}` the line offered `{a,a}` and
-        // `{A,A}`, both matched already; what changes is `*.Doc`.
-        let doc = "\"*.Doc\" matches .Doc only; capital letters matter (--ignore-case would \
-                   also match .doc, .DOC).";
+        // cr-ecm7-4: a pattern the option reads no differently is not
+        // shown. For `{a,A}` the line offered `{a,a}` and `{A,A}`, both
+        // matched already; what changes is `*.Doc`. (cr-ecm11-5: it is
+        // counted, as every other pattern with a letter in it is.)
+        let doc = "\"*.Doc\" matches .Doc only, and 1 more pattern matches only as typed; \
+                   capital letters matter (--ignore-case would also match .doc, .DOC).";
         assert_eq!(note(&["{a,A}", "*.Doc"]).as_deref(), Some(doc));
         assert_eq!(note(&["*.Doc", "{a,A}"]).as_deref(), Some(doc));
         for unchanged in [&["{a,A}"][..], &["{a,A}", "{b,B}"], &["*.[Jj][Pp][Gg]"]] {
@@ -2727,7 +2715,7 @@ mod tests {
         assert_eq!(
             note(&["Keep", "{[a-c],A,B}", "{a,A}"]).as_deref(),
             Some(
-                "\"Keep\" matches Keep only, and 1 more pattern matches only as typed; capital \
+                "\"Keep\" matches Keep only, and 2 more patterns match only as typed; capital \
                  letters matter (--ignore-case would also match keep, KEEP)."
             )
         );
@@ -2768,9 +2756,15 @@ mod tests {
                         typed; capital letters matter (--ignore-case ignores them).";
         assert_eq!(note(&["a", "A"]).as_deref(), Some(in_words));
         assert_eq!(note(&["a", "./A"]).as_deref(), Some(in_words));
-        // A pattern whose own two readings are the same is still neither
-        // shown nor counted.
-        assert_eq!(note(&["a", "A", "{b,B}"]).as_deref(), Some(in_words));
+        // A pattern whose own two readings are the same is still not
+        // shown; with nothing else to show there is no line.
+        assert_eq!(
+            note(&["a", "A", "{b,B}"]).as_deref(),
+            Some(
+                "\"a\" matches exactly as typed, and 2 more patterns match only as typed; \
+                 capital letters matter (--ignore-case ignores them)."
+            )
+        );
         assert_eq!(note(&["{b,B}", "[Cc]"]), None);
         let doc = "\"*.Doc\" matches .Doc only, and 2 more patterns match only as typed; \
                    capital letters matter (--ignore-case would also match .doc, .DOC).";
@@ -2784,13 +2778,41 @@ mod tests {
         ] {
             assert_eq!(note(&order).as_deref(), Some(doc), "{order:?}");
         }
-        // A pattern whose two readings are the same is not counted
-        // wherever it stands: only the ones typed AFTER the pattern shown
-        // were asked, so `{b,B}` typed first was counted.
-        let narrowed = "\"[!a].dat\" matches exactly as typed; capital letters matter \
-                        (--ignore-case changes what it matches: [!a] would stop matching A).";
+        // And with a pattern whose two readings are the same: it was
+        // counted when typed before the pattern shown and not when typed
+        // after, only the later ones being asked.
+        let narrowed = "\"[!a].dat\" matches exactly as typed, and 1 more pattern matches only \
+                        as typed; capital letters matter (--ignore-case changes what they match: \
+                        [!a] would stop matching A).";
         for order in [["{b,B}", "[!a].dat"], ["[!a].dat", "{b,B}"]] {
             assert_eq!(note(&order).as_deref(), Some(narrowed), "{order:?}");
+        }
+        // cr-ecm11-5: the count is of the other patterns with a letter in
+        // them, by their text — whatever was asked about, and however many
+        // there are. The reviewer's 33: one name, thirty-one patterns that
+        // read the same both ways, and `{z,2}`, which does not. With
+        // `{z,2}` last it was past what is asked about and counted
+        // unasked, the others asked and left out: "1 more"; second, it was
+        // asked and counted, and more of the others were not: "2 more".
+        let same: Vec<String> = ('a'..='z')
+            .chain('α'..='ε')
+            .map(|c| format!("{{{c},{}}}", c.to_uppercase()))
+            .collect();
+        assert_eq!(same.len(), 31);
+        let counted = "\"Visible.txt\" matches Visible.txt only, and 32 more patterns match \
+                       only as typed; capital letters matter (--ignore-case would also match \
+                       visible.txt, VISIBLE.TXT).";
+        for at in [1, 17, same.len() + 1] {
+            let mut patterns: Vec<&str> = std::iter::once("Visible.txt")
+                .chain(same.iter().map(String::as_str))
+                .collect();
+            patterns.insert(at, "{z,2}");
+            assert_eq!(patterns.len(), 33);
+            assert_eq!(
+                note(&patterns).as_deref(),
+                Some(counted),
+                "`{{z,2}}` at {at}"
+            );
         }
         // cr-ecm10-5: a spelling is offered for the names it denotes.
         // `Q[b-~]` was offered for `q[b-~]` beside the pattern typed

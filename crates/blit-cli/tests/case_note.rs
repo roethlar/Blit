@@ -967,10 +967,12 @@ fn the_line_claims_only_what_the_mirror_then_does() {
             entries: &[("QB", false, true), ("Qb", true, true), ("qb", true, true)],
         },
         Case {
+            // cr-ecm11-5: `{a,A}` reads the same both ways and is counted
+            // all the same — by its text, like every other pattern.
             excludes: &["{a,A}", "*.Doc"],
             includes: &[],
-            line: "\"*.Doc\" matches .Doc only; capital letters matter (--ignore-case would \
-                   also match .doc, .DOC).",
+            line: "\"*.Doc\" matches .Doc only, and 1 more pattern matches only as typed; \
+                   capital letters matter (--ignore-case would also match .doc, .DOC).",
             entries: &[
                 ("x.doc", false, true),
                 ("x.Doc", true, true),

@@ -153,9 +153,10 @@ part, and a job you can list, read, re-run and retry.
   differently; otherwise the line states the rule and no more (`"a"
   matches exactly as typed, and 1 more pattern matches only as typed;
   capital letters matter (--ignore-case ignores them).`, for `--exclude a
-  --exclude A`). Only a pattern that reads the same both ways, such as
-  `{a,A}`, is left out of it. The line's cost does not grow with the
-  number of patterns. Under `--delete-scope
+  --exclude A`). A pattern that reads the same both ways, such as
+  `{a,A}`, is never the one shown; the count beside it is of every other
+  pattern with a letter in it, whatever their order. The line's cost does
+  not grow with the number of patterns. Under `--delete-scope
   all`, where a filter chooses what is copied and protects nothing at the
   destination, the question says that instead.
 - `?` and a bracket class match one byte in both modes. A class holding a
