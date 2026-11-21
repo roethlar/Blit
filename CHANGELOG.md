@@ -336,7 +336,10 @@ none of the options it had.**
 - **`-name PATTERN` is matched against an entry's own name, as `find`
   matches it**: `*` is any run of characters (a leading dot included),
   `?` any one, `[...]` one of a set (ranges, `!` or `^` to negate,
-  `[:alpha:]`-style classes), `\` takes the next character as itself. As
+  `[:alpha:]`-style classes, each as `find` has it under `C.UTF-8`: an
+  em space is a `[:blank:]`, a no-break space is no `[:space:]`, a digit
+  of another script is an `[:alpha:]`), `\` takes the next character as
+  itself. As
   in `find`, a name matches when the pattern fits it read as characters
   or as bytes: `?.dat` finds `é.dat`, and so does `??.dat`. **`-iname`**
   compares one character at a time by its lowercase form, as `find` does

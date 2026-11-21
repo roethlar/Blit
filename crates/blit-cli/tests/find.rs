@@ -270,6 +270,12 @@ fn find_equals_the_system_find() {
         "[a",
         // A name that ends in a space (cr-uv1-1).
         "sp ",
+        // cr-uv1-7: an em space, a no-break space, a digit of another
+        // script, a title-case letter.
+        "em\u{2003}sp",
+        "nb\u{a0}sp",
+        "d٣",
+        "ǅ.t",
     ];
     for root in [system_root.as_path(), ctx.module_dir.as_path()] {
         for name in names {
@@ -315,6 +321,18 @@ fn find_equals_the_system_find() {
         vec!["-name", "x[!-]y"],
         vec!["-name", "[[:upper:]]"],
         vec!["-name", "[[:digit:]]"],
+        // cr-uv1-7: the reference locale's classes.
+        vec!["-name", "*[[:blank:]]*"],
+        vec!["-name", "*[[:space:]]*"],
+        vec!["-name", "*[[:punct:]]*"],
+        vec!["-name", "*[[:cntrl:]]*"],
+        vec!["-name", "?[[:alpha:]]"],
+        vec!["-name", "?[[:digit:]]"],
+        vec!["-name", "[[:upper:]].t"],
+        vec!["-name", "[[:lower:]].t"],
+        vec!["-name", "*[![:print:]]*"],
+        vec!["-name", "*[![:graph:]]*"],
+        vec!["-iname", "*[[:blank:]]SP"],
         vec!["-name", "[é€].dat"],
         vec!["-name", "[a"],
         vec!["-name", "a.dat\\"],
