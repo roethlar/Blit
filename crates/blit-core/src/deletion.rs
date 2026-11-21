@@ -883,11 +883,34 @@ fn remove_asking(
         return within.remove(name, false);
     }
     // Other names of it stand: how it is left goes on record for them.
+    //
+    // cr-uv6-1: but only when ALL that changed is the time it was last
+    // changed, which is what taking a name does. The file is looked at
+    // before its name goes and again after; a write by another hand
+    // between those two looks was recorded as part of how the removal
+    // left it — and the next name then went as the file that was sent,
+    // taking the only copy of what had been written. A file that is
+    // another size, or was written at another time, by the second look
+    // is one this removal cannot answer for: nothing goes on record, and
+    // its other names are asked about as they stand, and stay.
     match within.remove_one_name(name, &met.version)? {
-        Some(left) => own.files.insert(file, (asked.version, left)),
-        None => own.files.remove(&file),
+        Some(left) if left_by_an_unlink_alone(&met.version, &left) => {
+            own.files.insert(file, (asked.version, left))
+        }
+        _ => own.files.remove(&file),
     };
     Ok(())
+}
+
+/// Whether `left` is `was` with nothing changed but the time it was last
+/// changed (cr-uv6-1): the same file, of the same size, written at the
+/// same time. Taking one of a file's names does that and no more.
+#[cfg(unix)]
+fn left_by_an_unlink_alone(was: &crate::moved::Version, left: &crate::moved::Version) -> bool {
+    crate::moved::Version {
+        ctime_nanos: was.ctime_nanos,
+        ..*left
+    } == *was
 }
 
 #[cfg(not(unix))]
@@ -1283,6 +1306,10 @@ mod anchored {
             if version_held(&held)? != *was {
                 return Err(io::Error::other("it has changed since it was read"));
             }
+            super::between(
+                "unlinking a name",
+                Path::new(std::ffi::OsStr::from_bytes(name.to_bytes())),
+            );
             self.remove(name, false)?;
             Ok(version_held(&held).ok())
         }
@@ -2141,6 +2168,54 @@ mod rm_tests {
         assert_eq!(
             fs::read(tree.join(&stayed[0])).unwrap(),
             b"one file, and more"
+        );
+    }
+
+    /// cr-uv6-1: a write that lands BETWEEN a removal's two looks at a
+    /// file with several names — after the look that lets a name go,
+    /// before the look that says how its unlink left the file — is not
+    /// the removal's own change. It was recorded as one: the file as
+    /// appended to became "how the removal left it", the next name passed
+    /// as the file that was sent, and the last copy of the appended bytes
+    /// went with it. The other name stays, with what was written.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_between_a_removals_two_looks_keeps_the_other_name() {
+        use std::io::Write as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let tree = root.join("tree");
+        fs::create_dir_all(&tree).unwrap();
+        fs::write(tree.join("a"), b"one file").unwrap();
+        fs::hard_link(tree.join("a"), tree.join("b")).unwrap();
+        let held = held_of(&tree, &["a", "b"]);
+        let written = std::rc::Rc::new(std::cell::Cell::new(false));
+        let stayed = {
+            let (tree, written) = (tree.clone(), std::rc::Rc::clone(&written));
+            let _hook = between_each(move |stage, name| {
+                if stage == "unlinking a name" && !written.get() {
+                    // By the name that is not going, whichever that is.
+                    let other = if name == Path::new("a") { "b" } else { "a" };
+                    let mut file = fs::OpenOptions::new()
+                        .append(true)
+                        .open(tree.join(other))
+                        .unwrap();
+                    file.write_all(b", and more").unwrap();
+                    written.set(true);
+                }
+            });
+            removed_for_a_move(&root, "tree", &held)
+        };
+        assert!(
+            written.get(),
+            "the file was written to between the two looks"
+        );
+        assert_eq!(stayed.len(), 1, "{stayed:?}");
+        assert_eq!(
+            fs::read(tree.join(&stayed[0])).unwrap(),
+            b"one file, and more",
+            "the only copy of what was written"
         );
     }
 
