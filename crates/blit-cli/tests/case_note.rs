@@ -807,6 +807,10 @@ fn the_line_keeps_what_is_under_a_folder_apart_from_the_folder() {
 /// something the mirror then contradicted, each shown the line it gets
 /// now and run both ways.
 ///
+/// - `**//Cache`: the line showed `Cache` and said the option would also
+///   match `cache`; with the option the destination's own `cache` was
+///   deleted. The second `/` is the pattern's own, and with it the pattern
+///   names no entry at all: the line now offers no spelling.
 /// - `{a,A}` and `*.Doc`: the line chose `{a,A}` and offered `{a,a}` and
 ///   `{A,A}`, both matched already; what changes is that `x.doc` is kept.
 #[test]
@@ -818,16 +822,24 @@ fn the_line_claims_only_what_the_mirror_then_does() {
         /// and whether it is kept with `--ignore-case`.
         entries: &'static [(&'static str, bool, bool)],
     }
-    for case in [Case {
-        excludes: &["{a,A}", "*.Doc"],
-        line: "\"*.Doc\" matches .Doc only; capital letters matter (--ignore-case would \
+    for case in [
+        Case {
+            excludes: &["**//Cache"],
+            line: "\"**//Cache\" matches exactly as typed; capital letters matter \
+                   (--ignore-case reads it otherwise).",
+            entries: &[("cache", false, false), ("Cache", false, false)],
+        },
+        Case {
+            excludes: &["{a,A}", "*.Doc"],
+            line: "\"*.Doc\" matches .Doc only; capital letters matter (--ignore-case would \
                    also match .doc, .DOC).",
-        entries: &[
-            ("x.doc", false, true),
-            ("x.Doc", true, true),
-            ("a", true, true),
-        ],
-    }] {
+            entries: &[
+                ("x.doc", false, true),
+                ("x.Doc", true, true),
+                ("a", true, true),
+            ],
+        },
+    ] {
         let tmp = tempdir().unwrap();
         let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
         write(&src, "keep.1");

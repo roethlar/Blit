@@ -307,6 +307,13 @@ impl<'a> Spellings<'a> {
         Self::with(pattern, windows, asked.as_ref())
     }
 
+    /// What the rules alone make of an exclude, nothing checked: so that a
+    /// rule that goes wrong is seen to, and not only covered for.
+    #[cfg(test)]
+    fn by_rule(pattern: &'a str, windows: bool) -> Option<Self> {
+        Self::with(pattern, windows, None)
+    }
+
     fn with(pattern: &'a str, windows: bool, asked: Option<&Asked>) -> Option<Self> {
         if widen_case(pattern, windows) == pattern {
             return None;
@@ -895,8 +902,9 @@ fn without_end_wildcards(pattern: &str, windows: bool) -> &str {
         let stars = text.len() - rest.len();
         match rest.chars().next() {
             _ if stars == 0 => break,
-            // `**/x`: `x` at any depth.
-            Some(c) if separator(c) && stars == 2 => text = rest.trim_start_matches(separator),
+            // `**/x`: `x` at any depth. One separator, and no more: in
+            // `**//x` the second is the pattern's own (cr-ecm7-2).
+            Some(c) if separator(c) && stars == 2 => text = &rest[c.len_utf8()..],
             // `*/x`: a directory above `x` is required, and stays shown.
             Some(c) if separator(c) => break,
             // `*x`: any text before `x`.
@@ -2034,40 +2042,66 @@ mod tests {
             (!narrow.0 || wide.0) && (!narrow.1 || wide.1)
         };
         let mut shown_patterns = 0;
-        for prefix in ["", "*", "**/", "*/", "**/*/", "sub/", "*/sub/"] {
+        for prefix in [
+            "", "*", "**/", "*/", "**/*/", "sub/", "*/sub/", "**//", "//", "/", "./", "***/",
+        ] {
             for core in ["Cache", "Ca?he", "C[a]che", "Ca*he"] {
-                for suffix in ["", "*", "/*", "/**", "/**/*", "/x", "*/**"] {
+                for suffix in ["", "*", "/*", "/**", "/**/*", "/x", "*/**", "//**", "/"] {
                     let pattern = format!("{prefix}{core}{suffix}");
-                    let Some(shown) = Spellings::of(&pattern, false) else {
-                        continue;
-                    };
-                    shown_patterns += 1;
-                    let (as_typed, ignoring) = (filter(&pattern, false), filter(&pattern, true));
-                    let typed = filter(shown.typed, false);
-                    for name in names {
-                        assert!(
-                            within(named(&typed, name), named(&as_typed, name)),
-                            "\"{pattern}\" is shown as {}, which names {name}; the pattern does not",
-                            shown.typed
-                        );
-                    }
-                    for other in &shown.others {
-                        let spelling = filter(other, false);
+                    // What the rules make of it alone, and what the line
+                    // shows once each claim is checked: the rules must
+                    // hold without the checks to cover for them.
+                    for (how, shown) in [
+                        ("by rule", Spellings::by_rule(&pattern, false)),
+                        ("checked", Spellings::of(&pattern, cfg!(windows))),
+                    ] {
+                        let Some(shown) = shown else {
+                            continue;
+                        };
+                        shown_patterns += 1;
+                        let (as_typed, ignoring) =
+                            (filter(&pattern, false), filter(&pattern, true));
+                        let typed = filter(shown.typed, false);
                         for name in names {
                             assert!(
-                                within(named(&spelling, name), named(&ignoring, name)),
-                                "\"{pattern}\" shows {other}, which names {name}; --ignore-case \
-                                 does not match it"
+                                within(named(&typed, name), named(&as_typed, name)),
+                                "{how}, \"{pattern}\" is shown as {}, which names {name}; the \
+                                 pattern does not",
+                                shown.typed
                             );
+                        }
+                        for other in &shown.others {
+                            let spelling = filter(other, false);
+                            for name in names {
+                                assert!(
+                                    within(named(&spelling, name), named(&ignoring, name)),
+                                    "{how}, \"{pattern}\" shows {other}, which names {name}; \
+                                     --ignore-case does not match it"
+                                );
+                            }
                         }
                     }
                 }
             }
         }
         assert!(
-            shown_patterns > 150,
+            shown_patterns > 600,
             "{shown_patterns} patterns were checked"
         );
+        // cr-ecm7-2: after `**/` the next separator is the pattern's own.
+        for (pattern, windows, shown) in [
+            ("**//Cache", false, "/Cache"),
+            ("**/Cache", false, "Cache"),
+            ("**///Cache", false, "//Cache"),
+            (r"**\\Cache", true, r"\Cache"),
+            (r"**\Cache", true, "Cache"),
+        ] {
+            assert_eq!(
+                Spellings::by_rule(pattern, windows).map(|s| s.typed),
+                Some(shown),
+                "{pattern}"
+            );
+        }
     }
 
     /// cr-ecm7-2, cr-ecm7-3, cr-ecm7-4: the line, to the letter, for the
@@ -2081,6 +2115,20 @@ mod tests {
             let typed: Vec<(&str, Option<&str>)> = patterns.iter().map(|p| (*p, None)).collect();
             case_note(&typed, cfg!(windows))
         };
+        // cr-ecm7-2: the separator after `**/` is the pattern's own. The
+        // line showed `Cache` and offered `cache`, which the pattern names
+        // neither with the option nor without. It names no entry at all —
+        // none is called `/Cache` — so no spelling can be borne out, and
+        // the line keeps to words.
+        for doubled in ["**//Cache", "//Cache", "Cache//**"] {
+            assert_eq!(
+                note(&[doubled]),
+                Some(format!(
+                    "\"{doubled}\" matches exactly as typed; capital letters matter \
+                     (--ignore-case reads it otherwise)."
+                )),
+            );
+        }
         // cr-ecm7-4: a pattern the option reads no differently is neither
         // shown nor counted. For `{a,A}` the line offered `{a,a}` and
         // `{A,A}`, both matched already; what changes is `*.Doc`.
