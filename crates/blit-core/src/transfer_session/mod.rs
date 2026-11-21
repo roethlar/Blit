@@ -156,7 +156,14 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// operand, where `Purge` answered with one count and stopped at the first
 /// failure. `move`'s source removal asks through it, recursively and by
 /// name.
-pub const CONTRACT_VERSION: u32 = 14;
+/// v15: `FindPaths` replaces `Find` (UTILITY_VERBS_LOCAL_PARITY slice 3,
+/// AC-4, AC-11), by the same rule. The request carries `find`'s tests —
+/// name patterns by their bytes with their case flag, kinds, a depth — in
+/// place of one glob against the relative path; the reply is the paths
+/// found, in batches, and each entry that could not be read, where `Find`
+/// sent a row of metadata for every entry and dropped what it could not
+/// read in silence.
+pub const CONTRACT_VERSION: u32 = 15;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames

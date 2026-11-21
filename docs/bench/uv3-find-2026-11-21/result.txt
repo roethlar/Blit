@@ -1,0 +1,12 @@
+base:  blit 1.0.0+e6eba948b895
+slice: blit 1.0.0+3853e2203fda
+find (GNU findutils) 4.11.0-modified
+200,000 empty files in 2,000 directories; best of 5
+find .                       (the system command)                  32.5 ms    202001 lines     2616002 bytes
+find . -name 'f00*'          (the system command)                  37.9 ms     20000 lines      260000 bytes
+find . -type d               (the system command)                  25.0 ms      2001 lines       16002 bytes
+blit find HOST:/bench/                       (base build)         306.7 ms    202001 lines    13736068 bytes
+blit find HOST:/bench/ --pattern 'f00*'      (base build)         252.1 ms     20001 lines     1360068 bytes
+blit find HOST:/bench/                       (slice build)         61.8 ms    202001 lines     6858024 bytes
+blit find HOST:/bench/ -name 'f00*'          (slice build)         32.2 ms     20000 lines      680000 bytes
+blit find HOST:/bench/ -type d               (slice build)         25.9 ms      2001 lines       58024 bytes

@@ -177,6 +177,31 @@ after. **This changes their output from 0.1.x.**
   entry of it went; an entry that could not be removed is named and the
   command fails.
 
+## `find` on a daemon behaves like `find`
+
+**This changes `blit find` from 0.1.x: its options are `find`'s own.**
+
+- **`blit find HOST:/module/path [-name PATTERN] [-iname PATTERN]
+  [-type f|d|l] [-maxdepth N]`** prints one path per line and nothing
+  else, each beginning with the path as typed, for every entry all the
+  tests given hold for — the path itself included, as `find` includes it.
+  Before, it printed a `PATH BYTES TYPE` table of paths relative to the
+  module.
+- **`-name` matches an entry's own name, as `find` matches it**: `*`, `?`,
+  `[...]` and `\`, a leading dot matched like any character. `-iname`
+  ignores case the way `find` does. On Linux the lines equal the system
+  `find`'s for the same tree and expression. Before, `--pattern` was a
+  glob against the path below the module.
+- **The old options are refused with what replaces each**: `--pattern X`
+  → `-name 'X'`; `--case-insensitive` → `-iname`; `--files` → `-type f`;
+  `--dirs` → `-type d`; `--limit N` → pipe through `head -n N`. Any other
+  word of `find` (`-o`, `!`, `-newer`, `-exec`, …) is refused by name:
+  a test that was silently dropped would find more than was asked for.
+- A directory the daemon cannot read is reported as `find` reports it and
+  makes the exit status 1; the rest is still listed. A symbolic link is
+  listed and never followed. A name that is not valid UTF-8 is printed as
+  the bytes it is.
+
 ## Filenames that are not valid UTF-8 transfer
 
 A filename that is valid on Linux (ext4 accepts any bytes) but not valid
@@ -231,7 +256,7 @@ carry such names by their exact bytes.
 
 ## Protocol and compatibility
 
-- **Wire contract 14.** A session is refused at open, with a plain
+- **Wire contract 15.** A session is refused at open, with a plain
   message, when the two ends' protocol contract versions differ (every
   0.1.x release is another contract); upgrade both ends. Two 1.0.0 builds
   from any channel talk to each other. Both executables report

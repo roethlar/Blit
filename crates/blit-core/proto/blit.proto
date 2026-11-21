@@ -30,8 +30,11 @@ service Blit {
   // Lists the available modules on the server.
   rpc ListModules(ListModulesRequest) returns (ListModulesResponse);
 
-  // Recursively finds files/directories starting at a module path.
-  rpc Find(FindRequest) returns (stream FindEntry);
+  // `find`: a walk below a path with the Unix command's tests, answered
+  // with the paths found (UTILITY_VERBS_LOCAL_PARITY slice 3). It replaces
+  // `Find`: a request name a daemon of an earlier contract does not serve,
+  // carrying the contract its asker speaks.
+  rpc FindPaths(FindPathsRequest) returns (stream FindPathsReply);
 
   // `du`: the space allocated under a path, as the Unix command reports
   // it (contract 10, UTILITY_VERBS_LOCAL_PARITY slice 1). It replaces
@@ -420,21 +423,71 @@ message ModuleInfo {
     bool read_only = 3;
 }
 
-message FindRequest {
-  string module = 1;
-  string start_path = 2;
-  string pattern = 3;
-  bool case_sensitive = 4;
-  bool include_files = 5;
-  bool include_directories = 6;
-  uint32 max_results = 7;
+// `find` (UTILITY_VERBS_LOCAL_PARITY slice 3, AC-4): every test given
+// must hold for an entry to be found. A symbolic link is an entry of its
+// own and is never followed; an entry that cannot be read is reported and
+// the walk goes on.
+message FindPathsRequest {
+  // The asker's contract; the daemon refuses any other before it reads
+  // anything (AC-11).
+  uint32 contract_version = 1;
+  string module = 2;
+  // The path below the module to start from; empty is the module itself.
+  string start_path = 3;
+  // The start was typed with a separator after it: a start that is a link
+  // to a directory names that directory, and is entered.
+  bool follow_start = 4;
+  // `-name` and `-iname`, against an entry's base name.
+  repeated FindName names = 5;
+  // `-type`.
+  repeated FindKind kinds = 6;
+  // `-maxdepth N`: nothing more than N levels below the start is entered.
+  // Unset is every level.
+  optional uint32 max_depth = 7;
 }
 
-message FindEntry {
+// One name test: the pattern as typed, by its bytes.
+message FindName {
+  bytes pattern = 1;
+  // `-iname`: one character at a time by its lowercase form.
+  bool ignore_case = 2;
+}
+
+enum FindKind {
+  FIND_KIND_UNSPECIFIED = 0;
+  // `f`: a regular file.
+  FIND_KIND_FILE = 1;
+  // `d`
+  FIND_KIND_DIRECTORY = 2;
+  // `l`: a symbolic link, whatever it points to.
+  FIND_KIND_LINK = 3;
+}
+
+message FindPathsReply {
+  oneof reply {
+    FindBatch found = 1;
+    FindFailure failure = 2;
+  }
+}
+
+// Entries found, in the order the walk met them.
+message FindBatch {
+  repeated FindPath paths = 1;
+}
+
+message FindPath {
+  // The entry below the start, `/`-separated; empty for the start itself.
   string relative_path = 1;
-  bool is_dir = 2;
-  uint64 size = 3;
-  int64 mtime_seconds = 4;
+  // Its exact bytes when the name is not valid UTF-8.
+  optional bytes raw_relative_path = 2;
+}
+
+// An entry the walk could not read.
+message FindFailure {
+  string relative_path = 1;
+  optional bytes raw_relative_path = 2;
+  // Why, in the operating system's own words ("Permission denied").
+  string reason = 3;
 }
 
 // The utility requests (`Du`, `Df`, and the rest as their slices land) are

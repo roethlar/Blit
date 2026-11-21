@@ -10,9 +10,9 @@ mod util;
 
 pub use core::{spawn_progress_ticker, BlitServer, BlitService};
 
-use blit_core::generated::{DuReply, FindEntry};
+use blit_core::generated::{DuReply, FindPathsReply};
 use tokio::sync::mpsc;
 use tonic::Status;
 
-pub(crate) type FindSender = mpsc::Sender<Result<FindEntry, Status>>;
+pub(crate) type FindSender = mpsc::Sender<Result<FindPathsReply, Status>>;
 pub(crate) type DiskUsageSender = mpsc::Sender<Result<DuReply, Status>>;

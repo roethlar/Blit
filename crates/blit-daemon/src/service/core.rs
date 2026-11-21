@@ -1,6 +1,6 @@
 use super::admin::{
     filesystem_space_for_path, list_completions, remove_operands, sanitize_request_paths,
-    split_completion_prefix, stream_disk_usage, stream_find_entries,
+    split_completion_prefix, stream_disk_usage, stream_find,
 };
 use super::util::{
     internal_err, io_to_status, resolve_contained_path, resolve_module, resolve_relative_path,
@@ -15,9 +15,10 @@ use blit_core::generated::{
     daemon_event, ActiveTransfer, CancelJobRequest, CancelJobResponse, ClearRecentRequest,
     ClearRecentResponse, CompletionRequest, CompletionResponse, Counters, DaemonEvent, DaemonState,
     DelegatedPullProgress, DelegatedPullRequest, DfReply, DfRequest, DuReply, DuRequest, FileInfo,
-    FindEntry, FindRequest, GetStateRequest, ListModulesRequest, ListModulesResponse, ListRequest,
-    ListResponse, ModuleInfo, RmReply, RmRequest, SubscribeRequest, TransferComplete,
-    TransferError, TransferProgress, TransferRecord, TransferStarted,
+    FindKind, FindPathsReply, FindPathsRequest, GetStateRequest, ListModulesRequest,
+    ListModulesResponse, ListRequest, ListResponse, ModuleInfo, RmReply, RmRequest,
+    SubscribeRequest, TransferComplete, TransferError, TransferProgress, TransferRecord,
+    TransferStarted,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -354,7 +355,7 @@ pub(crate) fn build_transfer_finished_event(
 
 #[tonic::async_trait]
 impl Blit for BlitService {
-    type FindStream = ReceiverStream<Result<FindEntry, Status>>;
+    type FindPathsStream = ReceiverStream<Result<FindPathsReply, Status>>;
     type DuStream = ReceiverStream<Result<DuReply, Status>>;
     type DelegatedPullStream = ReceiverStream<Result<DelegatedPullProgress, Status>>;
     type SubscribeStream =
@@ -1180,49 +1181,52 @@ impl Blit for BlitService {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
-    async fn find(
+    async fn find_paths(
         &self,
-        request: Request<FindRequest>,
-    ) -> Result<Response<Self::FindStream>, Status> {
+        request: Request<FindPathsRequest>,
+    ) -> Result<Response<Self::FindPathsStream>, Status> {
         let req = request.into_inner();
-        if !req.include_files && !req.include_directories {
-            return Err(Status::invalid_argument(
-                "at least one of include_files or include_directories must be true",
-            ));
-        }
+        // AC-11: an asker of this daemon's own contract, or nothing is read.
+        blit_core::admin::same_build::check(req.contract_version)?;
         let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
-        let (tx, rx): (FindSender, mpsc::Receiver<Result<FindEntry, Status>>) = mpsc::channel(32);
-
         let start_rel = if req.start_path.trim().is_empty() {
             PathBuf::from(".")
         } else {
-            resolve_relative_path(&req.start_path)?
+            resolve_relative_path(req.start_path.trim())?
         };
+        // The start's own name, for the name tests: the last name of the
+        // path asked for, and the module's when the path is the module.
+        let start_name = match start_rel.file_name() {
+            Some(name) => blit_core::find::name_bytes(name).into_owned(),
+            None => module.name.clone().into_bytes(),
+        };
+        let mut options = blit_core::find::FindOptions {
+            max_depth: req.max_depth,
+            follow_start: req.follow_start,
+            ..Default::default()
+        };
+        for name in &req.names {
+            options.names.push(
+                blit_core::find_name::NamePattern::new(&name.pattern, name.ignore_case)
+                    .map_err(Status::invalid_argument)?,
+            );
+        }
+        for kind in &req.kinds {
+            options.kinds.push(match FindKind::try_from(*kind) {
+                Ok(FindKind::File) => blit_core::find::Kind::File,
+                Ok(FindKind::Directory) => blit_core::find::Kind::Directory,
+                Ok(FindKind::Link) => blit_core::find::Kind::Link,
+                _ => return Err(Status::invalid_argument(format!("unknown kind {kind}"))),
+            });
+        }
 
+        let (tx, rx): (FindSender, mpsc::Receiver<Result<FindPathsReply, Status>>) =
+            mpsc::channel(64);
         let module_root = module.path.clone();
-        let pattern = req.pattern.clone();
-        let case_sensitive = req.case_sensitive;
-        let include_files = req.include_files;
-        let include_dirs = req.include_directories;
-        let max_results = if req.max_results == 0 {
-            None
-        } else {
-            Some(req.max_results as usize)
-        };
-
         tokio::spawn(async move {
             let err_sender = tx.clone();
             let result = tokio::task::spawn_blocking(move || {
-                stream_find_entries(
-                    module_root,
-                    start_rel,
-                    pattern,
-                    case_sensitive,
-                    include_files,
-                    include_dirs,
-                    max_results,
-                    &tx,
-                )
+                stream_find(module_root, start_rel, start_name, options, &tx)
             })
             .await;
 

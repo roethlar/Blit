@@ -194,6 +194,33 @@ fn stale_destination_unimplemented_does_not_fall_back_to_relay() {
     assert_eq!(counters.cli_data_plane_outbound_bytes, 0);
 }
 
+/// UTILITY_VERBS_LOCAL_PARITY AC-11 for `find`, a newer asker against a
+/// daemon of an earlier contract: that daemon does not serve `FindPaths`
+/// at all and answers "unimplemented" — it knows only the old request,
+/// with other tests. `blit find` reports it as what it is, the two are
+/// different builds, and prints nothing as an answer.
+#[test]
+fn find_against_a_daemon_too_old_to_know_it_is_refused_as_another_build() {
+    let work = tempdir().expect("tempdir");
+    let config_dir = work.path().join("cli-config");
+    fs::create_dir_all(&config_dir).expect("cli config");
+    let stale = spawn_fake_blit_server(UnimplementedBlit, "fake daemon of an earlier contract");
+    let mut cmd = Command::new(common::cli_bin());
+    cmd.arg("--config-dir")
+        .arg(&config_dir)
+        .arg("find")
+        .arg(format!("127.0.0.1:{}:/test/", stale.port))
+        .args(["-name", "*.txt"]);
+    let output = run_with_timeout(cmd, Duration::from_secs(20));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(output.stdout.is_empty(), "nothing is answered: {stderr}");
+    assert!(
+        stderr.contains("does not serve `find`") && stderr.contains("another contract version"),
+        "{stderr}"
+    );
+}
+
 /// UTILITY_VERBS_LOCAL_PARITY AC-11 for removal, a newer asker against a
 /// daemon of an earlier contract: that daemon does not serve `Rm` at all
 /// and answers "unimplemented" — it knows only the old request, which
@@ -354,8 +381,8 @@ struct UnimplementedBlit;
 
 #[tonic::async_trait]
 impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
-    type FindStream = tokio_stream::wrappers::ReceiverStream<
-        Result<blit_core::generated::FindEntry, tonic::Status>,
+    type FindPathsStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::FindPathsReply, tonic::Status>,
     >;
     type DuStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DuReply, tonic::Status>,
@@ -430,10 +457,10 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
 
-    async fn find(
+    async fn find_paths(
         &self,
-        _: tonic::Request<blit_core::generated::FindRequest>,
-    ) -> Result<tonic::Response<Self::FindStream>, tonic::Status> {
+        _: tonic::Request<blit_core::generated::FindPathsRequest>,
+    ) -> Result<tonic::Response<Self::FindPathsStream>, tonic::Status> {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
 
@@ -484,8 +511,8 @@ struct RejectingTransferBlit;
 
 #[tonic::async_trait]
 impl blit_core::generated::blit_server::Blit for RejectingTransferBlit {
-    type FindStream = tokio_stream::wrappers::ReceiverStream<
-        Result<blit_core::generated::FindEntry, tonic::Status>,
+    type FindPathsStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::FindPathsReply, tonic::Status>,
     >;
     type DuStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DuReply, tonic::Status>,
@@ -574,10 +601,10 @@ impl blit_core::generated::blit_server::Blit for RejectingTransferBlit {
         ))
     }
 
-    async fn find(
+    async fn find_paths(
         &self,
-        _: tonic::Request<blit_core::generated::FindRequest>,
-    ) -> Result<tonic::Response<Self::FindStream>, tonic::Status> {
+        _: tonic::Request<blit_core::generated::FindPathsRequest>,
+    ) -> Result<tonic::Response<Self::FindPathsStream>, tonic::Status> {
         Err(tonic::Status::unimplemented(
             "test only exercises pull_sync",
         ))

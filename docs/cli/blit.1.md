@@ -16,7 +16,7 @@ blit – local and hybrid-transport file transfer CLI
 `blit du [-a] [-s] [-d <N>] [-h] [--json] <REMOTE>`
 `blit df [-h] [-k] [--json] <REMOTE>`
 `blit rm [-r] [-f] [-y] [--json] <REMOTE>...`
-`blit find [--pattern <GLOB>] [--case-insensitive] [--limit <N>] [--json] <REMOTE>`
+`blit find [--json] <REMOTE> [-name <PATTERN>] [-iname <PATTERN>] [-type f|d|l] [-maxdepth <N>]`
 `blit completions shell <SHELL>`
 `blit completions remote <REMOTE> [--prefix <STR>] [--files] [--dirs]`
 `blit profile [--limit <N>] [--json]`
@@ -103,8 +103,15 @@ path, then push it.
   skips the question, and so does `-f`. When no answer can be read the
   command does nothing and exits 1 (so do `mirror` and `move`). A whole
   module, and a read-only module, are refused.
-- `find` searches for files on a remote daemon (glob `--pattern`,
-  e.g. `*.csv` or `**/*.log`; `*` does not cross `/`).
+- `find` searches below a remote path as the Unix `find` does, walked on
+  the daemon's own disk in one request: one path per line, each beginning
+  with the path as typed, for every entry all the tests given hold for
+  (the path itself included). `-name` and `-iname` match an entry's own
+  name with `*`, `?`, `[...]` and `\` as `find` does; `-type` takes `f`,
+  `d` or `l`; `-maxdepth N` enters nothing more than N levels below the
+  path. A symbolic link is listed and never followed. Exit status 1 when
+  something could not be read. Any other test, action or operator of
+  `find` is refused by name.
 - `completions shell <SHELL>` writes a clap-generated shell-completion
   script to stdout (bash/zsh/fish/powershell/elvish). Source it from
   your shell's rc file or completion directory.

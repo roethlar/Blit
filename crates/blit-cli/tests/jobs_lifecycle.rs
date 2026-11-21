@@ -484,8 +484,8 @@ struct StallingTransferBlit;
 
 #[tonic::async_trait]
 impl blit_core::generated::blit_server::Blit for StallingTransferBlit {
-    type FindStream = tokio_stream::wrappers::ReceiverStream<
-        Result<blit_core::generated::FindEntry, tonic::Status>,
+    type FindPathsStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::FindPathsReply, tonic::Status>,
     >;
     type DuStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DuReply, tonic::Status>,
@@ -562,10 +562,10 @@ impl blit_core::generated::blit_server::Blit for StallingTransferBlit {
         Err(tonic::Status::unimplemented("stalling fake source"))
     }
 
-    async fn find(
+    async fn find_paths(
         &self,
-        _: tonic::Request<blit_core::generated::FindRequest>,
-    ) -> Result<tonic::Response<Self::FindStream>, tonic::Status> {
+        _: tonic::Request<blit_core::generated::FindPathsRequest>,
+    ) -> Result<tonic::Response<Self::FindPathsStream>, tonic::Status> {
         Err(tonic::Status::unimplemented("stalling fake source"))
     }
 

@@ -21,7 +21,7 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `files_from_unnamed`; `client::connect_with_timeout` and
 `connect_transfer_client` return a `BlitClient<client::BlitChannel>`
 (the channel behind `client::BoundedResponses`). The wire
-protocol is contract 14: a peer on any other contract version (every 0.1.x
+protocol is contract 15: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
 
@@ -118,7 +118,7 @@ part, and a job you can list, read, re-run and retry.
   be written the transfer still completes and the report says the log is
   incomplete.
 - A dry run or `--null` run is logged as what it planned, not as copies.
-- Wire protocol (contract 14): the job ID rides the session-open and
+- Wire protocol (contract 15): the job ID rides the session-open and
   delegated-pull requests; `GetJobLog` returns a daemon's log by ID; the
   finished-job record carries the failed-file count. In a filtered mirror,
   `ManifestPruned` tells the destination which source paths were excluded,
@@ -200,7 +200,7 @@ part, and a job you can list, read, re-run and retry.
 a server's files runs on the server's own disk, in one request, instead
 of paying a network filesystem's cost per file. From 1.0.0 each also
 behaves like the Unix command it is named after; `du` and `df` are the
-first two, `rm` the third (`find` and `ls` follow).
+first two, `rm` the third, `find` the fourth (`ls` follows).
 
 - **`blit df HOST:/module/path`** reports the filesystem that holds THAT
   path, asked of the operating system directly, as `df -k` prints it —
@@ -283,6 +283,57 @@ asks before it deletes.
   removed, and each `RmFailure` with its operand, path and reason);
   `delete_remote_path` now returns the count removed and fails when any
   entry stayed; `blit_core::deletion::remove_as_rm` is the removal itself.
+
+### `find` behaves like `find`
+
+**Behaviour change from 0.1.x: `blit find` takes `find`'s expression, and
+none of the options it had.**
+
+- **`blit find HOST:/module/path [-name PATTERN] [-iname PATTERN]
+  [-type f|d|l] [-maxdepth N]`**, every test given holding. It prints one
+  path per line and nothing else, each beginning with the path as typed;
+  the path itself is an entry and comes first, a directory before what is
+  in it. It used to print a padded `PATH BYTES TYPE` table of paths
+  relative to the module.
+- **`-name PATTERN` is matched against an entry's own name, as `find`
+  matches it**: `*` is any run of characters (a leading dot included),
+  `?` any one, `[...]` one of a set (ranges, `!` or `^` to negate,
+  `[:alpha:]`-style classes), `\` takes the next character as itself. As
+  in `find`, a name matches when the pattern fits it read as characters
+  or as bytes: `?.dat` finds `é.dat`, and so does `??.dat`. **`-iname`**
+  compares one character at a time by its lowercase form, as `find` does
+  — `-iname 'σ.sig'` finds `Σ.sig` and not `ς.sig`. This is `find`'s rule
+  and not the one `--ignore-case` gives a transfer's patterns, which
+  pairs all three: each command follows the tool it is named after.
+- **`-type f|d|l`** and **`-maxdepth N`** as in `find`. A symbolic link is
+  an entry of its own (`-type l`) and is never followed — except the path
+  given when it is typed with a `/` after it, which names the directory
+  the link points to, as it does to `find`.
+- **The old options are refused, each with what replaces it**:
+  `--pattern X` → `-name 'X'` (it was a glob against the whole path below
+  the module, with `**/`; `-name` is against the entry's name, at any
+  depth); `--case-insensitive` → `-iname`; `--files` → `-type f`;
+  `--dirs` → `-type d`; `--limit N` → pipe through `head -n N`.
+- **Any other word of `find` is refused by name** before anything is
+  asked of a daemon — `-o`, `!`, parentheses, `-newer`, `-size`, `-exec`,
+  `-print`, a `-type` other than the three. A test that was dropped in
+  silence would find more than was asked for.
+- A directory the daemon cannot read is listed, reported in `find`'s
+  words (`blit find: ‘PATH’: Permission denied`) and makes the exit status
+  1; the walk goes on. It used to be left out without a word. A name that
+  is not valid UTF-8 is printed, and matched, by its own bytes. `--json`
+  gives `paths` and `failures`.
+- The walk asks the filesystem nothing no test needs: an entry's kind
+  comes with its directory's listing, and paths travel in batches. When
+  the reader goes away (`blit find … | head -1`) the command stops
+  without a message.
+- The request is new on the wire (`FindPaths`) and compares the contract
+  version before reading anything; the old `Find` request is gone.
+- For a program built on `blit-core`: `admin::find::stream` takes a
+  `FindQuery` (name tests, kinds, depth) and yields `FindEvent::Found`
+  paths and failures, each an `EntryPath`; `FindParams` and the
+  `FindEntry` row are gone. The walk and the matcher are public as
+  `blit_core::find` and `blit_core::find_name`.
 
 ### Fixes
 

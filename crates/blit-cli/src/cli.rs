@@ -137,7 +137,20 @@ pub enum Commands {
     /// read, nothing is removed and the exit status is 1. A whole module,
     /// and a read-only module, are refused.
     Rm(RmArgs),
-    /// Search for files on a remote daemon
+    /// Search a path on a daemon, as `find` does
+    ///
+    /// What the Unix `find` does, walked on the daemon's own disk in one
+    /// request: `blit find PATH [-name PATTERN] [-iname PATTERN]
+    /// [-type f|d|l] [-maxdepth N]`. One path per line, each beginning
+    /// with PATH as typed, for every entry all the tests given hold for —
+    /// PATH itself included. -name matches an entry's own name with `*`,
+    /// `?`, `[...]` and `\` as find does (a leading dot is matched like
+    /// any character; quote the pattern from the shell); -iname ignores
+    /// case as find does. A symbolic link is listed and never followed. An
+    /// entry the daemon cannot read is reported as find reports it and
+    /// makes the exit status 1; the rest is still listed. Any other test,
+    /// action or operator of find is refused by name before anything is
+    /// asked of the daemon.
     Find(FindArgs),
     /// Fetch remote path completions for interactive shells
     Completions(CompletionArgs),
@@ -769,34 +782,21 @@ pub struct RmArgs {
     pub json: bool,
 }
 
+/// `find`, as the Unix command, run on the daemon's own disk
+/// (UTILITY_VERBS_LOCAL_PARITY slice 3). The expression is `find`'s own
+/// single-dash words, read by hand after the path (`crate::find`).
 #[derive(Args, Clone, Debug)]
 pub struct FindArgs {
     /// Remote path to search (e.g., server:/module/path)
     pub target: String,
-    /// Glob pattern matched against each entry's relative path AND
-    /// its file-name basename (whichever matches first). Uses POSIX
-    /// shell-glob semantics: `*` matches any run of non-`/`
-    /// characters, `?` matches one non-`/` character, `[abc]`
-    /// matches a class, `**/` matches zero or more nested directory
-    /// components. `*` does NOT cross `/`; use `**/` to traverse
-    /// directories. The basename fallback means `*.csv` finds nested
-    /// entries (matching their basename) without writing `**/`.
-    /// Case sensitivity controlled by `--case-insensitive`. Empty
-    /// matches everything.
-    #[arg(long)]
-    pub pattern: Option<String>,
-    /// Include only files in results
-    #[arg(long)]
-    pub files: bool,
-    /// Include only directories in results
-    #[arg(long)]
-    pub dirs: bool,
-    /// Case-insensitive pattern matching
-    #[arg(long)]
-    pub case_insensitive: bool,
-    /// Limit number of results
-    #[arg(long)]
-    pub limit: Option<u32>,
+    /// The tests, every one of which must hold: -name PATTERN,
+    /// -iname PATTERN, -type f|d|l, -maxdepth N
+    #[arg(
+        value_name = "EXPRESSION",
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
+    pub expression: Vec<String>,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,

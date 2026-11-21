@@ -1,9 +1,9 @@
 use super::{DiskUsageSender, FindSender};
 use blit_core::disk_usage::{disk_usage, os_reason, Stopped, UsageEnd, UsageEvent, UsageOptions};
-use blit_core::enumeration::{EntryKind, FileEnumerator};
-use blit_core::fs_enum::FileFilter;
+use blit_core::find::{find, FindEnd, FindEvent, FindOptions};
 use blit_core::generated::{
-    du_reply, DfReply, DuFailure, DuReply, DuRow, FindEntry, RmFailure, RmReply,
+    du_reply, find_paths_reply, DfReply, DuFailure, DuReply, DuRow, FindBatch, FindFailure,
+    FindPath, FindPathsReply, RmFailure, RmReply,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,6 @@ use tonic::Status;
 
 use super::util::{internal_err, io_to_status, resolve_relative_path, response_channel_closed};
 use blit_core::path_posix::request_path_to_posix;
-use blit_core::wire_metadata::mtime_seconds;
 
 pub(crate) fn sanitize_request_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, Status> {
     let mut sanitized = Vec::new();
@@ -239,134 +238,102 @@ fn wire_path(relative: &Path) -> String {
     }
 }
 
-pub(crate) fn stream_find_entries(
+/// `find` from `start_rel` below the module
+/// (`docs/plan/UTILITY_VERBS_LOCAL_PARITY.md` slice 3): the walk and its
+/// tests are `blit_core::find`, on this daemon's own disk. The paths found
+/// go to the asker in batches, in the walk's order; an entry that could
+/// not be read goes at once, after what was found before it.
+///
+/// A start that is not there is one failure for the start itself, not a
+/// failed request: the asker prints it in `find`'s words and exits 1, as
+/// for any other entry.
+pub(crate) fn stream_find(
     module_root: PathBuf,
     start_rel: PathBuf,
-    pattern: String,
-    case_sensitive: bool,
-    include_files: bool,
-    include_dirs: bool,
-    max_results: Option<usize>,
+    start_name: Vec<u8>,
+    options: FindOptions,
     sender: &FindSender,
 ) -> Result<(), Status> {
     let start_abs = module_root.join(&start_rel);
-    // F2: containment check before any filesystem operation.
+    // F2: containment check before any filesystem operation. The walk
+    // follows no link below the start, and a start that is itself a link
+    // out of the module is refused here, whether or not it would be
+    // entered. `module_root` is the canonical root.
     blit_core::path_safety::verify_contained(&module_root, &start_abs)
         .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))?;
-    if !start_abs.exists() {
-        return Err(Status::not_found(format!(
-            "start path not found for find: {}",
-            request_path_to_posix(&start_rel)
-        )));
-    }
 
-    // Pattern matching is glob-based, matching `BLIT_UTILS_PLAN.md`.
-    // Pre-0.1.0 behavior was substring containment; the move to
-    // glob is a deliberate API change before 0.1.0 ships (no
-    // backwards-compat constraint).
-    //
-    // R41-F3: `literal_separator(true)` matches POSIX shell-glob
-    // semantics — `*` does NOT cross `/`, so `foo*.csv` matches
-    // `foo-bar.csv` but NOT `foo/bar.csv`. The basename fallback
-    // below covers the common "find files with this extension at
-    // any depth" use case (`*.csv` matches both `top.csv` and
-    // `nested/x.csv` via the basename), without making `*` greedy
-    // across the whole path. Users wanting a path-component-
-    // crossing match write `**/`.
-    let matcher = if pattern.is_empty() {
-        None
-    } else {
-        let glob = globset::GlobBuilder::new(&pattern)
-            .case_insensitive(!case_sensitive)
-            .literal_separator(true)
-            .build()
-            .map_err(|e| {
-                Status::invalid_argument(format!("invalid find --pattern glob '{pattern}': {e}"))
-            })?;
-        Some(glob.compile_matcher())
+    let mut found = FoundBatch {
+        paths: Vec::with_capacity(FoundBatch::MOST),
+        sent: std::time::Instant::now(),
+        sender,
     };
-
-    let mut sent = 0usize;
-    let limit = max_results.filter(|&m| m > 0);
-
-    let mut maybe_emit =
-        |rel_path: PathBuf, metadata: std::fs::Metadata, is_dir: bool| -> Result<(), Status> {
-            if let Some(limit) = limit {
-                if sent >= limit {
-                    return Ok(());
-                }
-            }
-            if is_dir && !include_dirs {
-                return Ok(());
-            }
-            if !is_dir && !include_files {
-                return Ok(());
-            }
-
-            let rel_display = request_path_to_posix(&rel_path);
-            if let Some(ref glob_matcher) = matcher {
-                // Match against the relative path AND its file-name
-                // tail. Users typically write `--pattern '*.txt'`
-                // expecting it to match any file with that
-                // extension regardless of depth. With
-                // `literal_separator(false)` `*.txt` matches across
-                // directory components, but matching against the
-                // basename too is the intuitive fallback for
-                // patterns that don't use `**`.
-                let basename = std::path::Path::new(&rel_display)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(&rel_display);
-                if !glob_matcher.is_match(&rel_display) && !glob_matcher.is_match(basename) {
-                    return Ok(());
-                }
-            }
-
-            let entry = FindEntry {
-                relative_path: rel_display,
-                is_dir,
-                size: if is_dir { 0 } else { metadata.len() },
-                mtime_seconds: mtime_seconds(&metadata).unwrap_or(0),
-            };
-            sender
-                .blocking_send(Ok(entry))
-                .map_err(|_| response_channel_closed("sending find result"))?;
-            sent += 1;
-            Ok(())
-        };
-
-    let metadata = start_abs
-        .metadata()
-        .map_err(|err| io_to_status(format!("stat {}", start_abs.display()), err))?;
-
-    if start_abs.is_file() {
-        maybe_emit(start_rel.clone(), metadata, false)?;
-        return Ok(());
-    }
-
-    if include_dirs && start_rel != Path::new(".") {
-        maybe_emit(start_rel.clone(), metadata, true)?;
-    }
-
-    let enumerator = FileEnumerator::new(FileFilter::default());
-    enumerator
-        .enumerate_local_streaming(&start_abs, |entry| {
-            let rel_from_root = if start_rel == Path::new(".") {
-                entry.relative_path.clone()
-            } else {
-                let mut combined = start_rel.clone();
-                if entry.relative_path != Path::new(".") {
-                    combined.push(&entry.relative_path);
-                }
-                combined
-            };
-            let is_dir = matches!(entry.kind, EntryKind::Directory);
-            maybe_emit(rel_from_root, entry.metadata, is_dir)?;
-            Ok(())
+    let failure = |relative: &Path, error: &std::io::Error| {
+        find_paths_reply::Reply::Failure(FindFailure {
+            relative_path: wire_path(relative),
+            raw_relative_path: blit_core::raw_name::raw_relative_bytes(relative),
+            reason: os_reason(error),
         })
-        .map_err(|err| internal_err("find enumeration failed", err))?;
+    };
+    let walked = {
+        let mut emit = |event: FindEvent| match event {
+            FindEvent::Found(path) => found.add(&path),
+            FindEvent::Failure(failed) => {
+                found.send()?;
+                found.reply(failure(&failed.relative_path, &failed.error))
+            }
+        };
+        find(&start_abs, &start_name, &options, &mut emit)
+    };
+    let closed = || response_channel_closed("sending find result");
+    match walked {
+        Ok(()) => found.send().map_err(|Stopped| closed()),
+        Err(FindEnd::Stopped(Stopped)) => Err(closed()),
+        Err(FindEnd::Start(error)) => found
+            .reply(failure(Path::new(""), &error))
+            .map_err(|Stopped| closed()),
+    }
+}
 
-    Ok(())
+/// The paths found and not yet sent.
+struct FoundBatch<'a> {
+    paths: Vec<FindPath>,
+    sent: std::time::Instant,
+    sender: &'a FindSender,
+}
+
+impl FoundBatch<'_> {
+    /// The most paths one message carries.
+    const MOST: usize = 512;
+    /// How long a path found may wait for the batch to fill: a search
+    /// that finds little shows what it finds as it finds it.
+    const WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
+    fn add(&mut self, relative: &Path) -> Result<(), Stopped> {
+        self.paths.push(FindPath {
+            relative_path: wire_path(relative),
+            raw_relative_path: blit_core::raw_name::raw_relative_bytes(relative),
+        });
+        if self.paths.len() >= Self::MOST || self.sent.elapsed() >= Self::WAIT {
+            self.send()
+        } else {
+            Ok(())
+        }
+    }
+
+    fn send(&mut self) -> Result<(), Stopped> {
+        self.sent = std::time::Instant::now();
+        if self.paths.is_empty() {
+            return Ok(());
+        }
+        let paths = std::mem::replace(&mut self.paths, Vec::with_capacity(Self::MOST));
+        self.reply(find_paths_reply::Reply::Found(FindBatch { paths }))
+    }
+
+    fn reply(&self, reply: find_paths_reply::Reply) -> Result<(), Stopped> {
+        self.sender
+            .blocking_send(Ok(FindPathsReply { reply: Some(reply) }))
+            .map_err(|_| Stopped)
+    }
 }
 
 /// `df` for `path` (`docs/plan/UTILITY_VERBS_LOCAL_PARITY.md` slice 1):
@@ -601,14 +568,11 @@ mod status_mapping_tests {
 
         let (find_sender, find_receiver) = tokio::sync::mpsc::channel(1);
         drop(find_receiver);
-        let find_error = stream_find_entries(
+        let find_error = stream_find(
             module_root,
             PathBuf::from("entry"),
-            String::new(),
-            true,
-            true,
-            false,
-            None,
+            b"entry".to_vec(),
+            FindOptions::default(),
             &find_sender,
         )
         .expect_err("closed find stream");

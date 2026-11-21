@@ -65,8 +65,8 @@ struct SmallFrames {
 
 #[tonic::async_trait]
 impl blit_core::generated::blit_server::Blit for SmallFrames {
-    type FindStream = tokio_stream::wrappers::ReceiverStream<
-        Result<blit_core::generated::FindEntry, tonic::Status>,
+    type FindPathsStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::FindPathsReply, tonic::Status>,
     >;
     type DuStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DuReply, tonic::Status>,
@@ -165,10 +165,10 @@ impl blit_core::generated::blit_server::Blit for SmallFrames {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
 
-    async fn find(
+    async fn find_paths(
         &self,
-        _: tonic::Request<blit_core::generated::FindRequest>,
-    ) -> Result<tonic::Response<Self::FindStream>, tonic::Status> {
+        _: tonic::Request<blit_core::generated::FindPathsRequest>,
+    ) -> Result<tonic::Response<Self::FindPathsStream>, tonic::Status> {
         // One row to a message, one message to a frame: the channel
         // holds a single row, so the encoder never finds two waiting.
         let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -177,11 +177,16 @@ impl blit_core::generated::blit_server::Blit for SmallFrames {
             let now = progress.sending.fetch_add(1, Ordering::SeqCst) + 1;
             progress.most_sending.fetch_max(now, Ordering::SeqCst);
             for row in 0..ROWS {
-                let entry = blit_core::generated::FindEntry {
-                    relative_path: format!("f{row:05}"),
-                    is_dir: false,
-                    size: 0,
-                    mtime_seconds: 0,
+                // One path to a message: as small as a `find` answer gets.
+                let entry = blit_core::generated::FindPathsReply {
+                    reply: Some(blit_core::generated::find_paths_reply::Reply::Found(
+                        blit_core::generated::FindBatch {
+                            paths: vec![blit_core::generated::FindPath {
+                                relative_path: format!("f{row:05}"),
+                                raw_relative_path: None,
+                            }],
+                        },
+                    )),
                 };
                 if tx.send(Ok(entry)).await.is_err() {
                     break;
@@ -282,9 +287,10 @@ fn a_listing_read_later_than_it_arrives_is_whole() {
 
     assert!(status.success(), "blit find: {said}");
     let listing = String::from_utf8_lossy(&listing);
+    // One path to a line, each beginning with the path as typed.
     let rows = listing
         .lines()
-        .filter(|line| line.trim_start().starts_with('f'))
+        .filter(|line| line.contains(":/test/f"))
         .count();
     assert_eq!(rows, ROWS, "every row is printed\n{said}");
 }
@@ -311,7 +317,7 @@ async fn a_transfer_clients_stream_read_later_than_it_arrives_is_whole() {
         .await
         .expect("connect");
     let mut rows = client
-        .find(blit_core::generated::FindRequest::default())
+        .find_paths(blit_core::generated::FindPathsRequest::default())
         .await
         .expect("the stream opens")
         .into_inner();
@@ -408,7 +414,7 @@ async fn every_stream_a_connection_may_carry_read_later_is_whole() {
         let mut client = client.clone();
         opened.push(
             client
-                .find(blit_core::generated::FindRequest::default())
+                .find_paths(blit_core::generated::FindPathsRequest::default())
                 .await
                 .expect("the stream opens")
                 .into_inner(),
@@ -463,7 +469,7 @@ async fn a_connection_carries_no_more_streams_at_once_than_the_policy_allows() {
             let mut client = client.clone();
             tokio::spawn(async move {
                 let mut rows = client
-                    .find(blit_core::generated::FindRequest::default())
+                    .find_paths(blit_core::generated::FindPathsRequest::default())
                     .await
                     .expect("the stream opens")
                     .into_inner();
@@ -509,10 +515,9 @@ fn a_ninth_listing_waits_while_eight_complete_ones_are_unread() {
             let mut client = client.clone();
             async move {
                 client
-                    .find(blit_core::generated::FindRequest {
+                    .find_paths(blit_core::generated::FindPathsRequest {
+                        contract_version: blit_core::transfer_session::CONTRACT_VERSION,
                         module: "test".into(),
-                        case_sensitive: true,
-                        include_files: true,
                         ..Default::default()
                     })
                     .await

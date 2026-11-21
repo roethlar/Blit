@@ -16,6 +16,8 @@ pub mod display;
 pub mod endpoint;
 pub mod endpoints;
 pub mod enumeration;
+pub mod find;
+pub mod find_name;
 pub mod fs_capability;
 pub mod fs_enum;
 pub mod job_log;

@@ -96,7 +96,7 @@ The 1.0.0 crates.io packages are published separately after the release tag. The
 older 0.1.2 crates on crates.io predate the protocol gate and refuse
 every peer; update them. Remote transfers require both peers to speak
 the same protocol contract version (`blit scan` prints it as
-`Protocol: v14`; `--json` names it `contract_version`). Any two builds of
+`Protocol: v15`; `--json` names it `contract_version`). Any two builds of
 the same release do, whatever channel installed them; a peer on a
 different contract is refused at session open with both versions named.
 
@@ -187,8 +187,8 @@ blit list-modules server
 # Browse remote directories
 blit ls server:/module/path
 
-# Search for files on a remote daemon (glob pattern)
-blit find server:/module/ --pattern "*.csv"
+# Search a daemon's files as find does: -name, -iname, -type f|d|l, -maxdepth N
+blit find server:/module/path -name '*.csv' -type f
 
 # Disk usage, as du reports it, counted on the daemon's own disk (-a, -s, -d N, -h)
 blit du -sh server:/module/path
