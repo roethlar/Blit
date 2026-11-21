@@ -966,6 +966,15 @@ fn the_line_claims_only_what_the_mirror_then_does() {
                    would also match xA).",
             entries: &[("xA", true, false), ("A", true, true), ("a", true, true)],
         },
+        // cr-ecm12-4: and with a class in the include — the line said
+        // `would also match [A]`.
+        Case {
+            excludes: &["[Aa]"],
+            includes: &["*[a]"],
+            line: "\"*[a]\" matches exactly as typed; capital letters matter (--ignore-case \
+                   would also match xA).",
+            entries: &[("xA", true, false), ("A", true, true), ("a", true, true)],
+        },
         // cr-ecm10-5: `Q[b-~]` was offered as a spelling the option would
         // also match, beside the pattern typed exactly so. What the
         // option adds is `QB`; no spelling of the pattern denotes it, and

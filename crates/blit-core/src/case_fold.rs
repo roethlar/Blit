@@ -619,7 +619,12 @@ impl<'a> Spellings<'a> {
                         None => Some(other),
                         Some(asked) => asked.would_also_match(&whole, &other, windows).map(
                             |(name, its_own)| {
-                                if its_own || !reads_as_one_name(&other) {
+                                // cr-ecm12-4: its own name, and that alone.
+                                // A text that still holds a class was kept
+                                // as "a pattern": `[A]` was printed for
+                                // `*[a]`, which as a name is `A` — and the
+                                // name checked was `xA`.
+                                if its_own {
                                     other
                                 } else {
                                     others_are_spellings = false;
@@ -655,12 +660,6 @@ impl<'a> Spellings<'a> {
             others_are_spellings,
         })
     }
-}
-
-/// Whether `text` — a pattern without the wildcards at its ends — reads
-/// as the name of one entry: nothing in it that stands for other text.
-fn reads_as_one_name(text: &str) -> bool {
-    !text.contains(['*', '?', '[', '{', '\\'])
 }
 
 /// `text` with its letters all lower, and all upper: each letter changed
@@ -2971,6 +2970,24 @@ mod tests {
             Some(
                 "\"*a\" matches exactly as typed; capital letters matter (--ignore-case would \
                  also match xA)."
+            )
+        );
+        // cr-ecm12-4: and so where the text to print still holds a class.
+        // `[A]` was printed for `*[a]` — the name it reads as is `A`.
+        assert_eq!(
+            both(&["[Aa]"], &["*[a]"]).as_deref(),
+            Some(
+                "\"*[a]\" matches exactly as typed; capital letters matter (--ignore-case \
+                 would also match xA)."
+            )
+        );
+        // A text with a wildcard left in it is printed when a name of its
+        // OWN showed the change.
+        assert_eq!(
+            both(&["img_*.jpg"], &[]).as_deref(),
+            Some(
+                "\"img_*.jpg\" matches img_*.jpg only; capital letters matter (--ignore-case \
+                 would also match IMG_*.JPG)."
             )
         );
         // An include the option widens is offered what it would let in —
