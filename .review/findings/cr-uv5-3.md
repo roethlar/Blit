@@ -1,9 +1,9 @@
 # cr-uv5-3: a move left the second name of a file with two
 
 **Severity**: MEDIUM — a move of a file with several names delivers them all, leaves all but the first at the source and exits 1
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r17` (Codex openreview, 2026-11-21) reviewed `13faafd2..7912da16` — the nine `combined-r16` fixes and local-copy-mode — with `guard_confirmed: true`. "The move records the entire version observed after unlinking the first name. An ordinary append before that observation becomes part of the version it attributes to its own unlink. The next name can then pass as the original file, deleting the last copy of the appended bytes. Reject changes in size or modification time and retain the remaining name whenever the content version is ambiguous." (The record's own known gap said a write that keeps the size and puts the time back is taken for the removal's own; the reviewer's is plainer and worse — ANY write in that window is.) The remaining work is cr-uv6-1
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv5-3`)
+**Commit**: `55094166`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r16` over `35adeacb..13faafd2` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r16.codex.md`. It completes cr-uv4-1 (`c4241da0`).
 
 ## Evidence

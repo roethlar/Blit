@@ -1,9 +1,9 @@
 # local-copy-mode: a file copied on its own between two local paths lost its mode
 
 **Severity**: HIGH — a private file copied on this machine becomes readable by every user; a program stops being executable
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r17` (Codex openreview, 2026-11-21) reviewed `13faafd2..7912da16` — the nine `combined-r16` fixes and local-copy-mode — with `guard_confirmed: true`; the reviewer's own guard was this fix's (the old assumption restored: `0644` where `0600` was required; the source restored, green). "On Linux, copying a single `0600` file returned success and produced `0600` normally but `0644` with `--resume`. I observed this with both an absent destination and an existing partial." The remaining work is cr-ecm16-1
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix local-copy-mode`)
+**Commit**: `619aa215`
 **Reviewer**: none — found by the working agent, 2026-11-21, while measuring the speed of cr-ecm15-1's fix: a guard written for that fix expected a copied file's mode and failed. No review has seen it. It is older than this session's work (the code is `copy_opened`'s since ssc-4, and `copy_file`'s before it); when it began was not traced.
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-uv5-1: a move from a daemon left at its source what it had delivered
 
 **Severity**: HIGH — a move of more than 128 files from a daemon delivers everything, leaves part of the source in place, and exits 1
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r17` (Codex openreview, 2026-11-21) reviewed `13faafd2..7912da16` — the nine `combined-r16` fixes and local-copy-mode — with `guard_confirmed: true`: "Recording entries as they enter the manifest fixes the accounting gap when a destination requests files early."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv5-1`)
+**Commit**: `e4657ab7`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r16` over `35adeacb..13faafd2` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r16.codex.md`. **And the working agent, independently**: it met the fault the same hour, measuring a move of 20,000 files while that review was still running, and had this fix written and proven before the review's result was read. `utility-slices-r3`'s fix cr-uv3-1 (`57e8ee24`) introduced it, `combined-r15` reviewed that fix without meeting it, and cr-uv4-1 (`c4241da0`) rewrote the code around it and kept it.
 
 ## Evidence

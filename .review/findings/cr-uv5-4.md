@@ -1,9 +1,9 @@
 # cr-uv5-4: a failed name struck two files from a move's account
 
 **Severity**: MEDIUM — a move of two names of one text lands both, leaves one at the source and exits 1
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r17` (Codex openreview, 2026-11-21) reviewed `13faafd2..7912da16` — the nine `combined-r16` fixes and local-copy-mode — with `guard_confirmed: true`, which required no change to it
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv5-4`)
+**Commit**: `80c4019e`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r16` over `35adeacb..13faafd2` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r16.codex.md`. It completes cr-uv4-1 (`c4241da0`).
 
 ## Evidence

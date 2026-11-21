@@ -1,9 +1,9 @@
 # cr-ecm15-3: a record that did not note where it wrote was refused a retry it could have had
 
 **Severity**: MEDIUM — a retry of an older record is refused though both readings of its arguments write to one place
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r17` (Codex openreview, 2026-11-21) reviewed `13faafd2..7912da16` — the nine `combined-r16` fixes and local-copy-mode — with `guard_confirmed: true`: "The legacy retry check also makes the right distinction when both possible layouts lead to the same destination."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm15-3`)
+**Commit**: `c40c7945`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r16` over `35adeacb..13faafd2` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r16.codex.md`. It completes cr-ecm14-4 (`62b12719`).
 
 ## Evidence

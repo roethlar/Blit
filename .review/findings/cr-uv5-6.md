@@ -1,9 +1,9 @@
 # cr-uv5-6: the benchmark scripts removed a directory of a fixed name
 
 **Severity**: MEDIUM — a directory of that name in the place the script is pointed at loses its contents; two runs at once remove each other's work
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r17` (Codex openreview, 2026-11-21) reviewed `13faafd2..7912da16` — the nine `combined-r16` fixes and local-copy-mode — with `guard_confirmed: true`: "the benchmarks now allocate their own scratch directories."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv5-6`)
+**Commit**: `aa63eae1`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r16` over `35adeacb..13faafd2` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r16.codex.md`. It completes cr-uv4-6 (`f40e83b2`).
 
 ## Evidence

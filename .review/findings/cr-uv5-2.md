@@ -1,9 +1,9 @@
 # cr-uv5-2: a move removed a file as rewritten, whose new bytes nobody had been sent
 
 **Severity**: HIGH — data loss with exit 0: a file rewritten while a move writes its manifest goes from the source, and its new bytes are nowhere
-**Status**: Fixed on Unix, awaiting review; the Windows half is open and blocked (below)
+**Status**: Reviewed, found incomplete — `combined-r17` (Codex openreview, 2026-11-21) reviewed `13faafd2..7912da16` — the nine `combined-r16` fixes and local-copy-mode — with `guard_confirmed: true`. Two things. The Windows half, open when this was written, is required: "The documented Windows gap still allows a replacement with the same length and last-write time to satisfy a move ticket. Capture file identity and change information from a handle, or retain the source when its version cannot be established." And what a walk saw is kept on the SOURCE, which more than one scan can share: "the public fixed-source responder accepts a shared `Arc`. Overlapping scans on that source can clear or overwrite each other's observations, so one move can authorize removal of a version another scan saw. Attach the observations to `SourceScan`." The remaining work is cr-uv6-3 and cr-uv6-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv5-2`)
+**Commit**: `f4e1ab22`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r16` over `35adeacb..13faafd2` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r16.codex.md`. It completes cr-uv4-1 (`c4241da0`).
 
 ## Evidence

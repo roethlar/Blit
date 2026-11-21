@@ -1,9 +1,9 @@
 # cr-ecm15-1: `--ignore-existing` was not held through the write
 
 **Severity**: HIGH — a file put at a destination after the run looked is truncated and written over, by a transfer over the wire always and by a copy on this machine in a window
-**Status**: Fixed, awaiting review (what runs only on Windows is not run: below)
+**Status**: Reviewed, found incomplete — `combined-r17` (Codex openreview, 2026-11-21) reviewed `13faafd2..7912da16` — the nine `combined-r16` fixes and local-copy-mode — with `guard_confirmed: true`. "If another file takes the destination name after exclusive creation, a stream can report delivery after writing to the displaced file. A shard can stamp the replacement's permissions, and failure cleanup can unlink it. Windows also returns no identity for the local ownership check. Retain the acquired handle, verify what stands at the name before counting delivery, and leave an uncertain replacement alone." (this record's known gaps, required). And on macOS: "a standalone local file copied with `--ignore-existing` now takes the buffered branch, which carries bytes, mode, and time. The previous macOS `fcopyfile` path also requested ACLs and extended attributes, including resource forks." The remaining work is cr-ecm16-2 and cr-ecm16-3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm15-1`)
+**Commit**: `b2a9e435`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r16` over `35adeacb..13faafd2` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r16.codex.md`. It completes cr-ecm14-2 (`e672e1c2`).
 
 ## Evidence

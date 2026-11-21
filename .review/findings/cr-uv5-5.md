@@ -1,9 +1,9 @@
 # cr-uv5-5: two of `ls`'s operands were refused at the daemon as paths out of the module
 
 **Severity**: MEDIUM — `ls`, `du` and `find` of a module that is one file fail; a file below a directory that cannot be searched ends the request with exit 1 and nothing in `--json`
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r17` (Codex openreview, 2026-11-21) reviewed `13faafd2..7912da16` — the nine `combined-r16` fixes and local-copy-mode — with `guard_confirmed: true`. "A request for the root passes containment on pathname equality alone. If that pathname resolves elsewhere after daemon startup, a plain listing can expose the other directory. Validate the current root against the configured export while preserving the correct error for a file operand typed with a trailing slash." The remaining work is cr-uv6-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv5-5`)
+**Commit**: `ca4e6855`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r16` over `35adeacb..13faafd2` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r16.codex.md`. Slice 5 of `docs/plan/UTILITY_VERBS_LOCAL_PARITY.md` (`f1a9055d`).
 
 ## Evidence

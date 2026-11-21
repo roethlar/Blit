@@ -1,9 +1,9 @@
 # cr-ecm15-2: the case line printed a spelling that reads as names the pattern has as typed
 
 **Severity**: MEDIUM — the line names, as what `--ignore-case` would add, a text some names of which are copied either way
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r17` (Codex openreview, 2026-11-21) reviewed `13faafd2..7912da16` — the nine `combined-r16` fixes and local-copy-mode — with `guard_confirmed: true`. "For `--include '{a?,?b}'`, the CLI advertised `{A?,?B}` as an additional match. I verified that `Ab` was copied in both modes, while `Ax` was copied only with `--ignore-case`." A name can be had both ways through ANOTHER alternative, with no `*` in it. The remaining work is cr-ecm16-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm15-2`)
+**Commit**: `0db7e38c`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r16` over `35adeacb..13faafd2` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r16.codex.md`. It completes cr-ecm14-5 (`33ac6700`).
 
 ## Evidence
