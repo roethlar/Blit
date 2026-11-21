@@ -278,6 +278,57 @@ fn rm_says_so_when_the_answer_stops_before_it_is_done() {
     }
 }
 
+/// cr-uv2-3: a request that got no answer is not a refusal. It was
+/// reported as one — `cannot remove 'X'` for each operand, as if none had
+/// gone — where the daemon may have removed some or all before the
+/// connection was lost. It is unfinished: exit 1, and no operand named as
+/// still there.
+#[test]
+fn rm_does_not_call_a_request_that_got_no_answer_a_refusal() {
+    let work = tempdir().expect("tempdir");
+    let config_dir = work.path().join("cli-config");
+    fs::create_dir_all(&config_dir).expect("cli config");
+    let fake = spawn_fake_blit_server(UnimplementedBlit, "a daemon that is lost mid-request");
+    let operand = format!("127.0.0.1:{}:/no-answer/tree", fake.port);
+    let mut cmd = Command::new(common::cli_bin());
+    cmd.arg("--config-dir")
+        .arg(&config_dir)
+        .args(["rm", "-r", "-y"])
+        .arg(&operand);
+    let output = run_with_timeout(cmd, Duration::from_secs(20));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("the removal did not finish")
+            && stderr.contains("no answer came")
+            && stderr.contains("connection reset by peer"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("cannot remove"),
+        "nothing is said to be still there\n{stderr}"
+    );
+
+    let mut cmd = Command::new(common::cli_bin());
+    cmd.arg("--config-dir")
+        .arg(&config_dir)
+        .args(["rm", "-r", "-y", "--json"])
+        .arg(&operand);
+    let output = run_with_timeout(cmd, Duration::from_secs(20));
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON on stdout");
+    assert_eq!(
+        report["failures"].as_array().map(Vec::len),
+        Some(0),
+        "{report}"
+    );
+    assert_eq!(
+        report["unfinished"].as_array().map(Vec::len),
+        Some(1),
+        "{report}"
+    );
+}
+
 /// UTILITY_VERBS_LOCAL_PARITY AC-11 for removal, a newer asker against a
 /// daemon of an earlier contract: that daemon does not serve `Rm` at all
 /// and answers "unimplemented" — it knows only the old request, which
@@ -504,6 +555,11 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
         // cr-uv1-5: an answer that reports one entry and then stops —
         // ending, or failing — before it says it is done.
         let module = request.into_inner().module;
+        // cr-uv2-3: no answer at all — the request went out and the
+        // connection was lost.
+        if module == "no-answer" {
+            return Err(tonic::Status::unavailable("connection reset by peer"));
+        }
         if module != "cut-short" && module != "dies" {
             return Err(tonic::Status::unimplemented("stale daemon"));
         }

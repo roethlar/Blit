@@ -369,12 +369,13 @@ pub fn remove_as_rm(
     abort: Option<&AtomicBool>,
 ) -> Result<Removal, DeletionError> {
     let mut failures = Vec::new();
+    let called_off = || abort.is_some_and(|abort| abort.load(Ordering::Acquire));
     let removed = remove_as_rm_reporting(
         target,
         as_directory,
         canonical_root,
         options,
-        abort,
+        Some(&called_off),
         &mut |failure| {
             failures.push(failure);
             Ok(())
@@ -388,12 +389,18 @@ pub fn remove_as_rm(
 /// Every failure is told; none is counted in place of being named.
 /// `failed` answering `Err(Stopped)` — whoever was listening has gone —
 /// ends the removal where it is, as a cancelled one.
+///
+/// `called_off` is asked before the operand is touched and before each
+/// entry below it (cr-uv2-3), and a `true` ends the removal there. A
+/// removal that fails nowhere tells `failed` nothing, so a listener that
+/// had gone was found out only at the end, with everything removed for
+/// nobody.
 pub fn remove_as_rm_reporting(
     target: &Path,
     as_directory: bool,
     canonical_root: Option<&Path>,
     options: RmOptions,
-    abort: Option<&AtomicBool>,
+    called_off: Option<&dyn Fn() -> bool>,
     failed: &mut dyn FnMut(RemovalFailure) -> Result<(), Stopped>,
 ) -> Result<u64, DeletionError> {
     let mut report = Report {
@@ -406,7 +413,7 @@ pub fn remove_as_rm_reporting(
         as_directory,
         canonical_root,
         options,
-        abort,
+        called_off,
         &mut report,
     )?;
     if report.unheard {
@@ -443,11 +450,17 @@ fn remove_operand(
     as_directory: bool,
     canonical_root: Option<&Path>,
     options: RmOptions,
-    abort: Option<&AtomicBool>,
+    called_off: Option<&dyn Fn() -> bool>,
     removal: &mut Report<'_>,
 ) -> Result<(), DeletionError> {
     use std::os::unix::ffi::OsStrExt as _;
 
+    let called_off = || called_off.is_some_and(|called_off| called_off());
+    if called_off() {
+        return Err(DeletionError::Cancelled {
+            operation: RM_OPERATION,
+        });
+    }
     // With `-f`, an operand that is not there is no failure — and neither
     // is one below something that is no directory, as for `rm -f`.
     let absent = |error: &std::io::Error| {
@@ -546,7 +559,7 @@ fn remove_operand(
         }
     }
     while let Some(frame) = frames.last_mut() {
-        if removal.unheard || abort.is_some_and(|abort| abort.load(Ordering::Acquire)) {
+        if removal.unheard || called_off() {
             return Err(DeletionError::Cancelled {
                 operation: RM_OPERATION,
             });
@@ -641,9 +654,14 @@ fn remove_operand(
     as_directory: bool,
     canonical_root: Option<&Path>,
     options: RmOptions,
-    abort: Option<&AtomicBool>,
+    called_off: Option<&dyn Fn() -> bool>,
     removal: &mut Report<'_>,
 ) -> Result<(), DeletionError> {
+    if called_off.is_some_and(|called_off| called_off()) {
+        return Err(DeletionError::Cancelled {
+            operation: RM_OPERATION,
+        });
+    }
     // Where the operand lies is checked by its path here, and what the
     // check finds is this operand's failure (cr-uv1-3).
     if let Some(root) = canonical_root {
@@ -685,11 +703,6 @@ fn remove_operand(
     if !options.recursive {
         removal.fail(PathBuf::new(), is_a_directory());
         return Ok(());
-    }
-    if abort.is_some_and(|abort| abort.load(Ordering::Acquire)) {
-        return Err(DeletionError::Cancelled {
-            operation: RM_OPERATION,
-        });
     }
     // A recursive removal clears read-only attributes through the tree
     // first, as the purge it replaces did.
@@ -1405,6 +1418,79 @@ mod rm_tests {
         let whole = rm(&root, "dir", true, false);
         unlock();
         assert_eq!(whole.failures.len(), 1001);
+    }
+
+    /// cr-uv2-3: a removal that is called off stops — before its operand
+    /// is touched, and between one entry and the next. It was asked only
+    /// when an entry FAILED, so a removal that went well went on to the
+    /// end for a listener that had gone.
+    #[test]
+    fn a_removal_called_off_stops_where_it_is() {
+        let options = RmOptions {
+            recursive: true,
+            force: false,
+        };
+        let never_told = &mut |failure: RemovalFailure| -> Result<(), Stopped> {
+            panic!("nothing fails here: {failure:?}")
+        };
+
+        // Before anything: a file, and a tree, are left whole.
+        let (_tmp, root) = tree();
+        for (operand, stays) in [("a.txt", "a.txt"), ("dir", "dir/x.txt")] {
+            let error = remove_as_rm_reporting(
+                &root.join(operand),
+                false,
+                Some(&root),
+                options,
+                Some(&|| true),
+                never_told,
+            )
+            .unwrap_err();
+            assert!(matches!(error, DeletionError::Cancelled { .. }), "{error}");
+            assert!(root.join(stays).exists(), "{operand} was not touched");
+        }
+
+        // Part way: asked once for the operand and once for each entry,
+        // and called off at the twentieth question.
+        fs::create_dir_all(root.join("many")).unwrap();
+        for at in 0..100 {
+            fs::write(root.join(format!("many/f{at:03}")), b"").unwrap();
+        }
+        let asked = std::cell::Cell::new(0);
+        let error = remove_as_rm_reporting(
+            &root.join("many"),
+            false,
+            Some(&root),
+            options,
+            Some(&|| {
+                asked.set(asked.get() + 1);
+                asked.get() >= 20
+            }),
+            never_told,
+        )
+        .unwrap_err();
+        assert!(matches!(error, DeletionError::Cancelled { .. }), "{error}");
+        let left = fs::read_dir(root.join("many")).unwrap().count();
+        // Where every entry is asked about, eighteen went. Elsewhere the
+        // tree is the standard library's to remove, whole or not at all.
+        if cfg!(unix) {
+            assert_eq!(left, 82, "it stopped between two entries");
+        } else {
+            assert_eq!(left, 100);
+        }
+
+        // And one that is never called off is removed.
+        let removed = remove_as_rm_reporting(
+            &root.join("many"),
+            false,
+            Some(&root),
+            options,
+            Some(&|| false),
+            never_told,
+        )
+        .expect("removed");
+        assert_eq!(removed, left as u64 + 1);
+        assert!(!root.join("many").exists());
     }
 
     /// What a test does between a check and the act it guards, on this

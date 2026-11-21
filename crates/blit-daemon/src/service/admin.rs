@@ -158,6 +158,8 @@ pub(crate) fn stream_removal(
         &canonical_root,
         &operands,
         options,
+        // cr-uv2-3: nobody is reading the answer any more.
+        &|| sender.is_closed(),
         &mut |failure| batch.add(failure),
     )?;
     batch.send().map_err(|Stopped| closed())?;
@@ -173,11 +175,19 @@ pub(crate) fn stream_removal(
 /// Each operand removed in turn; `failed` is told of every entry that
 /// could not be, with its operand's place, as it is met. Returns the count
 /// of entries removed.
+///
+/// `called_off` says the asker has gone (cr-uv2-3). The removal asks it
+/// before each operand is touched and before each entry below one: a
+/// removal that met no failure had nothing to send, so it learned that
+/// nobody was listening only when it came to say it was done — with every
+/// operand removed. An asker that goes away is one that stopped the
+/// command.
 fn remove_each(
     module_path: &Path,
     canonical_root: &Path,
     operands: &[RmOperand],
     options: blit_core::deletion::RmOptions,
+    called_off: &dyn Fn() -> bool,
     failed: &mut dyn FnMut(RmFailure) -> Result<(), Stopped>,
 ) -> Result<u64, Status> {
     let closed = || response_channel_closed("sending removal result");
@@ -201,7 +211,7 @@ fn remove_each(
             rel.as_directory,
             Some(canonical_root),
             options,
-            None,
+            Some(called_off),
             &mut |failure| {
                 failed(RmFailure {
                     operand: operand as u32,
@@ -590,6 +600,7 @@ mod rm_tests {
             root,
             &operands,
             blit_core::deletion::RmOptions { recursive, force },
+            &|| false,
             &mut |failure| {
                 failures.push(failure);
                 Ok(())
@@ -657,6 +668,75 @@ mod rm_tests {
         }
         assert!(replies.len() > 1, "more than one message's worth");
         assert_eq!(told, (0..5000).collect::<Vec<u32>>(), "every one, in order");
+    }
+
+    /// cr-uv2-3: a removal whose asker has gone removes nothing more. The
+    /// reviewer's case — the answer closed before the removal began: the
+    /// file was removed all the same, and the closing found out only when
+    /// `done` could not be sent.
+    #[test]
+    fn a_removal_nobody_waits_for_removes_nothing() {
+        use tokio::sync::mpsc;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        fs::write(root.join("queued"), b"x").unwrap();
+        fs::create_dir_all(root.join("tree/sub")).unwrap();
+        fs::write(root.join("tree/sub/inner"), b"x").unwrap();
+        let operands = read_operands(vec!["queued".into(), "tree".into()], Vec::new()).unwrap();
+        let (tx, rx) = mpsc::channel::<Result<RmReply, Status>>(4);
+        drop(rx);
+        let status = stream_removal(
+            root.clone(),
+            root.clone(),
+            operands,
+            blit_core::deletion::RmOptions {
+                recursive: true,
+                force: false,
+            },
+            &tx,
+        )
+        .expect_err("nobody to answer");
+        assert_eq!(status.code(), tonic::Code::Cancelled, "{status}");
+        assert!(
+            root.join("queued").exists() && root.join("tree/sub/inner").exists(),
+            "nothing was removed for nobody"
+        );
+    }
+
+    /// cr-uv2-3: and one who goes part way through stops it there — after
+    /// the operand being removed, before the next.
+    #[test]
+    fn a_removal_stops_at_the_operand_where_its_asker_went() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        for name in ["one", "two", "three"] {
+            fs::write(root.join(name), b"x").unwrap();
+        }
+        let operands = read_operands(
+            ["one", "two", "three"].map(String::from).to_vec(),
+            Vec::new(),
+        )
+        .unwrap();
+        // Asked as each operand is begun; gone from the second question.
+        let asked = std::cell::Cell::new(0);
+        let status = remove_each(
+            &root,
+            &root,
+            &operands,
+            blit_core::deletion::RmOptions::default(),
+            &|| {
+                asked.set(asked.get() + 1);
+                asked.get() >= 2
+            },
+            &mut |failure| panic!("nothing fails here: {failure:?}"),
+        )
+        .expect_err("the asker went");
+        assert_eq!(status.code(), tonic::Code::Cancelled, "{status}");
+        assert!(
+            !root.join("one").exists(),
+            "what was asked for while it listened"
+        );
+        assert!(root.join("two").exists() && root.join("three").exists());
     }
 
     fn removed(root: &Path, paths: &[&str], recursive: bool) -> Answer {
@@ -885,6 +965,7 @@ mod typed_operand_tests {
             &root,
             &operands,
             blit_core::deletion::RmOptions::default(),
+            &|| false,
             &mut |failure| {
                 failures.push((failure.operand, failure.reason));
                 Ok(())

@@ -35,7 +35,8 @@ pub enum RmError {
     /// anything was read or removed (a read-only module, another build):
     /// none of the operands went.
     Refused(eyre::Report),
-    /// The answer ended before the daemon said it was done. What it had
+    /// The answer ended before the daemon said it was done — or never
+    /// began, the request sent and nothing heard (cr-uv2-3). What it had
     /// reported until then stands; what else was removed is not known.
     Interrupted(eyre::Report),
 }
@@ -93,7 +94,16 @@ where
             force: options.force,
         })
         .await
-        .map_err(|status| RmError::Refused(super::same_build::refusal("rm", status)))?
+        .map_err(|status| {
+            if refused_before_acting(status.code()) {
+                RmError::Refused(super::same_build::refusal("rm", status))
+            } else {
+                RmError::Interrupted(eyre::eyre!(
+                    "the request was sent and no answer came ({})",
+                    status.message()
+                ))
+            }
+        })?
         .into_inner();
     loop {
         let reply = answer
@@ -121,6 +131,27 @@ where
             }
         }
     }
+}
+
+/// Whether a request that ended with `code` in place of an answer was
+/// REFUSED: turned down by the daemon before it removed anything
+/// (cr-uv2-3). These are what it answers a request it will not serve — a
+/// path it does not allow, a module it does not have or may not write,
+/// another build's contract, a request it does not know. Anything else —
+/// the connection gone, a timeout, an error with no name — says the
+/// request went out and not what became of it, and was reported as
+/// "none of these was removed" all the same.
+fn refused_before_acting(code: tonic::Code) -> bool {
+    use tonic::Code;
+    matches!(
+        code,
+        Code::InvalidArgument
+            | Code::NotFound
+            | Code::PermissionDenied
+            | Code::FailedPrecondition
+            | Code::Unimplemented
+            | Code::Unauthenticated
+    )
 }
 
 /// Remove one path and everything under it, for `blit move`'s source-side
@@ -185,6 +216,41 @@ pub fn extract_module_and_path(remote: &RemoteEndpoint) -> Result<(String, PathB
         RemotePath::Root { rel_path } => Ok((String::new(), rel_path.clone())),
         RemotePath::Discovery => {
             bail!("remote removal requires module syntax (e.g., server:/module/path)")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// cr-uv2-3: a refusal is an answer. A request that got none — the
+    /// connection gone, a timeout — may have been acted on.
+    #[test]
+    fn only_an_answer_is_a_refusal() {
+        use tonic::Code;
+        for code in [
+            Code::InvalidArgument,
+            Code::NotFound,
+            Code::PermissionDenied,
+            Code::FailedPrecondition,
+            Code::Unimplemented,
+            Code::Unauthenticated,
+        ] {
+            assert!(refused_before_acting(code), "{code:?}");
+        }
+        for code in [
+            Code::Unavailable,
+            Code::Unknown,
+            Code::Internal,
+            Code::Cancelled,
+            Code::DeadlineExceeded,
+            Code::Aborted,
+            Code::DataLoss,
+            Code::ResourceExhausted,
+            Code::Ok,
+        ] {
+            assert!(!refused_before_acting(code), "{code:?}");
         }
     }
 }

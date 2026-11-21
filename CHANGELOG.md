@@ -312,7 +312,13 @@ asks before it deletes.
   it — a tree with a million of them prints a million lines, as `rm`
   does. If a daemon's answer stops before it says it is done, what it
   reported is printed, then `HOST: the removal did not finish: …`, and
-  the exit status is 1 (`unfinished` in `--json`).
+  the exit status is 1 (`unfinished` in `--json`). A request that got no
+  answer at all — the connection lost once it was sent — is unfinished
+  too, and no path is said to be still there; only what a daemon answers
+  before it acts (a read-only module, another build) is a refusal.
+- **A removal stops when its asker does.** `blit rm` interrupted, or its
+  connection lost, ends the removal on the daemon at the entry it has
+  reached; it used to run on to the end.
 - **A path is taken exactly as typed**, by `rm`, `du`, `df` and `find`
   alike: a `/` after it, a `.` as its last name, a space at either end.
   `rm` refuses a path ending in `.` or `..` in `rm`'s words (`refusing to
