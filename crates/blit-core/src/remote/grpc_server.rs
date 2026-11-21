@@ -53,13 +53,30 @@ pub const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 ///   seconds, as a pager does, ended with "h2 protocol error: error
 ///   reading a body from connection" and part of the listing.
 ///
-/// With the window at its maximum the budget is 1 GiB, more than a whole
-/// stream window of one-byte frames can use
-/// (`a_stream_window_of_the_smallest_frames_fits_the_budget`), so flow
-/// control stops the sender before the budget is spent. The connection
-/// window limits nothing the stream windows do not: a stream still
-/// buffers at most its own window, which is unchanged.
+/// With the window at its maximum the budget is 1 GiB — more than every
+/// stream a connection may carry at once can use with its whole window
+/// full of the smallest frames a gRPC message makes
+/// (`the_small_frame_budget_covers_every_stream_a_connection_carries`), so
+/// flow control stops each sender before the budget is spent.
+///
+/// cr-ecm6-5: the connection window used to be what bounded the payload a
+/// connection held unread. At its maximum it bounds nothing, so the bound
+/// is stated instead: [`HTTP2_MAX_CONCURRENT_STREAMS`] streams, each
+/// holding at most its own stream window — 8 MiB on a server, 16 MiB on a
+/// client, per connection.
 pub const HTTP2_CONNECTION_WINDOW: u32 = (1 << 31) - 1;
+
+/// The most streams one connection carries at once (cr-ecm6-5). A server
+/// tells its peer so, and a request beyond it waits its turn on the
+/// client — it is not refused. tonic's own default is no limit at all.
+///
+/// It is the other half of the window policy: with the connection window
+/// at its maximum, this is what bounds the payload one connection can
+/// hold unread (streams times a stream window), and it is the number the
+/// small-frame budget is proved against. Blit opens one or two streams on
+/// a connection; a front end that multiplexes more than eight long-lived
+/// streams on one channel must open another.
+pub const HTTP2_MAX_CONCURRENT_STREAMS: u32 = 8;
 
 /// The per-stream window a Blit client advertises: hyper's client
 /// default, stated so the rule on [`HTTP2_CONNECTION_WINDOW`] can be
@@ -79,6 +96,7 @@ pub fn production_server_builder() -> Server {
         .http2_keepalive_timeout(Some(HTTP2_KEEPALIVE_TIMEOUT))
         .initial_stream_window_size(Some(HTTP2_SERVER_STREAM_WINDOW))
         .initial_connection_window_size(Some(HTTP2_CONNECTION_WINDOW))
+        .max_concurrent_streams(Some(HTTP2_MAX_CONCURRENT_STREAMS))
 }
 
 #[cfg(test)]
@@ -94,29 +112,46 @@ mod tests {
         assert_eq!(HTTP2_KEEPALIVE_TIMEOUT, Duration::from_secs(20));
     }
 
-    /// h2-small-frames: the budget h2 derives from the connection window
-    /// (half of it) is larger than the most a full stream window can use.
-    /// A DATA frame of `p` bytes (under 256) uses `256 - p` of the budget
-    /// and `p` of the stream's window, so the worst a window `W` can cost
-    /// is `W * 255`, with one-byte frames; flow control then stops the
-    /// sender. Two such streams fit a client connection, four a server's.
+    /// h2-small-frames, cr-ecm6-5: the budget h2 derives from the
+    /// connection window (half of it) covers every stream a connection
+    /// may carry at once, each with its whole window full of the smallest
+    /// frames a gRPC message makes. A DATA frame of `p` bytes (under 256)
+    /// uses `256 - p` of the budget and `p` of its stream's window; a gRPC
+    /// message is never under 5 bytes (its length prefix), so a window `W`
+    /// costs at most `W / 5 * 251`, and flow control then stops the
+    /// sender. Smaller frames come only where a window runs out mid
+    /// message, once per refill — or from a peer sending them on purpose,
+    /// which the library's limit exists to cut off.
+    ///
+    /// And the payload a connection can hold unread is what the policy
+    /// says it is: streams times a stream window.
     #[test]
-    fn a_stream_window_of_the_smallest_frames_fits_the_budget() {
+    fn the_small_frame_budget_covers_every_stream_a_connection_carries() {
+        const SMALLEST_FRAME: u64 = 5;
         let budget = u64::from(HTTP2_CONNECTION_WINDOW) / 2;
-        for (window, streams) in [
-            (HTTP2_CLIENT_STREAM_WINDOW, 2),
-            (HTTP2_SERVER_STREAM_WINDOW, 4),
-        ] {
+        let streams = u64::from(HTTP2_MAX_CONCURRENT_STREAMS);
+        for window in [HTTP2_CLIENT_STREAM_WINDOW, HTTP2_SERVER_STREAM_WINDOW] {
+            let cost = streams * (u64::from(window) / SMALLEST_FRAME) * (256 - SMALLEST_FRAME);
             assert!(
-                u64::from(window) * 255 * streams <= budget,
-                "{streams} streams of window {window} can use {} of a budget of {budget}",
-                u64::from(window) * 255 * streams
+                cost <= budget,
+                "{streams} streams of window {window} can use {cost} of a budget of {budget}"
             );
         }
+        // One more stream on a client connection would not be covered: the
+        // limit is what the proof rests on, not slack.
+        let one_more = (streams * 2)
+            * (u64::from(HTTP2_CLIENT_STREAM_WINDOW) / SMALLEST_FRAME)
+            * (256 - SMALLEST_FRAME);
+        assert!(one_more > budget, "twice the streams are not covered");
+
+        // The stated bound on unread payload, per connection.
+        assert_eq!(streams * u64::from(HTTP2_SERVER_STREAM_WINDOW), 8 << 20);
+        assert_eq!(streams * u64::from(HTTP2_CLIENT_STREAM_WINDOW), 16 << 20);
         // The largest window HTTP/2 has, and the stream windows as hyper
-        // has them by default: this policy changes only the connection's.
+        // has them by default: the policy changes only the connection's.
         assert_eq!(HTTP2_CONNECTION_WINDOW, i32::MAX as u32);
         assert_eq!(HTTP2_CLIENT_STREAM_WINDOW, 2 << 20);
         assert_eq!(HTTP2_SERVER_STREAM_WINDOW, 1 << 20);
+        assert_eq!(HTTP2_MAX_CONCURRENT_STREAMS, 8);
     }
 }

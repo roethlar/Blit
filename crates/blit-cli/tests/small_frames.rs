@@ -39,6 +39,11 @@ struct Progress {
     /// The stand-in may start reading the frames a `transfer` sent it.
     read_now: AtomicBool,
     frames_read: AtomicUsize,
+    /// `find` streams the stand-in is sending rows on now, the most it
+    /// ever was at once, and how many have sent every row.
+    sending: AtomicUsize,
+    most_sending: AtomicUsize,
+    streams_sent: AtomicUsize,
 }
 
 fn wait_for(what: &str, flag: &AtomicBool) {
@@ -169,6 +174,8 @@ impl blit_core::generated::blit_server::Blit for SmallFrames {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let progress = Arc::clone(&self.progress);
         tokio::spawn(async move {
+            let now = progress.sending.fetch_add(1, Ordering::SeqCst) + 1;
+            progress.most_sending.fetch_max(now, Ordering::SeqCst);
             for row in 0..ROWS {
                 let entry = blit_core::generated::FindEntry {
                     relative_path: format!("f{row:05}"),
@@ -181,6 +188,8 @@ impl blit_core::generated::blit_server::Blit for SmallFrames {
                 }
                 tokio::task::yield_now().await;
             }
+            progress.sending.fetch_sub(1, Ordering::SeqCst);
+            progress.streams_sent.fetch_add(1, Ordering::SeqCst);
             progress.rows_sent.store(true, Ordering::SeqCst);
         });
         Ok(tonic::Response::new(
@@ -371,4 +380,107 @@ async fn small_frames_sent_to_a_daemon_that_reads_them_later_all_arrive() {
     sender.await.unwrap();
     while let Some(_frame) = reply.message().await.expect("the daemon read every frame") {}
     assert_eq!(progress.frames_read.load(Ordering::SeqCst), ROWS);
+}
+
+/// cr-ecm6-5: as many streams as a connection may carry at once, all on
+/// ONE connection and all read later than they arrive, are each whole.
+/// The policy that lets small frames wait unread is proved by arithmetic
+/// against that number of streams
+/// (`HTTP2_MAX_CONCURRENT_STREAMS`); here the streams really are
+/// multiplexed, 320,000 small frames waiting on one connection at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_stream_a_connection_may_carry_read_later_is_whole() {
+    let streams = blit_core::remote::grpc_server::HTTP2_MAX_CONCURRENT_STREAMS as usize;
+    let progress = Arc::new(Progress::default());
+    let daemon = spawn_fake_blit_server(
+        SmallFrames {
+            progress: Arc::clone(&progress),
+        },
+        "small-frames daemon",
+    );
+    let client =
+        blit_core::client::connect_with_timeout(format!("http://127.0.0.1:{}", daemon.port))
+            .await
+            .expect("connect");
+    let mut opened = Vec::new();
+    for _ in 0..streams {
+        // A clone of the client is the same connection.
+        let mut client = client.clone();
+        opened.push(
+            client
+                .find(blit_core::generated::FindRequest::default())
+                .await
+                .expect("the stream opens")
+                .into_inner(),
+        );
+    }
+
+    let sent = Arc::clone(&progress);
+    tokio::task::spawn_blocking(move || {
+        let asked = Instant::now();
+        while sent.streams_sent.load(Ordering::SeqCst) < streams {
+            assert!(
+                asked.elapsed() < Duration::from_secs(120),
+                "the rows are sent"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    })
+    .await
+    .unwrap();
+    assert_eq!(progress.most_sending.load(Ordering::SeqCst), streams);
+    for mut rows in opened {
+        let mut read = 0;
+        while let Some(_row) = rows.message().await.expect("the connection stays open") {
+            read += 1;
+        }
+        assert_eq!(read, ROWS);
+    }
+}
+
+/// cr-ecm6-5: a connection carries no more streams at once than the
+/// policy says. Half as many again are asked for on one connection; every
+/// one is answered whole, and never more than the limit were being sent
+/// at a time — the rest waited their turn. Without the limit a connection
+/// takes any number, and what it can hold unread is bounded by nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_carries_no_more_streams_at_once_than_the_policy_allows() {
+    let limit = blit_core::remote::grpc_server::HTTP2_MAX_CONCURRENT_STREAMS as usize;
+    let progress = Arc::new(Progress::default());
+    let daemon = spawn_fake_blit_server(
+        SmallFrames {
+            progress: Arc::clone(&progress),
+        },
+        "small-frames daemon",
+    );
+    let client =
+        blit_core::client::connect_with_timeout(format!("http://127.0.0.1:{}", daemon.port))
+            .await
+            .expect("connect");
+    let readers: Vec<_> = (0..limit + limit / 2)
+        .map(|_| {
+            let mut client = client.clone();
+            tokio::spawn(async move {
+                let mut rows = client
+                    .find(blit_core::generated::FindRequest::default())
+                    .await
+                    .expect("the stream opens")
+                    .into_inner();
+                let mut read = 0;
+                while let Some(_row) = rows.message().await.expect("the stream stays open") {
+                    read += 1;
+                }
+                read
+            })
+        })
+        .collect();
+    for reader in readers {
+        assert_eq!(reader.await.unwrap(), ROWS);
+    }
+    assert_eq!(
+        progress.most_sending.load(Ordering::SeqCst),
+        limit,
+        "as many at once as the limit, and no more"
+    );
 }

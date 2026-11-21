@@ -186,7 +186,11 @@ part, and a job you can list, read, re-run and retry.
   that holds too many small frames unread, and every blit stream is made
   of small frames; the connection window, from which the library derives
   that limit, is now the largest HTTP/2 allows on both ends. Present on
-  the development branch since 2026-10-17 and in no release.
+  the development branch since 2026-10-17 and in no release. With it, a
+  connection carries at most eight streams at once (a ninth request waits
+  its turn), which bounds what one connection can hold unread: 8 MiB on a
+  daemon, 16 MiB on a client. A program built on `blit-core` that
+  multiplexes more long-lived streams on one channel needs another.
 - A local single-file copy armed its failure cleanup before opening the
   destination, so a destination it could not open (a read-only file, a
   folder in the way) could be deleted without a byte written. The cleanup

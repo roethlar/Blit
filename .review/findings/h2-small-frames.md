@@ -39,7 +39,7 @@ Not done: pinning `h2` below 0.4.16 (it was raised for a security advisory), or 
 - `docs/bench/h2-small-frames-2026-11-20/` — evidence.
 
 ## Known gaps
-- The limit can still be met by more streams than the arithmetic covers on one connection: three or more client streams, or five or more server streams, each holding a full window of one-byte frames unread. Blit opens one or two streams per connection, and its smallest frame is five bytes.
-- A stalled receiver may now hold up to a stream window of small frames in memory with the library's per-frame overhead on each — the cost the library's limit exists to bound.
+- ~~The limit can still be met by more streams than the arithmetic covers on one connection.~~ Closed by cr-ecm6-5 (2026-11-21): a connection carries at most eight streams at once, and the budget is proved against that number with five-byte frames.
+- A stalled receiver may now hold up to a stream window of small frames in memory with the library's per-frame overhead on each — the cost the library's limit exists to bound. Per connection that is at most eight streams (cr-ecm6-5).
 - Linux only, loopback only. The guards run on every OS but were run on Linux; no CI has run since 2026-10-24.
 - A front end outside this repository that builds its own tonic `Endpoint` instead of going through `blit_core::client` keeps the old limit.
