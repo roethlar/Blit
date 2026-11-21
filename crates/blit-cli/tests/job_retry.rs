@@ -813,3 +813,65 @@ fn a_retry_of_a_retry_still_knows_where_an_incomplete_copy_was_left() {
     assert!(retried.status.success(), "{}", text(&retried.stderr));
     assert_eq!(fs::read(dst.join("big.bin")).unwrap(), b"the whole file");
 }
+
+/// cr-ecm13-5: a file of the source's own length, standing where the run
+/// left its incomplete copy, is not called copied. With `--size-only` the
+/// session ordered such a copy repaired and the sink, comparing again by
+/// size, wrote nothing: "one file copied", zero bytes, exit 0 — the source
+/// held `good` and the destination still held `junk`. Nothing is ordered
+/// repaired any more (cr-ecm13-1): the file is kept, the path is reported,
+/// and nothing is said to have been copied until something is.
+#[test]
+fn a_size_only_retry_does_not_call_a_file_of_the_right_length_copied() {
+    let ctx = TestContext::new();
+    let src = ctx.workspace.join("src");
+    let dst = ctx.workspace.join("dst");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("data.bin"), b"good").unwrap();
+    fs::create_dir_all(dst.join("data.bin")).unwrap();
+    let first = blit(
+        &ctx,
+        &[
+            "copy",
+            "--size-only",
+            "--ignore-existing",
+            "--retries",
+            "0",
+            &arg(&src),
+            &arg(&dst),
+        ],
+    );
+    assert_eq!(first.status.code(), Some(EXIT_PARTIAL_FAILURE));
+    let job = &jobs(&ctx)[0];
+    let run_id = job["run_id"].as_str().unwrap().to_string();
+    let record_file = PathBuf::from(job["record_file"].as_str().unwrap());
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_file).unwrap()).unwrap();
+    // As a run whose write left its own incomplete copy — of the source's
+    // length, as a write that failed at its very end leaves one.
+    record["left_in_place"] = serde_json::json!(["data.bin"]);
+    fs::write(&record_file, serde_json::to_vec(&record).unwrap()).unwrap();
+    fs::remove_dir_all(dst.join("data.bin")).unwrap();
+    fs::write(dst.join("data.bin"), b"junk").unwrap();
+
+    let retried = blit(&ctx, &["jobs", "retry", &run_id]);
+    let said = format!("{}{}", text(&retried.stdout), text(&retried.stderr));
+    assert_eq!(retried.status.code(), Some(EXIT_PARTIAL_FAILURE), "{said}");
+    assert!(
+        said.contains("a file stands there: --ignore-existing keeps it"),
+        "{said}"
+    );
+    assert_eq!(fs::read(dst.join("data.bin")).unwrap(), b"junk", "{said}");
+    let newest = &jobs(&ctx)[0];
+    assert_eq!(
+        newest["files_copied"], 0,
+        "nothing is called copied: {newest}"
+    );
+    assert_eq!(newest["files_failed"], 1, "{newest}");
+
+    fs::remove_file(dst.join("data.bin")).unwrap();
+    let retried = blit(&ctx, &["jobs", "retry", &run_id]);
+    assert!(retried.status.success(), "{}", text(&retried.stderr));
+    assert_eq!(fs::read(dst.join("data.bin")).unwrap(), b"good");
+    assert_eq!(jobs(&ctx)[0]["files_copied"], 1);
+}
