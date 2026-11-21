@@ -751,6 +751,58 @@ fn the_line_keeps_a_directory_level_the_pattern_requires() {
     );
 }
 
+/// cr-ecm6-2: `Cache/**` names what is UNDER a folder `Cache`, never a
+/// file of that name, and the line shows it so. It used to trim the `/**`
+/// and say `--ignore-case` would also match `cache`; the mirror run that
+/// way deleted the destination's own FILE `cache`. Now it shows `cache/**`
+/// — and with the option the file is deleted as before (the pattern never
+/// named it) while what is under a folder `cache` is kept.
+#[test]
+fn the_line_keeps_what_is_under_a_folder_apart_from_the_folder() {
+    let tmp = tempdir().unwrap();
+    let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+    write(&src, "keep.1");
+    let (from, to) = (with_slash(&src), with_slash(&dst));
+    write(&dst, "cache");
+    write(&dst, "sub/CACHE/inside.txt");
+
+    let asked = blit(
+        tmp.path(),
+        &["mirror", "--exclude", "**/Cache/**", &from, &to],
+        Some("n\n"),
+    );
+    let line = "\"**/Cache/**\" matches Cache/** only; capital letters matter \
+                (--ignore-case would also match cache/**, CACHE/**).";
+    assert!(
+        asked.stdout.contains(&format!("{line}\n{QUESTION}")),
+        "{}",
+        asked.all()
+    );
+
+    let ignoring = blit(
+        tmp.path(),
+        &[
+            "mirror",
+            "-y",
+            "--ignore-case",
+            "--exclude",
+            "**/Cache/**",
+            &from,
+            &to,
+        ],
+        None,
+    );
+    assert_eq!(ignoring.code, Some(0), "{}", ignoring.all());
+    assert!(
+        dst.join("sub/CACHE/inside.txt").exists(),
+        "what is under a folder of that name is named, as the line showed"
+    );
+    assert!(
+        !dst.join("cache").exists(),
+        "a file of that name is not, as the line showed"
+    );
+}
+
 /// cr-ecm5-3: the filter the question showed is the filter that runs. An
 /// absolute exclude through an alias of a folder in the source is shown as
 /// what it names there, `first/Keep`. While the question waits, the alias

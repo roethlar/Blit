@@ -383,17 +383,26 @@ fn class_in_case(class: &str, upper: bool) -> String {
 }
 
 /// `pattern` without the wildcards at its ends, for showing: `*Cache`,
-/// `Cache*` and `**/Cache/**` are all shown `Cache`. A wildcard inside the
+/// `Cache*` and `**/Cache` are all shown `Cache`. A wildcard inside the
 /// pattern stays (`IMG_*.jpg`), and so does an escaped `*`, which is a
 /// star and no wildcard.
 ///
-/// cr-ecm5-4: and so does a wildcard that stands for a WHOLE directory
-/// level the pattern requires. `**/Cache` names `Cache` at any depth, the
-/// top included, so `Cache` shows it; `*/Cache` names it only one level
-/// down, and `Cache/*` names what is directly inside it. Those two were
-/// trimmed like the rest: for `*/Cache` the line said `--ignore-case`
-/// would also match `cache`, and the mirror run that way deleted the
-/// top-level `cache` and kept `sub/cache`.
+/// What is trimmed is only what leaves the shown text naming NO MORE than
+/// the pattern does: text shown as `Cache` reads as "an entry called
+/// Cache", so it may stand for `*Cache`, `Cache*` and `**/Cache`, each of
+/// which names such an entry.
+///
+/// cr-ecm5-4: a star that is a whole directory level the pattern requires
+/// stays. `*/Cache` names `Cache` only one level down, and `Cache/*` what
+/// is directly inside it; trimmed, the line said `--ignore-case` would
+/// also match `cache` for `*/Cache`, and the mirror run that way deleted
+/// the top-level `cache` and kept `sub/cache`.
+///
+/// cr-ecm6-2: and so does a trailing `/**`. `Cache/**` names what is
+/// UNDER `Cache` — it requires `Cache` to be a folder, and does not name a
+/// file called `Cache`. Trimmed, the line said the option would also match
+/// `cache`, and the mirror run that way deleted the destination's own
+/// FILE `cache`.
 fn without_end_wildcards(pattern: &str, windows: bool) -> &str {
     let separator = |c: char| c == '/' || (windows && c == '\\');
     let mut text = pattern;
@@ -413,25 +422,22 @@ fn without_end_wildcards(pattern: &str, windows: bool) -> &str {
             }
         }
     }
-    loop {
-        let rest = text.trim_end_matches('*');
-        let stars = text.len() - rest.len();
-        match rest.chars().next_back() {
-            _ if stars == 0 => break,
-            // Under the Unix rule the star after a `\` is itself.
-            Some('\\') if !windows => break,
-            // `x/**`: everything under `x`.
-            Some(c) if separator(c) && stars == 2 => text = rest.trim_end_matches(separator),
-            // `x/*`: what is directly inside `x`, and stays shown.
-            Some(c) if separator(c) => break,
-            // `x*`: any text after `x`.
-            _ => {
-                text = rest;
-                break;
-            }
-        }
+    let rest = text.trim_end_matches('*');
+    let stays = match rest.chars().next_back() {
+        // Under the Unix rule the star after a `\` is itself.
+        Some('\\') if !windows => true,
+        // `x/*` and `x/**`: what is inside `x`, never `x` itself, so the
+        // level stays shown.
+        Some(c) => separator(c),
+        // Nothing but stars.
+        None => false,
+    };
+    if stays {
+        text
+    } else {
+        // `x*`: any text after `x`.
+        rest
     }
-    text
 }
 
 /// `pattern` — a glob as globset reads it under one platform's rule
@@ -1028,10 +1034,22 @@ mod tests {
         assert_eq!(note(&["*.CFG"]), line("\"*.CFG\" matches .CFG", "", ".cfg"));
         // The wildcards at the ends are not part of what is shown; one
         // inside the pattern is.
-        for pattern in ["Cache*", "*Cache*", "**/Cache/**", "**/Cache", "Cache/**"] {
+        for pattern in ["Cache*", "*Cache*", "**/Cache", "**/*Cache*"] {
             assert_eq!(
                 note(&[pattern]),
                 line(&format!("\"{pattern}\" matches Cache"), "", "cache, CACHE"),
+                "{pattern}"
+            );
+        }
+        // cr-ecm6-2: what is UNDER a folder is not the folder: `/**` stays.
+        for pattern in ["Cache/**", "**/Cache/**"] {
+            assert_eq!(
+                note(&[pattern]),
+                line(
+                    &format!("\"{pattern}\" matches Cache/**"),
+                    "",
+                    "cache/**, CACHE/**"
+                ),
                 "{pattern}"
             );
         }
@@ -1114,6 +1132,10 @@ mod tests {
         // On Windows `\` separates; the wildcard ends are trimmed with it.
         assert_eq!(
             Spellings::of(r"**\Cache\**", true).map(|s| s.typed),
+            Some(r"Cache\**")
+        );
+        assert_eq!(
+            Spellings::of(r"**\Cache", true).map(|s| s.typed),
             Some("Cache")
         );
         // cr-ecm5-4: a wildcard that is a whole directory level the
@@ -1123,7 +1145,14 @@ mod tests {
             ("Cache/*", false, "Cache/*", &["cache/*", "CACHE/*"]),
             ("*/Cache/*", false, "*/Cache/*", &["*/cache/*", "*/CACHE/*"]),
             ("**/*/Cache", false, "*/Cache", &["*/cache", "*/CACHE"]),
-            ("**/*Cache*/**", false, "Cache", &["cache", "CACHE"]),
+            (
+                "**/*Cache*/**",
+                false,
+                "Cache*/**",
+                &["cache*/**", "CACHE*/**"],
+            ),
+            ("Cache/**", false, "Cache/**", &["cache/**", "CACHE/**"]),
+            (r"Cache\**", true, r"Cache\**", &[r"cache\**", r"CACHE\**"]),
             (r"*\Cache", true, r"*\Cache", &[r"*\cache", r"*\CACHE"]),
             (r"Cache\*", true, r"Cache\*", &[r"cache\*", r"CACHE\*"]),
         ] {
@@ -1456,5 +1485,102 @@ mod tests {
             file: Some("skip.txt"),
         };
         assert_eq!(case_note_of(&[digits], false), None);
+    }
+
+    /// cr-ecm6-2: what the line shows is checked against the FILTER, for
+    /// every way a pattern's ends can be written. The line says a pattern
+    /// "matches T only" and that `--ignore-case` "would also match S": so
+    /// T, read as a pattern, must name nothing the pattern as typed does
+    /// not, and each S nothing the pattern does not name once case is
+    /// ignored — as an exclude, for a file and for a folder alike. `/**`
+    /// was trimmed: for `Cache/**` the line showed `cache`, which names a
+    /// FILE of that name; the pattern does not, and a mirror deleted it.
+    #[test]
+    fn every_spelling_the_line_shows_names_only_what_the_filter_names() {
+        use crate::fs_enum::FileFilter;
+        use std::path::Path;
+        let filter = |pattern: &str, ignore_case: bool| {
+            let mut filter = FileFilter::default();
+            filter.exclude_files = vec![pattern.to_string()];
+            filter.ignore_case = ignore_case;
+            filter
+                .validate_globs()
+                .unwrap_or_else(|e| panic!("{pattern}: {e}"));
+            filter
+        };
+        // (as a file, as a folder)
+        let named = |filter: &FileFilter, rel: &str| {
+            let path = Path::new(rel);
+            (
+                !filter.allows_entry(Some(path), path, 1, None),
+                !filter.allows_dir(path, path),
+            )
+        };
+        let names = [
+            "cache",
+            "Cache",
+            "CACHE",
+            "x/cache",
+            "x/Cache",
+            "x/CACHE",
+            "sub/cache",
+            "SUB/CACHE",
+            "cache/x",
+            "Cache/x",
+            "CACHE/x",
+            "CACHE/X",
+            "x/cache/y",
+            "X/CACHE/Y",
+            "xcache",
+            "XCACHE",
+            "cachex",
+            "CACHEX",
+            "x/y/cache",
+            "cache/x/y",
+            "CACHE/X/Y",
+            "sub/cache/x",
+            "SUB/CACHE/X",
+            "sub/x/cache",
+            "x",
+            "sub",
+        ];
+        let within = |narrow: (bool, bool), wide: (bool, bool)| {
+            (!narrow.0 || wide.0) && (!narrow.1 || wide.1)
+        };
+        let mut shown_patterns = 0;
+        for prefix in ["", "*", "**/", "*/", "**/*/", "sub/", "*/sub/"] {
+            for core in ["Cache", "Ca?he", "C[a]che", "Ca*he"] {
+                for suffix in ["", "*", "/*", "/**", "/**/*", "/x", "*/**"] {
+                    let pattern = format!("{prefix}{core}{suffix}");
+                    let Some(shown) = Spellings::of(&pattern, false) else {
+                        continue;
+                    };
+                    shown_patterns += 1;
+                    let (as_typed, ignoring) = (filter(&pattern, false), filter(&pattern, true));
+                    let typed = filter(shown.typed, false);
+                    for name in names {
+                        assert!(
+                            within(named(&typed, name), named(&as_typed, name)),
+                            "\"{pattern}\" is shown as {}, which names {name}; the pattern does not",
+                            shown.typed
+                        );
+                    }
+                    for other in &shown.others {
+                        let spelling = filter(other, false);
+                        for name in names {
+                            assert!(
+                                within(named(&spelling, name), named(&ignoring, name)),
+                                "\"{pattern}\" shows {other}, which names {name}; --ignore-case \
+                                 does not match it"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            shown_patterns > 150,
+            "{shown_patterns} patterns were checked"
+        );
     }
 }
