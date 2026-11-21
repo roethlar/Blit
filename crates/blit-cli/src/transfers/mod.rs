@@ -52,7 +52,6 @@ use blit_core::remote::transfer::{
 };
 use blit_core::transfers::dispatch::{select_transfer_route, TransferKind, TransferRoute};
 use blit_core::transfers::filter::{self, FilterInputs};
-use blit_core::transfers::resolution::resolve_destination;
 
 /// Build a `FilterInputs` view over a `TransferArgs`. Lives here
 /// because the orphan rule prevents `impl From<&TransferArgs>` on
@@ -578,6 +577,8 @@ struct PreparedTransferRoute {
     pre_resolve_display: String,
     src_display: String,
     dst_display: String,
+    /// The source goes under the destination by its name (cr-ecm13-2).
+    nested: bool,
 }
 
 fn prepare_transfer_route(
@@ -588,6 +589,10 @@ fn prepare_transfer_route(
 ) -> Result<PreparedTransferRoute> {
     lifecycle_trace.record("transfer_route_select_begin", None);
     let prepared = select_route(args, mode, is_move);
+    // cr-ecm13-2: the run's record keeps where it wrote, for its retry.
+    if let (Ok(prepared), Some(run)) = (&prepared, &args.run) {
+        run.note_destination_nested(prepared.nested);
+    }
 
     match &prepared {
         Ok(prepared) => {
@@ -626,7 +631,18 @@ fn select_route(
     let src_endpoint = parse_transfer_endpoint(&args.source)?;
     let raw_dst = parse_transfer_endpoint(&args.destination)?;
     let pre_resolve_display = display_endpoint(&raw_dst);
-    let dst_endpoint = resolve_destination(&args.source, &args.destination, &src_endpoint, raw_dst);
+    // cr-ecm13-2: a retry is told where the run it retries wrote, and
+    // does not ask the filesystem again — the first run may have made the
+    // very directory the answer turns on.
+    let nested = args.destination_nested.unwrap_or_else(|| {
+        blit_core::transfers::resolution::destination_nests(
+            &args.source,
+            &args.destination,
+            &raw_dst,
+        )
+    });
+    let dst_endpoint =
+        blit_core::transfers::resolution::resolve_destination_as(nested, &src_endpoint, raw_dst);
     let src_display = display_endpoint(&src_endpoint);
     let dst_display = display_endpoint(&dst_endpoint);
     let route = select_transfer_route(src_endpoint, dst_endpoint, mode);
@@ -644,6 +660,7 @@ fn select_route(
         pre_resolve_display,
         src_display,
         dst_display,
+        nested,
     })
 }
 
@@ -721,6 +738,7 @@ async fn run_transfer_inner(
         pre_resolve_display,
         src_display,
         dst_display,
+        nested: _,
     } = prepare_transfer_route(args, mode, false, lifecycle_trace)?;
 
     let operation = match mode {
@@ -1053,6 +1071,7 @@ async fn run_move_inner(
         pre_resolve_display,
         src_display,
         dst_display,
+        nested: _,
     } = prepare_transfer_route(args, TransferKind::Copy, true, lifecycle_trace)?;
     // What `move` refuses for its options alone — asked by `run_command`
     // too, before a job is saved (cr-ecm4-4).
@@ -1674,6 +1693,7 @@ mod tests {
         };
 
         let args = TransferArgs {
+            destination_nested: None,
             source: src.to_string_lossy().into_owned(),
             destination: dest.to_string_lossy().into_owned(),
             dry_run: false,
@@ -1751,6 +1771,7 @@ mod tests {
         };
 
         let args = TransferArgs {
+            destination_nested: None,
             source: src.to_string_lossy().into_owned(),
             destination: dest.to_string_lossy().into_owned(),
             dry_run: true,
@@ -1834,6 +1855,7 @@ mod tests {
     /// exercise.
     fn gate_args(source: &str, destination: &str, detach: bool, yes: bool) -> TransferArgs {
         TransferArgs {
+            destination_nested: None,
             source: source.to_string(),
             destination: destination.to_string(),
             dry_run: false,

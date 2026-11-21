@@ -51,6 +51,9 @@ struct Inner {
     /// The run's final account, for its record.
     totals: Mutex<Option<RunTotals>>,
     source_removed: AtomicBool,
+    /// cr-ecm13-2: whether the source went under the destination by its
+    /// name, once the command's arguments were read.
+    destination_nested: Mutex<Option<bool>>,
     /// The run is made of parts whose accounts add up (review cr-jl4-1).
     parts: AtomicBool,
     /// Whether the run writes what it moves (review cr-jl2-1).
@@ -245,6 +248,7 @@ impl CommandRun {
                 started,
                 totals: Mutex::new(None),
                 source_removed: AtomicBool::new(false),
+                destination_nested: Mutex::new(None),
                 parts: AtomicBool::new(false),
                 disposition,
             }),
@@ -289,6 +293,7 @@ impl CommandRun {
                 started: tokio::sync::OnceCell::new_with(Some(Started::unkept(None, Vec::new()))),
                 totals: Mutex::new(None),
                 source_removed: AtomicBool::new(false),
+                destination_nested: Mutex::new(None),
                 parts: AtomicBool::new(false),
                 disposition: Disposition::Written,
             }),
@@ -416,6 +421,16 @@ impl CommandRun {
         self.inner.parts.store(true, Ordering::Relaxed);
     }
 
+    /// Where the run writes (cr-ecm13-2): under the destination by the
+    /// source's name, or not. Kept in the run's record for its retry.
+    pub fn note_destination_nested(&self, nested: bool) {
+        *self
+            .inner
+            .destination_nested
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(nested);
+    }
+
     /// A move removed its source.
     pub fn note_source_removed(&self, source: &str) {
         self.inner.source_removed.store(true, Ordering::Relaxed);
@@ -506,6 +521,11 @@ impl CommandRun {
             }
         }
         let source_removed = self.inner.source_removed.load(Ordering::Relaxed);
+        let destination_nested = *self
+            .inner
+            .destination_nested
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let raws = totals
             .as_ref()
             .map(|totals| failed_raw_names(&self.inner.log, totals))
@@ -519,6 +539,7 @@ impl CommandRun {
                 totals,
                 &raws,
                 source_removed,
+                destination_nested,
             )
         })
         .await;
@@ -635,6 +656,7 @@ fn finish_record(
     totals: Option<RunTotals>,
     raws: &std::collections::HashMap<String, String>,
     source_removed: bool,
+    destination_nested: Option<bool>,
 ) {
     let record = &mut recorded.record;
     record.ended_ms = Some(now_ms());
@@ -649,6 +671,7 @@ fn finish_record(
     };
     record.detail = detail;
     record.source_removed = source_removed;
+    record.destination_nested = destination_nested;
     if let Some(totals) = totals {
         record.files_copied = totals.files_copied;
         record.files_deleted = totals.files_deleted;
@@ -1011,6 +1034,7 @@ mod tests {
             Some(totals),
             &raws,
             false,
+            None,
         );
         let record = store.load(&run_id).unwrap().1;
         assert_eq!(

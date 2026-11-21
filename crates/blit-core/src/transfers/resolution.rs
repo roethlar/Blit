@@ -147,10 +147,25 @@ pub fn resolve_destination(
     src: &Endpoint,
     dst: Endpoint,
 ) -> Endpoint {
-    if source_is_contents(raw_source) {
-        return dst;
-    }
-    if !dest_is_container(raw_dest, &dst) {
+    let nested = destination_nests(raw_source, raw_dest, &dst);
+    resolve_destination_as(nested, src, dst)
+}
+
+/// Whether [`resolve_destination`] puts the source UNDER the destination
+/// by its name. For a local destination typed without a `/` this asks the
+/// filesystem — is a directory there NOW — so the same two arguments can
+/// give two answers: `copy src backup` writes `backup/…` while `backup`
+/// is not there, and `backup/src/…` once it is.
+pub fn destination_nests(raw_source: &str, raw_dest: &str, dst: &Endpoint) -> bool {
+    !source_is_contents(raw_source) && dest_is_container(raw_dest, dst)
+}
+
+/// [`resolve_destination`] with that question already answered
+/// (cr-ecm13-2): a retry of a run writes where the run wrote, and the
+/// run's own answer is what says where — asked again after the first run
+/// had made `backup`, it sent the files that failed to `backup/src/`.
+pub fn resolve_destination_as(nested: bool, src: &Endpoint, dst: Endpoint) -> Endpoint {
+    if !nested {
         return dst;
     }
     let Some(basename) = source_basename(src) else {
@@ -623,5 +638,48 @@ mod tests {
             &ep("host-a", "mod-b", "dir"),
         )
         .expect("different modules are allowed");
+    }
+}
+
+#[cfg(test)]
+mod nesting_tests {
+    use super::*;
+
+    /// cr-ecm13-2: the answer depends on what is there when it is asked,
+    /// and resolving with an answer given asks nothing.
+    #[test]
+    fn where_a_source_goes_is_decided_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = Endpoint::Local(tmp.path().join("src"));
+        let backup = tmp.path().join("backup");
+        let typed = backup.display().to_string();
+        let dst = || Endpoint::Local(backup.clone());
+        let lands = |endpoint: Endpoint| match endpoint {
+            Endpoint::Local(path) => path,
+            Endpoint::Remote(_) => unreachable!("a local destination"),
+        };
+
+        // Not there: the destination becomes the copy.
+        assert!(!destination_nests("src", &typed, &dst()));
+        assert_eq!(
+            lands(resolve_destination("src", &typed, &src, dst())),
+            backup
+        );
+        // There: the source goes under it — the same two arguments.
+        std::fs::create_dir(&backup).unwrap();
+        assert!(destination_nests("src", &typed, &dst()));
+        assert_eq!(
+            lands(resolve_destination("src", &typed, &src, dst())),
+            backup.join("src")
+        );
+        // With the first answer given, it is where the first run wrote.
+        assert_eq!(lands(resolve_destination_as(false, &src, dst())), backup);
+        std::fs::remove_dir(&backup).unwrap();
+        assert_eq!(
+            lands(resolve_destination_as(true, &src, dst())),
+            backup.join("src")
+        );
+        // A source typed as its contents never goes under anything.
+        assert!(!destination_nests("src/", &format!("{typed}/"), &dst()));
     }
 }

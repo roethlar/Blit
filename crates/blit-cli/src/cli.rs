@@ -485,6 +485,11 @@ pub struct TransferArgs {
     /// there, and keeps and reports a file that does. Never a flag.
     #[arg(skip)]
     pub retry_left: bool,
+    /// cr-ecm13-2 internal: where the run this one retries put its source —
+    /// under the destination by its name, or not. Given, it is not asked
+    /// of the filesystem again. Never a flag.
+    #[arg(skip)]
+    pub destination_nested: Option<bool>,
     /// JOB_LOGS jl-2 internal: this command's run, made once per command
     /// and shared by every pass and rerun. Never a flag.
     #[arg(skip)]

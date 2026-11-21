@@ -278,6 +278,10 @@ pub(crate) async fn job_to_retry(target: &str) -> Result<Option<JobToRun>> {
         return Ok(None);
     }
     let (mut args, list) = spec_args(&config_dir, &spec)?;
+    // cr-ecm13-2: the retry writes where the run wrote. `copy src backup`
+    // with no `backup` there made it and wrote into it; read again, the
+    // same words put the files that failed under `backup/src/`.
+    args.destination_nested = record.destination_nested;
     let verb = if spec.verb == "move" {
         "move"
     } else {

@@ -875,3 +875,89 @@ fn a_size_only_retry_does_not_call_a_file_of_the_right_length_copied() {
     assert_eq!(fs::read(dst.join("data.bin")).unwrap(), b"good");
     assert_eq!(jobs(&ctx)[0]["files_copied"], 1);
 }
+
+/// cr-ecm13-2: a retry writes where the run wrote. `copy src backup`,
+/// neither ending in `/`: with no `backup` there the run makes it and
+/// writes `backup/…`; with a directory there it writes `backup/src/…`.
+/// The retry read the same two words again — after the first run had made
+/// `backup` — and sent the file that failed to `backup/src/`, exit 0, the
+/// place it had failed at untouched. The run's record keeps what it
+/// decided. And the other way about: a run that wrote under `backup/src/`
+/// is retried there though `backup` has gone since.
+#[test]
+fn a_retry_writes_where_the_run_it_retries_wrote() {
+    for there_at_first in [false, true] {
+        let ctx = TestContext::new();
+        let src = ctx.workspace.join("src");
+        let backup = ctx.workspace.join("backup");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("landed.txt"), b"alpha").unwrap();
+        fs::write(src.join("blocked.txt"), b"lands on retry").unwrap();
+        // Where the run will write: a folder in the way of one file.
+        let root = if there_at_first {
+            backup.join("src")
+        } else {
+            backup.clone()
+        };
+        if there_at_first {
+            fs::create_dir_all(root.join("blocked.txt")).unwrap();
+        }
+        // No `/` after either: the second is a name, not "into here".
+        let typed = [src.display().to_string(), backup.display().to_string()];
+        let first = if there_at_first {
+            blit(&ctx, &["copy", "--retries", "0", &typed[0], &typed[1]])
+        } else {
+            // Nothing can stand in a folder that is not there yet: the
+            // file fails for want of room instead.
+            #[cfg(not(unix))]
+            continue;
+            #[cfg(unix)]
+            {
+                fs::write(src.join("blocked.txt"), vec![b'w'; 128 * 1024]).unwrap();
+                blit_with_no_room_past(&ctx, 64, &["copy", "--retries", "0", &typed[0], &typed[1]])
+            }
+        };
+        let said = format!("{}{}", text(&first.stdout), text(&first.stderr));
+        assert_eq!(
+            first.status.code(),
+            Some(EXIT_PARTIAL_FAILURE),
+            "there at first {there_at_first}: {said}"
+        );
+        assert_eq!(
+            fs::read(root.join("landed.txt")).unwrap(),
+            b"alpha",
+            "there at first {there_at_first}: {said}"
+        );
+        let job = &jobs(&ctx)[0];
+        let run_id = job["run_id"].as_str().unwrap().to_string();
+        let record: serde_json::Value =
+            serde_json::from_slice(&fs::read(job["record_file"].as_str().unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(record["destination_nested"], there_at_first, "{record}");
+
+        if there_at_first {
+            // All of it gone since: read again, the words would write
+            // `backup/…`.
+            fs::remove_dir_all(&backup).unwrap();
+        }
+        let retried = blit(&ctx, &["jobs", "retry", &run_id]);
+        let said = format!("{}{}", text(&retried.stdout), text(&retried.stderr));
+        assert!(
+            retried.status.success(),
+            "there at first {there_at_first}: {said}"
+        );
+        assert!(
+            root.join("blocked.txt").is_file(),
+            "there at first {there_at_first}: the file lands where it failed\n{said}"
+        );
+        let elsewhere = if there_at_first {
+            backup.join("blocked.txt")
+        } else {
+            backup.join("src")
+        };
+        assert!(
+            fs::symlink_metadata(&elsewhere).is_err(),
+            "there at first {there_at_first}: and nowhere else\n{said}"
+        );
+    }
+}

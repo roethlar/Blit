@@ -214,6 +214,12 @@ part, and a job you can list, read, re-run and retry.
   no other: if the directory has since become one file of the same
   name, the retry reports the path missing — it used to send that file
   over whatever stood at the destination's root.
+- `blit jobs retry` writes where the run it retries wrote. `blit copy src
+  backup`, with no `/` after either, makes `backup` and writes into it
+  when nothing is there, and writes `backup/src/` when a directory is;
+  the retry read the two words again, after the first run had made
+  `backup`, and sent the files that failed to `backup/src/`. A run's
+  record now keeps what it decided.
 - Under `--ignore-existing` nothing that is at the destination is ever
   written over — a run's own incomplete copy included. A retry
   (`--retries`, `blit jobs retry`) used to send a path where a failed

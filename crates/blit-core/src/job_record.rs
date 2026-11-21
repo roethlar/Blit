@@ -234,6 +234,14 @@ pub struct RunRecord {
     /// A move removed its source.
     #[serde(default)]
     pub source_removed: bool,
+    /// cr-ecm13-2: whether the run put its source UNDER the destination by
+    /// the source's name — which, for a destination typed without a `/`,
+    /// is decided by whether a directory stood there when the run began.
+    /// A retry of the run is given this answer and does not ask again.
+    /// Absent in a record from before it was kept, and for a run that
+    /// ended before it had read its arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_nested: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -315,6 +323,7 @@ impl RunRecord {
             left_in_place_raw: Vec::new(),
             left_in_place_exact: false,
             source_removed: false,
+            destination_nested: None,
         }
     }
 }

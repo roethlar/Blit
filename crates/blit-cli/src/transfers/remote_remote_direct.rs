@@ -336,6 +336,7 @@ mod delegated_options_tests {
     /// flags vary per test.
     fn args(checksum: bool, size_only: bool) -> TransferArgs {
         TransferArgs {
+            destination_nested: None,
             source: "a:/m/".into(),
             destination: "b:/m/".into(),
             dry_run: false,
