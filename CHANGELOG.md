@@ -238,6 +238,15 @@ part, and a job you can list, read, re-run and retry.
   copy had been left, kept the file as any other, and exited 0. With
   `--resume --ignore-existing`, a file that fails part-way starts again
   from the beginning on a retry.
+- Under `--ignore-existing` a symbolic link at a destination path is
+  something that exists, whatever it points to, and is kept. A link to
+  nothing read as an empty place: the file was written THROUGH it, and
+  what the link names was made — by a plain `copy --ignore-existing`,
+  and by a retry at a path where a copy had been left. And every file
+  such a run writes is made by a creation that fails if the name is
+  taken, so that anything put there after the run looked — a file, a
+  link — is kept too, and that file is reported: `something stands at
+  the destination that was not there when this run looked`.
 - `check` of a single file against a destination of another name
   compares the two. With the source named in `--files-from`, or a
   pattern naming either file, it looked for one file's name on the

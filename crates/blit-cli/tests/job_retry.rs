@@ -961,3 +961,85 @@ fn a_retry_writes_where_the_run_it_retries_wrote() {
         );
     }
 }
+
+/// cr-ecm14-2: `--ignore-existing` keeps a LINK that stands at a path,
+/// whatever it points to — and writes through none. The reviewer's case:
+/// a recorded leftover retried with a link to nothing in its place; the
+/// retry followed the link, made what it names, and exited 0. Now the
+/// link is kept and the path reported, as a file there would be; a link
+/// at a path that merely failed is kept and nothing is said; and a plain
+/// `copy --ignore-existing` over a link to nothing makes nothing either.
+#[cfg(unix)]
+#[test]
+fn an_ignore_existing_retry_follows_no_link_left_where_its_copy_was() {
+    let ctx = TestContext::new();
+    let src = ctx.workspace.join("src");
+    let dst = ctx.workspace.join("dst");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("own.txt"), b"the whole file").unwrap();
+    fs::write(src.join("kept.txt"), b"from the source").unwrap();
+    for name in ["own.txt", "kept.txt"] {
+        fs::create_dir_all(dst.join(name)).unwrap();
+    }
+    let first = blit(
+        &ctx,
+        &[
+            "copy",
+            "--ignore-existing",
+            "--retries",
+            "0",
+            &arg(&src),
+            &arg(&dst),
+        ],
+    );
+    assert_eq!(first.status.code(), Some(EXIT_PARTIAL_FAILURE));
+    let job = &jobs(&ctx)[0];
+    let run_id = job["run_id"].as_str().unwrap().to_string();
+    let record_file = PathBuf::from(job["record_file"].as_str().unwrap());
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_file).unwrap()).unwrap();
+    // As a run whose write of `own.txt` left its own incomplete copy.
+    record["left_in_place"] = serde_json::json!(["own.txt"]);
+    fs::write(&record_file, serde_json::to_vec(&record).unwrap()).unwrap();
+    // And where each stood, a link to nothing.
+    let elsewhere = ctx.workspace.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    for name in ["own.txt", "kept.txt"] {
+        fs::remove_dir_all(dst.join(name)).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join(name), dst.join(name)).unwrap();
+    }
+
+    let retried = blit(&ctx, &["jobs", "retry", &run_id]);
+    let said = format!("{}{}", text(&retried.stdout), text(&retried.stderr));
+    assert_eq!(retried.status.code(), Some(EXIT_PARTIAL_FAILURE), "{said}");
+    assert!(
+        said.contains("own.txt: an incomplete copy was left at the destination by this run"),
+        "{said}"
+    );
+    for name in ["own.txt", "kept.txt"] {
+        assert!(
+            dst.join(name).is_symlink(),
+            "{name}: the link stays\n{said}"
+        );
+        assert!(
+            !elsewhere.join(name).exists(),
+            "{name}: what the link names is not made\n{said}"
+        );
+    }
+
+    // A plain copy that keeps what exists, over a link to nothing.
+    let plain = ctx.workspace.join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("own.txt"), plain.join("own.txt")).unwrap();
+    let copied = blit(
+        &ctx,
+        &["copy", "--ignore-existing", &arg(&src), &arg(&plain)],
+    );
+    assert!(copied.status.success(), "{}", text(&copied.stderr));
+    assert!(plain.join("own.txt").is_symlink());
+    assert!(!elsewhere.join("own.txt").exists());
+    assert_eq!(
+        fs::read(plain.join("kept.txt")).unwrap(),
+        b"from the source"
+    );
+}

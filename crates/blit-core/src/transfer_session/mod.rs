@@ -6307,11 +6307,19 @@ struct AttributeRepair {
 /// (symlinks and reparse points, case-folded near-miss names, unsweepable
 /// directories). The two paths share `dir_stat::mtime_seconds`, so the
 /// only difference between them is round trips, never the verdict.
+///
+/// cr-ecm14-2: the third answer, asked for with `ask_link`, is whether
+/// the entry ITSELF is a symbolic link. The stat looks through a link, so
+/// one that points to nothing reads as nothing there — and a write to
+/// that path goes through it. Only a session that keeps what exists
+/// (`ignore_existing`) asks, and only of an entry the sweep could not
+/// judge: one more look at a link, none at anything else.
 fn resolve_destination_target(
     dst: &Path,
     dir_stats: &dir_stat::DirStatCache,
     repair: &AttributeRepair,
-) -> (Option<(u64, i64)>, Option<u32>) {
+    ask_link: bool,
+) -> (Option<(u64, i64)>, Option<u32>, bool) {
     use dir_stat::{DirStatLookup, SweptEntry};
     let looked = match (dst.parent(), dst.file_name()) {
         (Some(dir), Some(name)) => dir_stats.lookup(dir, name, &repair.phase_probe),
@@ -6324,12 +6332,14 @@ fn resolve_destination_target(
             size,
             mtime,
             attributes,
-        }) => (Some((size, mtime)), attributes),
+        }) => (Some((size, mtime)), attributes, false),
         // Absent — or present as a directory/other, which a file write
         // must replace: both diff as "target does not have it" (matches
         // the push daemon's file_requires_upload).
-        DirStatLookup::Entry(SweptEntry::NonFile) | DirStatLookup::Absent => (None, None),
+        DirStatLookup::Entry(SweptEntry::NonFile) | DirStatLookup::Absent => (None, None, false),
         DirStatLookup::Entry(SweptEntry::NeedsStat) | DirStatLookup::Fallback => {
+            let link = ask_link
+                && std::fs::symlink_metadata(dst).is_ok_and(|entry| entry.file_type().is_symlink());
             let stat_result = std::fs::metadata(dst);
             // ls-1: on Windows the stat ALREADY carries the attribute
             // DWORD, so capture it here and let the metadata verdict reuse
@@ -6350,7 +6360,7 @@ fn resolve_destination_target(
                 Ok(meta) if meta.is_file() => Some((meta.len(), dir_stat::mtime_seconds(&meta))),
                 _ => None,
             };
-            (target, stat_attributes)
+            (target, stat_attributes, link)
         }
     }
 }
@@ -6403,7 +6413,8 @@ fn destination_needs(
     // ls-1 numbers stay comparable; COMPARE_SWEEP appears inside it as a
     // component on the sweeping thread.
     let stat_span = repair.phase_probe.is_enabled().then(Instant::now);
-    let (target, stat_attributes) = resolve_destination_target(&dst, dir_stats, repair);
+    let (target, stat_attributes, link_stands) =
+        resolve_destination_target(&dst, dir_stats, repair, opts.ignore_existing);
     if let Some(started) = stat_span {
         repair
             .phase_probe
@@ -6428,6 +6439,26 @@ fn destination_needs(
                 header.relative_path.clone(),
                 header.raw_relative_path.clone(),
             ));
+        return Ok(NeedVerdict::Skip);
+    }
+    // cr-ecm14-2: and a LINK standing at the path is something that
+    // exists, whatever it points to — to a file (the block above, and the
+    // compare below, have it), to a directory, or to nothing. Looked
+    // through, a link to nothing read as an empty place, and the write
+    // went through it and made what it names. Under `ignore_existing` it
+    // is kept, as a file is; where the run left its own incomplete copy
+    // it is reported too, as a file is.
+    if link_stands && target.is_none() && opts.ignore_existing {
+        if repair.left_listed {
+            repair
+                .kept
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((
+                    header.relative_path.clone(),
+                    header.raw_relative_path.clone(),
+                ));
+        }
         return Ok(NeedVerdict::Skip);
     }
     // otp-10b-1: a Checksum session hashes the local candidate so a
@@ -10695,6 +10726,89 @@ mod own_incomplete_copy_tests {
             NeedVerdict::Transfer { .. }
         ));
         assert!(kept(&asked).is_empty());
+    }
+
+    /// cr-ecm14-2: a link standing at a path is something that exists,
+    /// whatever it points to. Under `ignore_existing` a link to nothing,
+    /// to a directory and to a file are each kept — the reviewer's case
+    /// is the first: looked through, it read as an empty place and was
+    /// written through. Where the run left its own incomplete copy the
+    /// link is reported as well. Without the option nothing changes.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_path_is_kept_like_a_file_whatever_it_points_to() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("dir")).unwrap();
+        std::fs::write(tmp.path().join("file"), b"whole").unwrap();
+        for (name, to) in [
+            ("dangling", "nowhere"),
+            ("to_dir", "dir"),
+            ("to_file", "file"),
+        ] {
+            std::os::unix::fs::symlink(to, tmp.path().join(name)).unwrap();
+        }
+        let links = ["dangling", "to_dir", "to_file"];
+        let ignoring = CompareOptions {
+            ignore_existing: true,
+            ..CompareOptions::default()
+        };
+        let verdict = |name: &str, opts: &CompareOptions, repair: &AttributeRepair| {
+            destination_needs(
+                &header(name, 5),
+                tmp.path(),
+                None,
+                opts,
+                &AtomicBool::new(false),
+                repair,
+                &dir_stat::DirStatCache::default(),
+            )
+            .unwrap()
+        };
+        let kept = |repair: &AttributeRepair| -> Vec<String> {
+            let mut kept: Vec<String> = repair
+                .kept
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect();
+            kept.sort();
+            kept
+        };
+        // A plain run that keeps what exists: kept, and nothing said.
+        let unlisted = repair(false);
+        for name in links {
+            assert_eq!(
+                verdict(name, &ignoring, &unlisted),
+                NeedVerdict::Skip,
+                "{name}"
+            );
+        }
+        assert!(kept(&unlisted).is_empty());
+        // The retry of the run's own incomplete copies: kept, and told.
+        let listed = repair(true);
+        for name in links {
+            assert_eq!(
+                verdict(name, &ignoring, &listed),
+                NeedVerdict::Skip,
+                "{name}"
+            );
+        }
+        assert_eq!(kept(&listed), links);
+        // Nothing there at all is still an empty place.
+        assert!(matches!(
+            verdict("absent", &ignoring, &listed),
+            NeedVerdict::Transfer { .. }
+        ));
+        // Without the option the link is not asked about.
+        let comparing = CompareOptions::default();
+        let asked = repair(true);
+        assert!(matches!(
+            verdict("dangling", &comparing, &asked),
+            NeedVerdict::Transfer { .. }
+        ));
+        assert!(kept(&asked).is_empty());
+        assert!(!tmp.path().join("nowhere").exists());
     }
 
     /// cr-uv4-1: a move's account is written from this end's own disk —
