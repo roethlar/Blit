@@ -502,7 +502,15 @@ mod delegated_spec_tests {
     /// cr-uv2-1: a source typed as a directory is delegated as one.
     #[test]
     fn a_source_typed_as_a_directory_is_delegated_as_one() {
-        for (typed, wire) in [("a/b/", "a/b/"), ("a/b/.", "a/b/"), ("./", "."), (".", ".")] {
+        // cr-uv3-5: the root is `.`, as it always was, and `./` when a
+        // `.` was typed after the module.
+        for (typed, wire) in [
+            ("a/b/", "a/b/"),
+            ("a/b/.", "a/b/"),
+            ("", "."),
+            ("./", "./"),
+            (".", "./"),
+        ] {
             let spec =
                 delegated_spec_from_options(&module_ep(typed), &DelegatedSpecOptions::default())
                     .unwrap();

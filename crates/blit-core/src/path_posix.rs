@@ -107,10 +107,29 @@ pub fn typed_as_directory(path: &Path) -> bool {
 /// as a directory. The end that holds the source then knows what was
 /// asked for — `single.txt/` is a directory or it is nothing, as it is to
 /// `cp`, `mv` and `rsync` — where it was told `single.txt` and copied the
-/// file. The module's root needs no mark.
+/// file.
+///
+/// The module's ROOT is the empty path, and says nothing: the `/` after a
+/// module's name is the grammar's (`HOST:/module/`), not a claim. A `.`
+/// typed after it is one — `HOST:/module/.` — and goes as `./`
+/// (cr-uv3-5): a module can itself be one file, and typed so it was
+/// copied, the two forms reaching the daemon as the same empty path.
 pub fn source_path_to_posix(path: &Path) -> String {
     let mut posix = relative_path_to_posix(path);
-    if !posix.is_empty() && posix != "." && typed_as_directory(path) {
+    if posix.is_empty() || posix == "." {
+        let typed = path.as_os_str().as_encoded_bytes();
+        let is_separator = |byte: &u8| *byte == b'/' || (cfg!(windows) && *byte == b'\\');
+        let last_name = typed
+            .split(is_separator)
+            .rfind(|name| !name.is_empty())
+            .unwrap_or_default();
+        return if last_name == b"." {
+            "./".to_string()
+        } else {
+            String::new()
+        };
+    }
+    if typed_as_directory(path) {
         posix.push('/');
     }
     posix
@@ -134,9 +153,13 @@ mod tests {
             ("a/./b", "a/b"),
             ("dir/.x", "dir/.x"),
             ("dir/x.", "dir/x."),
+            // The root: nothing said of it, or said to be a directory by
+            // a `.` typed after it (cr-uv3-5).
             ("", ""),
-            (".", ""),
-            ("./", ""),
+            (".", "./"),
+            ("./", "./"),
+            (".//", "./"),
+            ("./.", "./"),
         ] {
             assert_eq!(source_path_to_posix(Path::new(typed)), wire, "{typed:?}");
         }

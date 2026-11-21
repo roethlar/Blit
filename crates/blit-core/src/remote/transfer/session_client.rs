@@ -705,6 +705,8 @@ mod endpoint_module_path_tests {
             ("single.txt/", "single.txt/", "single.txt"),
             ("sub/dir/.", "sub/dir/", "sub/dir"),
             ("", "", ""),
+            // cr-uv3-5: the module itself, typed with a `.` after it.
+            (".", "./", ""),
         ] {
             let endpoint = endpoint(PathBuf::from(typed));
             assert_eq!(

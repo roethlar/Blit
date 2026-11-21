@@ -343,7 +343,10 @@ async fn refuse_source_not_as_typed(
 ) -> Result<(), SessionFault> {
     use blit_core::admin::operand;
     let typed = wire_path.as_bytes();
-    if !operand::names_a_directory(typed) || operand::is_the_root(typed) {
+    // cr-uv3-5: the module's root too, when a `.` was typed after it —
+    // it arrives as `./`, and as the empty path when nothing was said. A
+    // module can itself be one file.
+    if !operand::names_a_directory(typed) {
         return Ok(());
     }
     let Ok(found) = tokio::fs::metadata(root).await else {
@@ -607,6 +610,43 @@ pub(crate) async fn run_transfer_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cr-uv2-1, cr-uv3-5: a source is what its path was typed as. A path
+    /// that says "a directory" — a `/` after it, or the root with a `.`
+    /// typed after it (`./`) — is refused when what stands there is a
+    /// file; a path that says nothing is not. A module that is itself one
+    /// file, typed `HOST:/single/.`, was copied.
+    #[tokio::test]
+    async fn a_source_typed_as_a_directory_is_refused_when_it_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (file, dir) = (tmp.path().join("single"), tmp.path().join("dir"));
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::create_dir(&dir).unwrap();
+        for (wire, root, refused) in [
+            ("", &file, false),
+            ("./", &file, true),
+            ("single", &file, false),
+            ("single/", &file, true),
+            ("", &dir, false),
+            ("./", &dir, false),
+            ("dir/", &dir, false),
+        ] {
+            let answer = refuse_source_not_as_typed(wire, root, false).await;
+            assert_eq!(answer.is_err(), refused, "{wire:?} at {}", root.display());
+            if let Err(fault) = answer {
+                assert!(
+                    fault.message.contains("Not a directory"),
+                    "{}",
+                    fault.message
+                );
+            }
+        }
+        // What is not there is the scan's to report.
+        let missing = tmp.path().join("missing");
+        assert!(refuse_source_not_as_typed("missing/", &missing, false)
+            .await
+            .is_ok());
+    }
 
     #[test]
     fn status_to_fault_maps_not_found_to_module_unknown() {

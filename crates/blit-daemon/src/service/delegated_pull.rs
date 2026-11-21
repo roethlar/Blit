@@ -394,7 +394,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
         // the endpoint's `RemotePath`.
         path: RemotePath::Module {
             module: spec.module.clone(),
-            rel_path: PathBuf::from(&spec.source_path),
+            rel_path: source_rel_path(&spec.source_path),
         },
     };
     let client = connect_transfer_client_with_trace(&endpoint, lifecycle_trace)
@@ -572,6 +572,43 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
         }))
         .await;
     Ok(())
+}
+
+/// A delegated request's `source_path` as the path the session to the
+/// source is opened with. The request's own word for the module's root,
+/// `.`, says nothing of it; `./` says it was typed as a directory
+/// (cr-uv3-5); any other path is as its sender wrote it.
+fn source_rel_path(source_path: &str) -> PathBuf {
+    match source_path {
+        "." => PathBuf::new(),
+        path => PathBuf::from(path),
+    }
+}
+
+#[cfg(test)]
+mod source_rel_path_tests {
+    use super::*;
+    use blit_core::path_posix::source_path_to_posix;
+
+    /// cr-uv3-5: what the request says of its source reaches the source's
+    /// daemon unchanged — the root with nothing said, the root said to be
+    /// a directory, a path with and without the mark.
+    #[test]
+    fn a_delegated_source_is_opened_as_its_request_wrote_it() {
+        for (requested, opened) in [
+            (".", ""),
+            ("./", "./"),
+            ("a/b", "a/b"),
+            ("a/b/", "a/b/"),
+            ("single.txt/", "single.txt/"),
+        ] {
+            assert_eq!(
+                source_path_to_posix(&source_rel_path(requested)),
+                opened,
+                "{requested:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
