@@ -693,7 +693,9 @@ impl<'a> Spellings<'a> {
                         None => Some(other),
                         Some(asked) => asked.would_also_match(&whole, &other, windows).map(
                             |(name, its_own)| {
-                                // cr-ecm12-4: its own name, and that alone.
+                                // cr-ecm12-4: its own name, and that alone
+                                // (cr-ecm13-7: and only where every name
+                                // the text reads as is one).
                                 // A text that still holds a class was kept
                                 // as "a pattern": `[A]` was printed for
                                 // `*[a]`, which as a name is `A` — and the
@@ -982,14 +984,22 @@ impl Asked {
             }
             names.extend(denoted);
         }
+        let changes = |name: &String| {
+            let by_spelling = Self::named(self.role, &filter, name);
+            (by_spelling.0 || by_spelling.1) && self.gained(name)
+        };
+        // cr-ecm13-7: the text shown stands for ALL the names it reads
+        // as, so it is the text to print only when every one of them is
+        // treated otherwise. `{A,B}` was printed for `{a,b}` beside
+        // `[Aa]`: `B` is one of its names and is gained, `A` is another
+        // and is left out by both runs. Where only some change, the name
+        // that was checked is what is printed.
+        let whole_text = names[..own].iter().all(changes);
         names
             .into_iter()
             .enumerate()
-            .find(|(_, name)| {
-                let by_spelling = Self::named(self.role, &filter, name);
-                (by_spelling.0 || by_spelling.1) && self.gained(name)
-            })
-            .map(|(at, name)| (name, at < own))
+            .find(|(_, name)| changes(name))
+            .map(|(at, name)| (name, at < own && whole_text))
     }
 
     /// The letters the class that begins at byte `at` of the pattern is
@@ -2813,11 +2823,13 @@ mod tests {
             )
         );
         // Every alternative is tried: the letters are in the second.
+        // cr-ecm13-7: and what is printed is what changes — `{1,cache}`
+        // was, which reads as `1` too, and `1` is matched either way.
         assert_eq!(
             note(&["{1,Cache}"]).as_deref(),
             Some(
-                "\"{1,Cache}\" matches {1,Cache} only; capital letters matter (--ignore-case \
-                 would also match {1,cache}, {1,CACHE})."
+                "\"{1,Cache}\" matches exactly as typed; capital letters matter (--ignore-case \
+                 would also match cache, CACHE)."
             )
         );
         // The option does change it, in a way neither rule-made spelling
@@ -3064,6 +3076,24 @@ mod tests {
             Some(
                 "\"img_*.jpg\" matches img_*.jpg only; capital letters matter (--ignore-case \
                  would also match IMG_*.JPG)."
+            )
+        );
+        // cr-ecm13-7: and where the text to print reads as SEVERAL names
+        // of which only some change. `{A,B}` was printed for `{a,b}`: `A`
+        // is left out by both runs, and only `B` is let in by the option.
+        assert_eq!(
+            both(&["[Aa]"], &["{a,b}"]).as_deref(),
+            Some(
+                "\"{a,b}\" matches exactly as typed; capital letters matter (--ignore-case \
+                 would also match B)."
+            )
+        );
+        // Every name of it changing, the text stands.
+        assert_eq!(
+            both(&[], &["{a,b}"]).as_deref(),
+            Some(
+                "\"{a,b}\" matches {a,b} only; capital letters matter (--ignore-case would also \
+                 match {A,B})."
             )
         );
         // An include the option widens is offered what it would let in —

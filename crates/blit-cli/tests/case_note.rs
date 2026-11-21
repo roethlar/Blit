@@ -966,6 +966,15 @@ fn the_line_claims_only_what_the_mirror_then_does() {
                    would also match xA).",
             entries: &[("xA", true, false), ("A", true, true), ("a", true, true)],
         },
+        // cr-ecm13-7: and with alternatives of which one changes — the
+        // line said `would also match {A,B}`.
+        Case {
+            excludes: &["[Aa]"],
+            includes: &["{a,b}"],
+            line: "\"{a,b}\" matches exactly as typed; capital letters matter (--ignore-case \
+                   would also match B).",
+            entries: &[("B", true, false), ("A", true, true), ("b", false, false)],
+        },
         // cr-ecm12-4: and with a class in the include — the line said
         // `would also match [A]`.
         Case {
