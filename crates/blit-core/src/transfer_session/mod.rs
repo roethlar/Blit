@@ -199,7 +199,11 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// and refused a COPY of `link/` that asked for a complete scan. A peer
 /// of contract 20 would not read the field, and would serve a move
 /// through a link typed as a directory.
-pub const CONTRACT_VERSION: u32 = 21;
+/// v22: `FilterSpec.files_from_exact` (cr-ecm12-1) — a retry's list says
+/// that it holds exact paths. Read as a list of names, it let a source
+/// that had become one file answer to the name of a child that failed,
+/// and the file was written over the destination's root.
+pub const CONTRACT_VERSION: u32 = 22;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames
@@ -1470,6 +1474,18 @@ pub async fn run_source(
 /// listed by its own name (`sole_name`, the source's base name). The two
 /// are the same file: listed and sent, it was reported missing all the
 /// same — the copy wrote it and the run ended with exit 2.
+/// The name a list of NAMES has for a source that is one file: the
+/// source's own last name (cr-ecm9-3). A list of exact paths — a retry's —
+/// has none (cr-ecm12-1): there the file sent under the empty path is the
+/// source itself and accounts for no path below it.
+fn sole_name_of(root: &Path, exact: bool) -> Option<String> {
+    if exact {
+        return None;
+    }
+    root.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
 fn requested_but_unscanned(
     scope: Option<&HashSet<PathBuf>>,
     unnamed: &[String],
@@ -2202,10 +2218,7 @@ async fn source_send_half(
         // is reported to the DESTINATION as that file's failure, so the
         // retry pass can never quietly drop a file it was asked to
         // re-land. Unscoped scans report nothing here.
-        let sole_name = scan_source
-            .root()
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned());
+        let sole_name = sole_name_of(scan_source.root(), scan_source.files_from_exact());
         let (scan_failures, scan_failures_dropped) = requested_but_unscanned(
             scan_source.files_from_scope().as_ref(),
             &scan_source.files_from_unnamed(),
@@ -7001,6 +7014,31 @@ mod tests {
         assert!(requested_but_unscanned(None, &unnamed, &sent, None, &[])
             .0
             .is_empty());
+    }
+
+    /// cr-ecm12-1: a list of exact paths has no name for a source that is
+    /// one file; a list of names has the file's own.
+    #[test]
+    fn only_a_list_of_names_calls_a_single_file_by_its_name() {
+        let root = Path::new("/srv/data/Report.txt");
+        assert_eq!(sole_name_of(root, false).as_deref(), Some("Report.txt"));
+        assert_eq!(sole_name_of(root, true), None);
+        // So a child of that name stays missing though the source itself
+        // was sent, under a list of exact paths.
+        let scope: HashSet<PathBuf> = [PathBuf::from("Report.txt")].into();
+        let sent: HashMap<String, FileHeader> = [(String::new(), FileHeader::default())].into();
+        let missing = |exact: bool| {
+            requested_but_unscanned(
+                Some(&scope),
+                &[],
+                &sent,
+                sole_name_of(root, exact).as_deref(),
+                &[],
+            )
+            .0
+            .len()
+        };
+        assert_eq!((missing(false), missing(true)), (0, 1));
     }
 
     /// cr-ecm11-1: a retry lists the source ITSELF by the empty path —

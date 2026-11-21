@@ -564,3 +564,66 @@ fn an_ignore_existing_retry_of_a_single_file_replaces_its_own_incomplete_copy() 
         );
     }
 }
+
+/// cr-ecm12-1: the converse. A CHILD that failed is retried as that child
+/// and nothing else. A copy of the directory `Report.txt` failed on its
+/// child `Report.txt`; with the directory replaced since by a FILE of
+/// that name, the retry's list — `Report.txt` — was read as a list of
+/// names, which a source that is one file answers to by its own: the file
+/// was sent as the source itself and written over `out/Report.txt`, an
+/// unrelated file by then. A retry's list holds exact paths; there is no
+/// such child any more, and the retry says so.
+#[test]
+fn a_retry_of_a_child_does_not_take_a_file_of_its_name_for_it() {
+    for from_a_daemon in [false, true] {
+        let ctx = TestContext::new();
+        let (src, typed) = if from_a_daemon {
+            (
+                ctx.module_dir.join("Report.txt"),
+                format!("127.0.0.1:{}:/test/Report.txt", ctx.daemon_port),
+            )
+        } else {
+            let src = ctx.workspace.join("Report.txt");
+            (src.clone(), src.display().to_string())
+        };
+        let out = ctx.workspace.join("out");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("Report.txt"), b"the child that failed").unwrap();
+        fs::write(src.join("landed.txt"), b"alpha").unwrap();
+        // The child's place is taken by a folder, with something in it.
+        fs::create_dir_all(out.join("Report.txt/Report.txt")).unwrap();
+        fs::write(out.join("Report.txt/Report.txt/kept"), b"x").unwrap();
+        let first = blit(&ctx, &["copy", "--retries", "0", &typed, &arg(&out)]);
+        assert_eq!(
+            first.status.code(),
+            Some(EXIT_PARTIAL_FAILURE),
+            "daemon {from_a_daemon}: {}{}",
+            text(&first.stdout),
+            text(&first.stderr)
+        );
+        let run_id = jobs(&ctx)[0]["run_id"].as_str().unwrap().to_string();
+
+        // The source becomes one file of that name; and where the copy's
+        // directory stood there is now a file nobody asked to replace.
+        fs::remove_dir_all(&src).unwrap();
+        fs::write(&src, b"another file altogether").unwrap();
+        fs::remove_dir_all(out.join("Report.txt")).unwrap();
+        fs::write(out.join("Report.txt"), b"not the run's to touch").unwrap();
+        let retried = blit(&ctx, &["jobs", "retry", &run_id]);
+        let said = format!("{}{}", text(&retried.stdout), text(&retried.stderr));
+        assert_eq!(
+            retried.status.code(),
+            Some(EXIT_PARTIAL_FAILURE),
+            "daemon {from_a_daemon}: {said}"
+        );
+        assert!(
+            said.contains("missing at retry"),
+            "daemon {from_a_daemon}: {said}"
+        );
+        assert_eq!(
+            fs::read(out.join("Report.txt")).unwrap(),
+            b"not the run's to touch",
+            "daemon {from_a_daemon}: the file there is not the child\n{said}"
+        );
+    }
+}

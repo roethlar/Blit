@@ -203,6 +203,8 @@ pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
         filter.files_from = Some(names.into_iter().cloned().collect());
         filter.files_from_unnamed = unnamed;
     }
+    // cr-ecm12-1: a retry's list is of exact paths.
+    filter.files_from_exact = inputs.retry_only.is_some() || inputs.retry_only_raw.is_some();
     if let Some(raw) = inputs.retry_only_raw {
         let listed = filter.files_from.get_or_insert_with(Default::default);
         listed.extend(raw.iter().filter_map(|raw| {
@@ -372,6 +374,8 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
         files_from_raw: Vec::new(),
         files_from_unnamed: Vec::new(),
         files_from_root: false,
+        // cr-ecm12-1: a retry's list is of exact paths.
+        files_from_exact: inputs.retry_only.is_some() || inputs.retry_only_raw.is_some(),
         // EXCLUDE_CASE_MATCHING slice 3 (contract 9): the case mode goes
         // with the patterns, so the peer reads them as this side does.
         ignore_case: inputs.ignore_case,
@@ -2095,6 +2099,39 @@ mod tests {
         let root = Path::new("/srv/Report.txt");
         assert!(received.allows_root_file(Some(Path::new("Report.txt")), root, 1, None));
         assert!(!received.allows_entry(Some(Path::new("Report.txt")), root, 1, None));
+        // cr-ecm12-1: and a retry's list is of EXACT paths, here and at
+        // the peer: a source that is one file called `sub` or `b.txt`
+        // answers to none of them — only to the mark.
+        for filter in [&local, &received] {
+            assert!(filter.files_from_exact);
+            let root = Path::new("/srv/b.txt");
+            assert!(filter.allows_root_file(Some(Path::new("b.txt")), root, 1, None));
+        }
+        let child_only: std::collections::HashSet<PathBuf> = [PathBuf::from("Report.txt")].into();
+        retried.retry_only = Some(&child_only);
+        let root = Path::new("/srv/Report.txt");
+        for filter in [
+            build(&retried).unwrap(),
+            filter_from_spec(build_spec(&retried).unwrap()).unwrap(),
+        ] {
+            assert!(filter.files_from_exact);
+            assert!(
+                !filter.allows_root_file(Some(Path::new("Report.txt")), root, 1, None),
+                "a child's name is not the source's"
+            );
+            assert!(filter.allows_entry(Some(Path::new("Report.txt")), root, 1, None));
+        }
+        // A list a person wrote names a single-file source by its name.
+        let mut listed = inputs(&[], &[]);
+        listed.files_from_read = Some(Ok("Report.txt\n"));
+        for filter in [
+            build(&listed).unwrap(),
+            filter_from_spec(build_spec(&listed).unwrap()).unwrap(),
+        ] {
+            assert!(!filter.files_from_exact);
+            assert!(filter.allows_root_file(Some(Path::new("Report.txt")), root, 1, None));
+        }
+        retried.retry_only = Some(&alone);
         // A list of names holds no such mark: a blank line is no line.
         assert!(FileFilter::files_from_text("\n   \n\nname.txt\n")
             .iter()

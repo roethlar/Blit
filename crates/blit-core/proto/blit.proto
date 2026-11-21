@@ -768,6 +768,12 @@ message FilterSpec {
   // bears the file's old name. Never an entry of `files_from`, where an
   // empty name is refused.
   bool files_from_root = 12;
+  // Contract 22 (cr-ecm12-1): the list holds EXACT paths below the source
+  // — a retry's, each a path that failed — and not names a person typed.
+  // A list of names lets a source that is one file answer to that file's
+  // name; a list of exact paths does not: a child that failed is no
+  // source, whatever the source has become since.
+  bool files_from_exact = 13;
 }
 
 // How the origin decides which files need transfer when both sides

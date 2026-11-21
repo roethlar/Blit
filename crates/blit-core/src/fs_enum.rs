@@ -60,6 +60,13 @@ pub struct FileFilter {
     /// could read one as a name. The source reports each as a listed name
     /// it did not find.
     pub files_from_unnamed: Vec<String>,
+    /// cr-ecm12-1: the list holds EXACT paths below the source — a
+    /// retry's, each a path that failed — and not names typed by a
+    /// person. A `--files-from` list names a source that is one file by
+    /// that file's name (cr-ecm9-3); a retry's list never does: its name
+    /// for the source itself is the empty path, and any other entry of it
+    /// is a CHILD, which a source that has since become one file is not.
+    pub files_from_exact: bool,
     /// EXCLUDE_CASE_MATCHING (D-2026-11-20-1): read every `include_files`
     /// and `exclude_files` pattern ignoring case. Each pattern is widened
     /// once, where it is compiled ([`crate::case_fold::widen_case`]); a
@@ -754,6 +761,7 @@ impl FileFilter {
             reference_time: self.reference_time,
             files_from: self.files_from.clone(),
             files_from_unnamed: self.files_from_unnamed.clone(),
+            files_from_exact: self.files_from_exact,
             ignore_case: self.ignore_case,
             destination: self.destination.clone(),
             pruned: self.pruned.clone(),
@@ -1126,7 +1134,18 @@ impl FileFilter {
         size: u64,
         mtime: Option<SystemTime>,
     ) -> bool {
-        self.lists_the_source_itself() || self.allows_entry(name, abs_path, size, mtime)
+        if self.lists_the_source_itself() {
+            return true;
+        }
+        // cr-ecm12-1: a list of exact paths names the source itself by
+        // that mark and by nothing else. A child that failed is called
+        // `Report.txt`; a source that has since become one file called
+        // `Report.txt` is not that child, and was sent in its place — over
+        // whatever stood at the destination's root.
+        if self.files_from.is_some() && self.files_from_exact {
+            return false;
+        }
+        self.allows_entry(name, abs_path, size, mtime)
     }
 
     /// A list is in force and holds the mark for the source itself.
@@ -1256,6 +1275,7 @@ impl Default for FileFilter {
             reference_time: None,
             files_from: None,
             files_from_unnamed: Vec::new(),
+            files_from_exact: false,
             ignore_case: false,
             destination: None,
             pruned: None,

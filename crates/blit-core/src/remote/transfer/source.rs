@@ -214,6 +214,13 @@ pub trait TransferSource: Send + Sync {
     fn files_from_unnamed(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// cr-ecm12-1: whether that list holds exact paths
+    /// (`FileFilter.files_from_exact`), and so names a source that is one
+    /// file by nothing but the mark for it. Wrappers delegate.
+    fn files_from_exact(&self) -> bool {
+        false
+    }
 }
 
 /// One opened source file (contract v7, SOURCE_SIDE_CONTAINMENT D-A):
@@ -919,6 +926,10 @@ impl TransferSource for WindowsMetadataDroppingSource {
         self.inner.files_from_unnamed()
     }
 
+    fn files_from_exact(&self) -> bool {
+        self.inner.files_from_exact()
+    }
+
     fn root(&self) -> &Path {
         self.inner.root()
     }
@@ -985,6 +996,14 @@ impl TransferSource for FilteredSource {
             self.filter.files_from_unnamed.clone()
         } else {
             self.inner.files_from_unnamed()
+        }
+    }
+
+    fn files_from_exact(&self) -> bool {
+        if self.filter.files_from.is_some() {
+            self.filter.files_from_exact
+        } else {
+            self.inner.files_from_exact()
         }
     }
 
@@ -1099,6 +1118,10 @@ impl TransferSource for ChecksummingSource {
 
     fn files_from_unnamed(&self) -> Vec<String> {
         self.inner.files_from_unnamed()
+    }
+
+    fn files_from_exact(&self) -> bool {
+        self.inner.files_from_exact()
     }
 
     fn root(&self) -> &Path {

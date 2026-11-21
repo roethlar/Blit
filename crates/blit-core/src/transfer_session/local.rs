@@ -670,6 +670,10 @@ impl TransferSource for DestSubtreeExcludedSource {
         self.inner.files_from_unnamed()
     }
 
+    fn files_from_exact(&self) -> bool {
+        self.inner.files_from_exact()
+    }
+
     fn root(&self) -> &Path {
         self.inner.root()
     }
