@@ -705,8 +705,18 @@ pub(crate) fn stream_find(
     });
     let walked = {
         let mut emit = |event: FindEvent| match event {
+            // cr-uv4-2: nobody is waiting for this walk any more — the
+            // asker went away, or was stopped — so it ends here. A walk
+            // that finds nothing sends nothing, and one that removes what
+            // it finds sends nothing for what went: neither would learn
+            // of it from a send that fails.
+            FindEvent::Walking if found.sender.is_closed() => Err(Stopped),
+            FindEvent::Walking => Ok(()),
             FindEvent::Found(path, kind) => match &mut deleting {
                 None => found.add(&path),
+                // Asked again before EACH removal: what is removed after
+                // the asker has gone is removed for nobody.
+                Some(_) if found.sender.is_closed() => Err(Stopped),
                 Some(deleting) => {
                     match deleting.remove(&path, kind == Some(blit_core::find::Kind::Directory)) {
                         Ok(()) => Ok(()),
@@ -1660,6 +1670,110 @@ mod status_mapping_tests {
             find_error.message(),
             "response channel closed (peer disconnected): sending find result"
         );
+    }
+
+    /// cr-uv4-2: a walk nobody is waiting for stops. With the asker gone
+    /// before it began, `find -delete` removes nothing — a removal that
+    /// succeeds sends nothing, so no failed send would have told it —
+    /// and a walk that finds nothing does not go on to its end.
+    #[test]
+    fn find_stops_when_its_asker_has_gone() {
+        let temp = tempdir().expect("tempdir");
+        let module_root = std::fs::canonicalize(temp.path()).expect("canonical tempdir");
+        for dir in ["t/a", "t/b/c"] {
+            std::fs::create_dir_all(module_root.join(dir)).unwrap();
+        }
+        let files = [
+            "t/one.tmp",
+            "t/a/two.tmp",
+            "t/b/c/three.tmp",
+            "t/b/keep.txt",
+        ];
+        for file in files {
+            std::fs::write(module_root.join(file), b"x").unwrap();
+        }
+        let gone = || {
+            let (sender, receiver) = tokio::sync::mpsc::channel(1);
+            drop(receiver);
+            sender
+        };
+        let named = |pattern: &[u8]| FindOptions {
+            names: vec![blit_core::find_name::NamePattern::new(pattern, false).unwrap()],
+            ..FindOptions::default()
+        };
+        let deleting = || DeleteFound {
+            start_is_module: false,
+            start_ends_in_dot: false,
+        };
+        // Everything found would be removed, in silence.
+        for options in [
+            FindOptions {
+                contents_first: true,
+                ..FindOptions::default()
+            },
+            FindOptions {
+                contents_first: true,
+                ..named(b"*.tmp")
+            },
+        ] {
+            let ended = stream_find(
+                module_root.clone(),
+                read_start(b"t").expect("a start"),
+                b"t".to_vec(),
+                options,
+                Some(deleting()),
+                &gone(),
+            )
+            .expect_err("nobody is waiting");
+            assert_eq!(ended.code(), Code::Cancelled);
+            for file in files {
+                assert!(module_root.join(file).exists(), "{file} was removed");
+            }
+        }
+        // A start that is a file is found before any directory is read:
+        // the walk has had no word with its caller, and the removal asks.
+        let ended = stream_find(
+            module_root.clone(),
+            read_start(b"t/one.tmp").expect("a start"),
+            b"one.tmp".to_vec(),
+            FindOptions {
+                contents_first: true,
+                ..FindOptions::default()
+            },
+            Some(deleting()),
+            &gone(),
+        )
+        .expect_err("nobody is waiting");
+        assert_eq!(ended.code(), Code::Cancelled);
+        assert!(module_root.join("t/one.tmp").exists());
+        // A walk that finds nothing has nothing to send, and stops too.
+        let ended = stream_find(
+            module_root.clone(),
+            read_start(b"t").expect("a start"),
+            b"t".to_vec(),
+            named(b"no such name"),
+            None,
+            &gone(),
+        )
+        .expect_err("nobody is waiting");
+        assert_eq!(ended.code(), Code::Cancelled);
+        // With its asker there, the same request removes what it found.
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(64);
+        stream_find(
+            module_root.clone(),
+            read_start(b"t").expect("a start"),
+            b"t".to_vec(),
+            FindOptions {
+                contents_first: true,
+                ..named(b"*.tmp")
+            },
+            Some(deleting()),
+            &sender,
+        )
+        .expect("the walk");
+        assert!(receiver.try_recv().is_err(), "nothing is said of what went");
+        assert!(!module_root.join("t/b/c/three.tmp").exists());
+        assert!(module_root.join("t/b/keep.txt").exists());
     }
 
     /// Slice 4: nothing goes THROUGH a link. A start that is a link typed

@@ -192,6 +192,13 @@ pub struct FindFailure {
 /// What [`find`] hands its caller, in order.
 #[derive(Debug)]
 pub enum FindEvent {
+    /// The walk goes on: it is about to read a directory, or has read
+    /// another [`ENTRIES_BETWEEN_WORDS`] entries of one. Nothing was
+    /// found and nothing failed — it is the caller's moment to stop a
+    /// walk nobody is waiting for (cr-uv4-2), which a walk that finds
+    /// nothing, or removes what it finds and says nothing of it, would
+    /// otherwise never give.
+    Walking,
     /// An entry every test holds for: its path below the start, empty for
     /// the start itself — and what kind of entry it is, where it is one of
     /// the three.
@@ -225,6 +232,10 @@ pub(crate) fn lookups() -> usize {
 pub fn name_bytes(name: &std::ffi::OsStr) -> std::borrow::Cow<'_, [u8]> {
     crate::fs_enum::match_bytes(name)
 }
+
+/// How many entries of one directory the walk reads between two
+/// [`FindEvent::Walking`].
+pub const ENTRIES_BETWEEN_WORDS: usize = 1024;
 
 /// The one place the walk asks the filesystem about a single entry.
 fn look_up(path: &Path, follow: bool) -> io::Result<fs::Metadata> {
@@ -270,13 +281,17 @@ pub fn find(
         /// The directory is itself found, and is given once everything
         /// in it has been (`contents_first`).
         found_last: bool,
+        /// Entries read since the caller last had a word.
+        read: usize,
     }
     let mut frames: Vec<Frame> = Vec::new();
+    emit(FindEvent::Walking).map_err(FindEnd::Stopped)?;
     match fs::read_dir(start) {
         Ok(entries) => frames.push(Frame {
             relative_path: PathBuf::new(),
             entries,
             found_last: start_last,
+            read: 0,
         }),
         Err(error) => {
             emit(FindEvent::Failure(FindFailure {
@@ -299,6 +314,11 @@ pub fn find(
             }
             continue;
         };
+        frame.read += 1;
+        if frame.read >= ENTRIES_BETWEEN_WORDS {
+            frame.read = 0;
+            emit(FindEvent::Walking).map_err(FindEnd::Stopped)?;
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -354,11 +374,13 @@ pub fn find(
         if !enter {
             continue;
         }
+        emit(FindEvent::Walking).map_err(FindEnd::Stopped)?;
         match fs::read_dir(entry.path()) {
             Ok(entries) => frames.push(Frame {
                 relative_path,
                 entries,
                 found_last: last,
+                read: 0,
             }),
             Err(error) => {
                 emit(FindEvent::Failure(FindFailure {
@@ -398,6 +420,7 @@ mod tests {
         let (mut found, mut failed) = (Vec::new(), Vec::new());
         find(start, name.as_bytes(), options, &mut |event| {
             match event {
+                FindEvent::Walking => {}
                 FindEvent::Found(path, _) => found.push(path.to_string_lossy().replace('\\', "/")),
                 FindEvent::Failure(failure) => {
                     failed.push(failure.relative_path.to_string_lossy().replace('\\', "/"))
@@ -616,6 +639,73 @@ mod tests {
                 .collect();
             assert_eq!(holds.join(" "), found, "{test:?}");
         }
+    }
+
+    /// cr-uv4-2: the walk gives its caller a word before each directory
+    /// it reads and every [`ENTRIES_BETWEEN_WORDS`] entries of one, found
+    /// or not — and stops there when told to, before anything more is
+    /// read or given.
+    #[test]
+    fn the_walk_can_be_stopped_though_it_finds_nothing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let start = tmp.path().join("t");
+        fs::create_dir_all(start.join("a/b")).unwrap();
+        fs::create_dir(start.join("many")).unwrap();
+        for n in 0..(2 * ENTRIES_BETWEEN_WORDS + 5) {
+            fs::write(start.join("many").join(format!("f{n}")), b"").unwrap();
+        }
+        let nothing = FindOptions {
+            names: vec![named("no such name", false)],
+            ..FindOptions::default()
+        };
+        let mut words = 0;
+        find(&start, b"t", &nothing, &mut |event| {
+            match event {
+                FindEvent::Walking => words += 1,
+                other => panic!("nothing is found: {other:?}"),
+            }
+            Ok(())
+        })
+        .expect("the walk");
+        // Four directories read, and two more words inside the long one.
+        assert_eq!(words, 4 + 2);
+        // Stopped at the first word: nothing was read, nothing given.
+        let mut given = Vec::new();
+        let ended = find(
+            &start,
+            b"t",
+            &FindOptions::default(),
+            &mut |event| match event {
+                FindEvent::Walking => Err(Stopped),
+                FindEvent::Found(path, _) => {
+                    given.push(path);
+                    Ok(())
+                }
+                FindEvent::Failure(failed) => panic!("{failed:?}"),
+            },
+        );
+        assert!(matches!(ended, Err(FindEnd::Stopped(Stopped))));
+        assert_eq!(given, [PathBuf::new()], "the start, and no more");
+        // Contents first, the start is not given at all: it is given
+        // last, and the walk never came to it.
+        let mut given = 0;
+        let ended = find(
+            &start,
+            b"t",
+            &FindOptions {
+                contents_first: true,
+                ..FindOptions::default()
+            },
+            &mut |event| match event {
+                FindEvent::Walking => Err(Stopped),
+                _ => {
+                    given += 1;
+                    Ok(())
+                }
+            },
+        );
+        assert!(matches!(ended, Err(FindEnd::Stopped(Stopped))));
+        assert_eq!(given, 0);
     }
 
     /// cr-uv4-4: an age is what has ELAPSED, cut to whole days — not the
