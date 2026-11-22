@@ -1,9 +1,9 @@
 # cr-ecm19-4: the working mode of every resume's partial
 
 **Severity**: HIGH — the wire resume patched a partial of the usual mode, a fresh local partial could be unwritable or readable, and every ordinary destination was copied whole instead of patched
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r21` (Codex openreview, 2026-11-22) reviewed `c15ebf5a..b92c9a17` — the seven `combined-r20` fixes — with `guard_confirmed: true`. "Each block and the final truncation reopen the destination by name. If the destination changes after hashing, the sender can skip a block that matched the original file, and the receiver can report the replacement complete with incorrect bytes. Retain the hashed file's identity, detect a changed baseline, and verify delivery before acknowledging completion." "Before the source supplies a block, hashing can change the destination's mode or unlink it after a denied `chmod`. A source skip or disconnect can therefore leave the original changed or gone. If both operations fail, the receiver warns and can still patch with the old permissions. Keep negotiation read-only and require the writer to establish safe access before patching. A previously opened reader also retains access to a reused inode, which matters when the source is more private." "In my Linux probe, a six-byte `0444` source followed by a final metadata error left a seven-byte `0444` partial. After I cleared the fault, the retry failed with `Permission denied`. Apply the source mode at successful completion, restore `0600` through the held handle on failure, and preserve recovery of existing owner-controlled read-only partials." The remaining work is cr-ecm20-1, cr-ecm20-2 and cr-ecm20-3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm19-4`)
+**Commit**: `af308007`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r20` over `17f4eb97..c15ebf5a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r20.codex.md`. It completes cr-ecm18-2 (`7413b6c6`).
 
 ## Evidence

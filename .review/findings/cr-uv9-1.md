@@ -1,9 +1,9 @@
 # cr-uv9-1: a daemon read was not bound to the start its check passed
 
 **Severity**: HIGH — `ls`, `du` or `find` can read outside the module: a start, or a directory below it, replaced by a link after the check, is read through the link
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r21` (Codex openreview, 2026-11-22) reviewed `c15ebf5a..b92c9a17` — the seven `combined-r20` fixes — with `guard_confirmed: true`. "Unix reopens the checked module root by absolute pathname, so changing an ancestor can redirect that open. Windows still opens child directories by pathname after the check. Pass a verified root handle into the walk and use handle-relative descent on both platforms." "The walker evaluates `-size` through its held directory. The remover receives a pathname and opens the parent separately. If that directory is replaced before its first matching entry is removed, a same-named file of a different size can be deleted. Carry the observed parent and entry identity into removal." "With search permission removed from the module's parent, my Linux probe observed `EACCES`. The daemon converted it into a request-level containment refusal, bypassing the utility's operand-error reporting. Return the observed lookup error to the verb." The remaining work is cr-uv10-1, cr-uv10-2 and cr-uv10-3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv9-1`)
+**Commit**: `5a663780`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r20` over `17f4eb97..c15ebf5a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r20.codex.md`. It completes cr-uv8-2 (`31e8a0c6`).
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-ecm19-2: a streamed write was reported delivered without asking whose file stood at its name
 
 **Severity**: HIGH — a move can remove a source whose copy was never delivered: the destination holds a file somebody put there while the record arrived
-**Status**: Fixed on Unix, awaiting review
+**Status**: Verified — `combined-r21` (Codex openreview, 2026-11-22) reviewed `c15ebf5a..b92c9a17` — the seven `combined-r20` fixes — with `guard_confirmed: true`: "Ordinary Unix streams and shard members verify the destination identity at delivery. I would keep all three changes." Its known gaps — a local copy's own write, and Windows — are cr-ecm20-4's
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm19-2`)
+**Commit**: `3f7d60b4`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r20` over `17f4eb97..c15ebf5a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r20.codex.md`. It completes cr-ecm18-1 (`ba0191ee`).
 
 ## Evidence

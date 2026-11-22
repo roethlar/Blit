@@ -1,9 +1,9 @@
 # cr-ecm19-3: the creation guard settled with no length
 
 **Severity**: HIGH — a record of one byte cancelled where its file cannot be removed leaves one zero byte, which the next run takes for a copy
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r21` (Codex openreview, 2026-11-22) reviewed `c15ebf5a..b92c9a17` — the seven `combined-r20` fixes — with `guard_confirmed: true`: "The creation guard now uses the record's actual length"
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm19-3`)
+**Commit**: `00edeca4`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r20` over `17f4eb97..c15ebf5a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r20.codex.md`. It completes cr-ecm18-1 (`ba0191ee`).
 
 ## Evidence

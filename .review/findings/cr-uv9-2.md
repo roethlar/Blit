@@ -1,9 +1,9 @@
 # cr-uv9-2: a move's descriptor was read before it was looked at
 
 **Severity**: MEDIUM — a descriptor that is another file is read for as long as the file that was seen before it is refused
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r21` (Codex openreview, 2026-11-22) reviewed `c15ebf5a..b92c9a17` — the seven `combined-r20` fixes — with `guard_confirmed: true`: "Move hashing checks the descriptor before and after reading"
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv9-2`)
+**Commit**: `4222bd3d`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r20` over `17f4eb97..c15ebf5a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r20.codex.md`. It completes cr-uv8-1 (`81b6c829`).
 
 ## Evidence

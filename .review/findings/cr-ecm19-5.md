@@ -1,9 +1,9 @@
 # cr-ecm19-5: a `/` inside a class anchored the pattern in the case line's proof
 
 **Severity**: MEDIUM — the deletion prompt's case line names a spelling `--ignore-case` would add that matches a file the typed pattern already matches
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r21` (Codex openreview, 2026-11-22) reviewed `c15ebf5a..b92c9a17` — the seven `combined-r20` fixes — with `guard_confirmed: true`. "The CLI advertised `A{/,X}*1` as an additional match for `a{/,x}*1`. Both case-sensitive runs copied `A/ax1`. A slash in one alternative cannot establish that every match starts at the root." The remaining work is cr-ecm20-5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm19-5`)
+**Commit**: `f764e6b8`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r20` over `17f4eb97..c15ebf5a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r20.codex.md`. It completes cr-ecm18-4 (`19161cc4`).
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-ecm19-1: a local resume's cleanup was armed before its partial was had
 
 **Severity**: HIGH — a resume that cannot take its destination cuts the user's file to one byte longer than the source
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r21` (Codex openreview, 2026-11-22) reviewed `c15ebf5a..b92c9a17` — the seven `combined-r20` fixes — with `guard_confirmed: true`. "A successful local resume retains a handle for cleanup but leaves its delivery identity unset. A concurrent rename can therefore cause the replacement to receive the timestamp and the copy to report success. A failed `try_clone()` silently restores pathname-based cleanup. On Windows, streams and shards also accept an unavailable identity as success. Use the writer's handle through final metadata and verification, and retain a move source whenever delivery is uncertain." The remaining work is cr-ecm20-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm19-1`)
+**Commit**: `c8130e4a`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r20` over `17f4eb97..c15ebf5a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r20.codex.md`. It completes cr-ecm18-2 (`7413b6c6`).
 
 ## Evidence
