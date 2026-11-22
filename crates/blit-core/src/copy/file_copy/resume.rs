@@ -72,8 +72,11 @@ pub fn resume_copy_file(src: &Path, dst: &Path, block_size: usize) -> Result<Res
 /// or one this run cannot write, is not reused: it is removed and a fresh
 /// one made. A destination that is not a regular file — a link — is
 /// opened as it always was.
+///
+/// cr-ecm19-1: this is the acquisition. Until it returns, nothing is
+/// this resume's: a caller arms its cleanup only once it has the file.
 #[cfg(unix)]
-fn open_partial(dst: &Path) -> Result<(File, u64)> {
+pub fn open_resume_partial(dst: &Path) -> Result<(File, u64)> {
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
     let fresh = || -> Result<(File, u64)> {
         let file = OpenOptions::new()
@@ -124,8 +127,9 @@ fn open_partial(dst: &Path) -> Result<(File, u64)> {
     }
 }
 
+/// The partial a resume patches, and how much of it there already is.
 #[cfg(not(unix))]
-fn open_partial(dst: &Path) -> Result<(File, u64)> {
+pub fn open_resume_partial(dst: &Path) -> Result<(File, u64)> {
     let dst_len = std::fs::metadata(dst).map(|m| m.len()).unwrap_or(0);
     let file = OpenOptions::new()
         .read(true)
@@ -148,15 +152,28 @@ pub fn resume_copy_from(
     dst: &Path,
     block_size: usize,
 ) -> Result<ResumeCopyOutcome> {
-    src_file.seek(SeekFrom::Start(0))?;
-
     // Ensure parent directory exists
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating parent directory: {}", parent.display()))?;
     }
 
-    let (mut dst_file, dst_len) = open_partial(dst)?;
+    let (dst_file, dst_len) = open_resume_partial(dst)?;
+    resume_copy_into(src_file, src_len, dst_file, dst_len, dst, block_size)
+}
+
+/// [`resume_copy_from`] into a partial already had (cr-ecm19-1):
+/// `dst_file`, `dst_len` bytes long, from [`open_resume_partial`]. `dst`
+/// names it in what is said.
+pub fn resume_copy_into(
+    src_file: &mut File,
+    src_len: u64,
+    mut dst_file: File,
+    dst_len: u64,
+    dst: &Path,
+    block_size: usize,
+) -> Result<ResumeCopyOutcome> {
+    src_file.seek(SeekFrom::Start(0))?;
 
     // cr-win-1: while blocks are patched in place the destination must
     // never be the source's size — an interruption would otherwise leave a

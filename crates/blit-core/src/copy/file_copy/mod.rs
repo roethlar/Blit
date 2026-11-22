@@ -4,7 +4,9 @@ mod mmap;
 pub mod resume;
 
 pub use mmap::mmap_copy_file;
-pub use resume::{resume_copy_file, resume_copy_from, ResumeCopyOutcome};
+pub use resume::{
+    open_resume_partial, resume_copy_file, resume_copy_from, resume_copy_into, ResumeCopyOutcome,
+};
 
 use crate::buffer::BufferSizer;
 use eyre::{eyre, Result};

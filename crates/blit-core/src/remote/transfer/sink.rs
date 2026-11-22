@@ -2746,6 +2746,9 @@ struct PartialTarget<'a> {
     /// says which file is which. Only that file is this write's to
     /// remove: one put under the name since is somebody's.
     made: Option<(u64, u64)>,
+    /// cr-ecm19-1: the file a resume HAS, for its failure to be marked
+    /// through — not whatever stands at the name by then.
+    held: Option<std::fs::File>,
 }
 
 impl<'a> PartialTarget<'a> {
@@ -2755,10 +2758,18 @@ impl<'a> PartialTarget<'a> {
             source_size,
             armed: None,
             made: None,
+            held: None,
         }
     }
 
     fn arm(&mut self, on_failure: OnFailure) {
+        self.armed = Some(on_failure);
+    }
+
+    /// Armed for a file this write HAS (cr-ecm19-1): a failure settles it
+    /// through a handle to it.
+    fn arm_held(&mut self, held: &std::fs::File, on_failure: OnFailure) {
+        self.held = held.try_clone().ok();
         self.armed = Some(on_failure);
     }
 
@@ -2790,7 +2801,7 @@ impl<'a> PartialTarget<'a> {
         match self.armed.take() {
             Some(on_failure) => FailedWrite::settled(
                 error,
-                settle_failed_target(self.dst, None, self.source_size, on_failure),
+                settle_failed_target(self.dst, self.held.take(), self.source_size, on_failure),
             ),
             None => FailedWrite::from(error),
         }
@@ -2803,7 +2814,7 @@ impl Drop for PartialTarget<'_> {
             if self.no_longer_its_own() {
                 return;
             }
-            let _ = settle_failed_target(self.dst, None, self.source_size, on_failure);
+            let _ = settle_failed_target(self.dst, self.held.take(), self.source_size, on_failure);
         }
     }
 }
@@ -2959,8 +2970,17 @@ fn copy_and_stamp_opened(
         // `resume_copy_from` holds it one byte longer than the source until
         // it completes; a failure after that keeps it marked the same way.
         let created = std::fs::symlink_metadata(dst).is_err();
-        partial.arm(OnFailure::KeepUnfinished { created });
-        let outcome = crate::copy::resume_copy_from(src_file, header.size, dst, 0)
+        // cr-ecm19-1: the partial is HAD first, and nothing is armed until
+        // it is: one that cannot be had is left exactly as it stands. Armed
+        // before, a failure to have it was settled by name — a file this run
+        // could write but not take was cut to one byte longer than the
+        // source. From here a failure marks the partial through a handle to
+        // it, not whatever stands at the name.
+        let (held, held_len) = crate::copy::open_resume_partial(dst)
+            .with_context(|| format!("resume copy {}", header.relative_path))?;
+        partial.arm_held(&held, OnFailure::KeepUnfinished { created });
+        run_after_claim_hook(dst);
+        let outcome = crate::copy::resume_copy_into(src_file, header.size, held, held_len, dst, 0)
             .with_context(|| format!("resume copy {}", header.relative_path))?;
         did_copy = outcome.bytes_transferred > 0;
     } else if crate::copy::file_needs_copy_with_mode_opened(
@@ -7358,6 +7378,89 @@ mod cr_win_1_tests {
                 outcome.failures
             );
         }
+    }
+
+    /// cr-ecm19-1: a local resume that cannot have its partial — a file
+    /// this run may write but not read, in a folder closed to removals —
+    /// leaves it exactly as it stands. Its cleanup was armed first and
+    /// marked the name: the file was cut to one byte longer than the
+    /// source. And one that has it marks THAT file when it fails, through
+    /// its handle: another file moved over the name since is untouched.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_local_resume_settles_only_the_partial_it_has() {
+        use std::os::unix::fs::PermissionsExt as _;
+        struct Opened(PathBuf);
+        impl Drop for Opened {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+                if let Ok(mut hooks) = AFTER_CLAIM_HOOKS.lock() {
+                    hooks.retain(|(prefix, _)| !prefix.starts_with(&self.0));
+                }
+            }
+        }
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        let _opened = Opened(dst.clone());
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::write(dst.join("probe"), b"").is_ok() {
+            eprintln!("skipped: this process is not barred by a directory's mode");
+            return;
+        }
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(src.join("kept.bin"), b"new").unwrap();
+        let before = b"prev and twenty-five more by".to_vec();
+        std::fs::write(dst.join("kept.bin"), &before).unwrap();
+        std::fs::set_permissions(dst.join("kept.bin"), std::fs::Permissions::from_mode(0o200))
+            .unwrap();
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let sink = FsTransferSink::new(
+            src.clone(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let outcome = sink
+            .write_payload(PreparedPayload::File(make_file_header("kept.bin", 3)))
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(dst.join("kept.bin"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        assert_eq!(
+            std::fs::read(dst.join("kept.bin")).unwrap(),
+            before,
+            "left as it stood"
+        );
+
+        // Had, then another file moved over the name, then a failure.
+        std::fs::write(src.join("moved.bin"), b"0123456789").unwrap();
+        std::fs::write(dst.join("moved.bin"), b"abcdefghij").unwrap();
+        std::fs::set_permissions(
+            dst.join("moved.bin"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let theirs = tmp.path().join("theirs");
+        std::fs::write(&theirs, b"somebody's").unwrap();
+        let at = dst.join("moved.bin");
+        AFTER_CLAIM_HOOKS.lock().unwrap().push((
+            at.clone(),
+            Arc::new(move |name: &Path| std::fs::rename(&theirs, name).unwrap()),
+        ));
+        let _fault = TailFaultGuard::install(&dst);
+        let outcome = sink
+            .write_payload(PreparedPayload::File(make_file_header("moved.bin", 10)))
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        assert_eq!(std::fs::read(&at).unwrap(), b"somebody's", "untouched");
     }
 
     /// cr-ecm13-1: under `--ignore-existing` the local route's resume copy
