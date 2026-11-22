@@ -1274,7 +1274,7 @@ impl FsTransferSink {
         &self,
         dst: &Path,
         windows_metadata: Option<&crate::generated::WindowsFileMetadata>,
-    ) -> Result<tokio::fs::File> {
+    ) -> Result<Made> {
         let parent_readiness = match dst.parent() {
             Some(parent) => Some((parent, self.ensure_parent_ready(parent).await?)),
             None => None,
@@ -1291,15 +1291,28 @@ impl FsTransferSink {
             return Err(error);
         }
 
-        let create = || async {
-            let mut options = tokio::fs::OpenOptions::new();
-            options.write(true);
-            if new_only {
-                options.create_new(true);
-            } else {
-                options.create(true).truncate(true);
+        // cr-ecm18-1: the file is made, and which file it is noted, in ONE
+        // blocking step, which hands it back as a [`Made`]: unclaimed — the
+        // record that asked for it cancelled while it was being made — it
+        // removes itself. It was made by an open that, cancelled, made the
+        // file all the same and gave it to nobody.
+        let create = || {
+            let dst = dst.to_path_buf();
+            async move {
+                tokio::task::spawn_blocking(move || -> std::io::Result<Made> {
+                    let file = create_to_write(&dst, new_only)?;
+                    let identity = file.metadata().ok().as_ref().and_then(file_identity);
+                    let made = Made {
+                        file: Some(file),
+                        dst,
+                        identity,
+                    };
+                    while_a_file_is_made(&made.dst);
+                    Ok(made)
+                })
+                .await
+                .map_err(std::io::Error::other)?
             }
-            options.open(dst).await
         };
         match create().await {
             Ok(file) => Ok(file),
@@ -1688,8 +1701,19 @@ impl TransferSink for FsTransferSink {
         let prepared = self
             .create_stream_destination(&dst, header.windows_metadata.as_ref())
             .await;
+        // cr-ecm18-1: claimed, with nothing awaited between, by the writer
+        // whose guard removes what it made — the file it made, by which
+        // file it is (cr-ecm17-1: a record cancelled while it noted that
+        // left an empty file).
+        let mut own = None;
         let mode = match prepared {
-            Ok(file) => FsRecordMode::Real { file: Some(file) },
+            Ok(made) => {
+                let (file, identity) = made.claim();
+                own = identity;
+                FsRecordMode::Real {
+                    file: Some(tokio::fs::File::from_std(file)),
+                }
+            }
             Err(error)
                 if !failure_is_containable(&self.dst_root, &header.relative_path, &error) =>
             {
@@ -1697,17 +1721,10 @@ impl TransferSink for FsTransferSink {
             }
             Err(error) => FsRecordMode::Discard(error),
         };
-        // cr-ecm17-1: the writer — whose guard removes what it made — is
-        // there from the moment the file is, BEFORE anything else is
-        // awaited. Noting which file it made (cr-ecm16-2) came first, and
-        // a record cancelled there left an empty file that a later run
-        // keeping what exists took for somebody's.
         let mut writer = FsRecordWriter::new(self, header.clone(), dst, mode);
+        writer.own = own;
         if self.config.ignore_existing {
-            if let FsRecordMode::Real { file: Some(file) } = &writer.mode {
-                run_after_claim_hook(&writer.dst);
-                writer.made = file.metadata().await.ok().as_ref().and_then(file_identity);
-            }
+            writer.made = own;
         }
         Ok(Box::new(writer))
     }
@@ -1748,9 +1765,12 @@ struct FsRecordWriter<'a> {
     /// that looks finished).
     guard_armed: bool,
     /// cr-ecm16-2: which file a run that keeps what exists made at the
-    /// name. The record lands, and its target is settled, only while that
-    /// file stands there.
+    /// name. The record lands only while that file stands there.
     made: Option<(u64, u64)>,
+    /// cr-ecm18-1: which file this record made, whatever the run: its
+    /// target is settled only while that file stands at the name, with or
+    /// without the handle.
+    own: Option<(u64, u64)>,
 }
 
 impl<'a> FsRecordWriter<'a> {
@@ -1765,6 +1785,7 @@ impl<'a> FsRecordWriter<'a> {
             reported: 0,
             guard_armed,
             made: None,
+            own: None,
         }
     }
 
@@ -1777,7 +1798,7 @@ impl<'a> FsRecordWriter<'a> {
             FsRecordMode::Real { file } => file.take().and_then(|file| file.try_into_std().ok()),
             _ => None,
         };
-        let settled = settle_own_target(&self.dst, handle, self.header.size, self.made);
+        let settled = settle_own_target(&self.dst, handle, self.header.size, self.own);
         if let Some(note) = &settled.note {
             log::warn!("{}: {note}", self.dst.display());
         }
@@ -1872,110 +1893,124 @@ impl RecordWriter for FsRecordWriter<'_> {
         let header = self.header.clone();
         let dst = self.dst.clone();
         let sink = self.sink;
-        match std::mem::replace(&mut self.mode, FsRecordMode::DryRun) {
-            FsRecordMode::DryRun => {
-                self.guard_armed = false;
-                Ok(SinkOutcome::written(1, 0))
-            }
-            FsRecordMode::Discard(error) => {
-                self.guard_armed = false;
-                per_file_failure(&sink.dst_root, &header.relative_path, error)
-            }
-            FsRecordMode::Real { file } => {
-                let Some(mut file) = file else {
-                    eyre::bail!("record for {} committed twice", header.relative_path);
-                };
-                if self.written != header.size {
-                    // The callers enforce the ok-requires-size rule
-                    // before committing; reaching here is a caller bug,
-                    // never a file the destination may finalise.
-                    self.mode = FsRecordMode::Real { file: Some(file) };
-                    self.remove_partial();
-                    self.withdraw_reported();
+        // cr-ecm18-1: a real record's file stays IN the writer — its guard
+        // armed, its handle with it — until nothing more is awaited.
+        if !matches!(self.mode, FsRecordMode::Real { .. }) {
+            return match std::mem::replace(&mut self.mode, FsRecordMode::DryRun) {
+                FsRecordMode::Discard(error) => {
                     self.guard_armed = false;
-                    eyre::bail!(
-                        "record for {} committed at {} byte(s), header promised {}",
-                        header.relative_path,
-                        self.written,
-                        header.size
-                    );
+                    per_file_failure(&sink.dst_root, &header.relative_path, error)
                 }
-                // From here the record is fully consumed: every failure
-                // below concerns exactly this file, and is settled here
-                // rather than by the drop guard so its reason can say what
-                // stayed behind. cr-win-1: a failed flush or metadata tail
-                // no longer leaves the written bytes in place — same size,
-                // stamped at the write time, they passed for a finished
-                // copy on every later compare.
-                //
-                // cr-ecm17-1: the guard stays armed through the two awaits
-                // below — a record cancelled in them left its file, the
-                // guard already off — and is let go only once nothing more
-                // is awaited.
-                let written = {
-                    use tokio::io::AsyncWriteExt as _;
-                    // Flush the tokio File's internal buffer state (does
-                    // NOT fsync — just ensures user-space buffering is
-                    // drained before we apply mtime through the retained
-                    // handle). Without this, set_file_mtime raced deferred
-                    // writes from tokio's blocking-thread pool.
-                    //
-                    // POST_REVIEW_FIXES §1.1: flush failure is a data-loss
-                    // signal — never swallowed; the record is fully
-                    // consumed by now, so it is this file's failure.
-                    file.flush()
-                        .await
-                        .with_context(|| format!("flushing {}", dst.display()))
-                };
-                // Intentionally no sync_all: ZFS commits per fsync are
-                // multi-second on spinning rust and crater throughput
-                // (9.3 → 3.3 Gbps observed). The transfer's durability
-                // signal is its END marker plus the OS's own flush;
-                // matches rsync's default behavior.
+                _ => {
+                    self.guard_armed = false;
+                    Ok(SinkOutcome::written(1, 0))
+                }
+            };
+        }
+        if !matches!(self.mode, FsRecordMode::Real { file: Some(_) }) {
+            eyre::bail!("record for {} committed twice", header.relative_path);
+        }
+        if self.written != header.size {
+            // The callers enforce the ok-requires-size rule
+            // before committing; reaching here is a caller bug,
+            // never a file the destination may finalise.
+            self.remove_partial();
+            self.withdraw_reported();
+            self.guard_armed = false;
+            eyre::bail!(
+                "record for {} committed at {} byte(s), header promised {}",
+                header.relative_path,
+                self.written,
+                header.size
+            );
+        }
+        // From here the record is fully consumed: every failure
+        // below concerns exactly this file, and is settled here
+        // rather than by the drop guard so its reason can say what
+        // stayed behind. cr-win-1: a failed flush or metadata tail
+        // no longer leaves the written bytes in place — same size,
+        // stamped at the write time, they passed for a finished
+        // copy on every later compare.
+        //
+        // cr-ecm17-1: the guard stays armed through the two awaits
+        // below — a record cancelled in them left its file, the
+        // guard already off — and is let go only once nothing more
+        // is awaited.
+        let written = {
+            use tokio::io::AsyncWriteExt as _;
+            // Flush the tokio File's internal buffer state (does
+            // NOT fsync — just ensures user-space buffering is
+            // drained before we apply mtime through the retained
+            // handle). Without this, set_file_mtime raced deferred
+            // writes from tokio's blocking-thread pool.
+            //
+            // POST_REVIEW_FIXES §1.1: flush failure is a data-loss
+            // signal — never swallowed; the record is fully
+            // consumed by now, so it is this file's failure.
+            let FsRecordMode::Real { file: Some(file) } = &mut self.mode else {
+                unreachable!("a real record's file, checked above");
+            };
+            file.flush()
+                .await
+                .with_context(|| format!("flushing {}", dst.display()))
+        };
+        // Intentionally no sync_all: ZFS commits per fsync are
+        // multi-second on spinning rust and crater throughput
+        // (9.3 → 3.3 Gbps observed). The transfer's durability
+        // signal is its END marker plus the OS's own flush;
+        // matches rsync's default behavior.
 
-                // Metadata tail, past the last wire byte of the record.
-                // sf-3c: on a successful write the descriptor is retained
-                // through this tail instead of being dropped and reopened
-                // by path — `stamp_streamed_metadata_via_handle` removes
-                // the openat+close pair sf-3a measured at one/file. A
-                // failed flush has nothing to stamp, so its handle is
-                // dropped immediately.
-                let std_file = file.into_std().await;
-                self.guard_armed = false;
-                let made = self.made;
-                let stamped = written
-                    .and_then(|()| {
-                        #[cfg(test)]
-                        sink.handle_metadata_stamps
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        stamp_streamed_metadata_via_handle(&std_file, &dst, &header, &sink.config)
-                    })
-                    // cr-ecm16-2: delivered only if what was written is
-                    // what stands at the name. A file moved over it while
-                    // the record arrived is kept, and this one did not land.
-                    .and_then(|windows_bytes| still_its_own(&dst, made).map(|()| windows_bytes));
-                let stamped = stamped.map_err(|error| {
-                    FailedWrite::settled(
-                        error,
-                        settle_own_target(&dst, Some(std_file), header.size, made),
-                    )
-                });
-                match stamped {
-                    Ok(windows_bytes) => Ok(SinkOutcome::written(
-                        1,
-                        header.size.saturating_add(windows_bytes),
-                    )),
-                    Err(error) => {
-                        // pfc-4 byte-lane reconciliation: the chunk hook
-                        // already reported this file's payload to the LIVE
-                        // counter while the outcome below counts zero for
-                        // a contained failure. Give those bytes back so
-                        // the live lane never claims work the
-                        // authoritative summary denies.
-                        self.withdraw_reported();
-                        failed_write_outcome(&sink.dst_root, &header.relative_path, error)
-                    }
-                }
+        // Metadata tail, past the last wire byte of the record.
+        // sf-3c: on a successful write the descriptor is retained
+        // through this tail instead of being dropped and reopened
+        // by path — `stamp_streamed_metadata_via_handle` removes
+        // the openat+close pair sf-3a measured at one/file. A
+        // failed flush has nothing to stamp, so its handle is
+        // dropped immediately.
+        // After the flush nothing is in flight, so the handle comes
+        // back without another await.
+        let FsRecordMode::Real { file } = std::mem::replace(&mut self.mode, FsRecordMode::DryRun)
+        else {
+            unreachable!("a real record's file, checked above");
+        };
+        let file = file.expect("a real record's file, checked above");
+        let std_file = match file.try_into_std() {
+            Ok(std_file) => std_file,
+            Err(file) => file.into_std().await,
+        };
+        self.guard_armed = false;
+        let (made, own) = (self.made, self.own);
+        let stamped = written
+            .and_then(|()| {
+                #[cfg(test)]
+                sink.handle_metadata_stamps
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                stamp_streamed_metadata_via_handle(&std_file, &dst, &header, &sink.config)
+            })
+            // cr-ecm16-2: delivered only if what was written is
+            // what stands at the name. A file moved over it while
+            // the record arrived is kept, and this one did not land.
+            .and_then(|windows_bytes| still_its_own(&dst, made).map(|()| windows_bytes));
+        let stamped = stamped.map_err(|error| {
+            FailedWrite::settled(
+                error,
+                settle_own_target(&dst, Some(std_file), header.size, own),
+            )
+        });
+        match stamped {
+            Ok(windows_bytes) => Ok(SinkOutcome::written(
+                1,
+                header.size.saturating_add(windows_bytes),
+            )),
+            Err(error) => {
+                // pfc-4 byte-lane reconciliation: the chunk hook
+                // already reported this file's payload to the LIVE
+                // counter while the outcome below counts zero for
+                // a contained failure. Give those bytes back so
+                // the live lane never claims work the
+                // authoritative summary denies.
+                self.withdraw_reported();
+                failed_write_outcome(&sink.dst_root, &header.relative_path, error)
             }
         }
     }
@@ -2274,11 +2309,69 @@ fn settle_own_target(
     source_size: u64,
     made: Option<(u64, u64)>,
 ) -> Settled {
-    if made.is_some_and(|made| identity_at(dst) != Some(made)) {
-        return REMOVED;
-    }
-    settle_failed_target(dst, handle, source_size, OnFailure::Remove)
+    // cr-ecm18-1: by the file noted, when the handle is gone — the same
+    // three cases as with it (cr-ecm17-2: a link to it is reported left).
+    settle_failed_target_known(dst, handle, source_size, OnFailure::Remove, made)
 }
+
+/// cr-ecm18-1: a file a record made, from inside the step that made it,
+/// until its writer claims it ([`Self::claim`]). Unclaimed — the record
+/// cancelled while it was being made — it is settled as any failed write
+/// is: removed while it is the file at its name.
+struct Made {
+    file: Option<std::fs::File>,
+    dst: PathBuf,
+    identity: Option<(u64, u64)>,
+}
+
+impl Made {
+    fn claim(mut self) -> (std::fs::File, Option<(u64, u64)>) {
+        let file = self.file.take().expect("a made file is claimed once");
+        (file, self.identity)
+    }
+}
+
+impl Drop for Made {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            let _ = settle_failed_target_known(
+                &self.dst,
+                Some(file),
+                0,
+                OnFailure::Remove,
+                self.identity,
+            );
+        }
+    }
+}
+
+/// Test seam (cr-ecm18-1): runs inside the blocking step that makes a
+/// record's file, once it is made and before it is handed back — a seam a
+/// test can hold while the record is cancelled. Production never sets it.
+#[cfg(test)]
+pub(super) static WHILE_A_FILE_IS_MADE_HOOKS: std::sync::Mutex<
+    Vec<(std::path::PathBuf, AfterSourceOpenHook)>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn while_a_file_is_made(dst: &Path) {
+    let hooks: Vec<AfterSourceOpenHook> = WHILE_A_FILE_IS_MADE_HOOKS
+        .lock()
+        .map(|g| {
+            g.iter()
+                .filter(|(prefix, _)| dst.starts_with(prefix))
+                .map(|(_, h)| Arc::clone(h))
+                .collect()
+        })
+        .unwrap_or_default();
+    for hook in hooks {
+        hook(dst);
+    }
+}
+
+#[cfg(not(test))]
+#[inline]
+fn while_a_file_is_made(_dst: &Path) {}
 
 /// cr-ecm16-2: the handle a shard member was written through, kept for
 /// its metadata tail where the tail can go through it (Unix: its time and
@@ -2440,6 +2533,18 @@ fn settle_failed_target(
     source_size: u64,
     on_failure: OnFailure,
 ) -> Settled {
+    settle_failed_target_known(dst, handle, source_size, on_failure, None)
+}
+
+/// [`settle_failed_target`] for a write that knows which file it made,
+/// `known`, though it may hold no handle to it any more (cr-ecm18-1).
+fn settle_failed_target_known(
+    dst: &Path,
+    handle: Option<std::fs::File>,
+    source_size: u64,
+    on_failure: OnFailure,
+    known: Option<(u64, u64)>,
+) -> Settled {
     let mark = |handle: Option<&std::fs::File>| match handle {
         Some(file) => mark_unfinished(file, source_size),
         None => std::fs::OpenOptions::new()
@@ -2471,7 +2576,8 @@ fn settle_failed_target(
                 .as_ref()
                 .and_then(|file| file.metadata().ok())
                 .as_ref()
-                .and_then(file_identity);
+                .and_then(file_identity)
+                .or(known);
             let followed_to_held = || {
                 held.is_some_and(|held| {
                     std::fs::metadata(dst).ok().as_ref().and_then(file_identity) == Some(held)
@@ -7713,64 +7819,71 @@ mod cr_win_1_tests {
         assert_eq!(std::fs::read(&dest).unwrap(), b"somebody's");
     }
 
-    /// cr-ecm17-1: a record of a run that keeps what exists, cancelled
-    /// once its file is made and while it notes which file that is, leaves
-    /// nothing: its guard is armed from the moment the file exists. It left
-    /// an empty file, which a later run keeping what exists skips.
+    /// cr-ecm17-1, cr-ecm18-1: a record cancelled while its file is being
+    /// made — after the file exists and before it is handed back — leaves
+    /// nothing, in a run that keeps what exists and in one that does not.
+    /// The step that made it handed the file to nobody, and an empty file
+    /// stayed, which a later run keeping what exists skips as somebody's.
     #[cfg(unix)]
-    #[tokio::test]
-    async fn a_record_cancelled_as_it_notes_its_file_leaves_nothing() {
-        use std::future::Future as _;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::task::{Context, Poll, Waker};
-
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_record_cancelled_while_its_file_is_made_leaves_nothing() {
         struct Hooked(PathBuf);
         impl Drop for Hooked {
             fn drop(&mut self) {
-                if let Ok(mut hooks) = AFTER_CLAIM_HOOKS.lock() {
+                if let Ok(mut hooks) = WHILE_A_FILE_IS_MADE_HOOKS.lock() {
                     hooks.retain(|(prefix, _)| prefix != &self.0);
                 }
             }
         }
-        let tmp = tempdir().unwrap();
-        let dst = tmp.path().join("dst");
-        std::fs::create_dir_all(&dst).unwrap();
-        let made = Arc::new(AtomicBool::new(false));
-        let _hooked = {
-            let made = Arc::clone(&made);
-            AFTER_CLAIM_HOOKS.lock().unwrap().push((
-                dst.join("cancelled.bin"),
-                Arc::new(move |_: &Path| made.store(true, Ordering::SeqCst)),
-            ));
-            Hooked(dst.join("cancelled.bin"))
-        };
-        let sink = FsTransferSink::new(
-            tmp.path().to_path_buf(),
-            dst.clone(),
-            FsSinkConfig {
-                ignore_existing: true,
-                ..FsSinkConfig::default()
-            },
-        );
-        let header = make_file_header("cancelled.bin", 10);
-        {
-            let mut begun = Box::pin(sink.begin_record(&header));
-            let mut cx = Context::from_waker(Waker::noop());
-            // Poll until the file is made and the record is waiting to
-            // learn which file it is — then cancel it.
-            loop {
-                match begun.as_mut().poll(&mut cx) {
-                    Poll::Ready(_) => panic!("the record began before it could be cancelled"),
-                    Poll::Pending if made.load(Ordering::SeqCst) => break,
-                    Poll::Pending => tokio::time::sleep(std::time::Duration::from_millis(1)).await,
-                }
+        for ignore_existing in [false, true] {
+            let tmp = tempdir().unwrap();
+            let dst = tmp.path().join("dst");
+            std::fs::create_dir_all(&dst).unwrap();
+            let name = dst.join("cancelled.bin");
+            let (reached, made) = std::sync::mpsc::channel::<()>();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let released = Arc::new(std::sync::Mutex::new(released));
+            let _hooked = {
+                let reached = std::sync::Mutex::new(reached);
+                WHILE_A_FILE_IS_MADE_HOOKS.lock().unwrap().push((
+                    name.clone(),
+                    Arc::new(move |_: &Path| {
+                        let _ = reached.lock().unwrap().send(());
+                        let _ = released.lock().unwrap().recv();
+                    }),
+                ));
+                Hooked(name.clone())
+            };
+            let sink = FsTransferSink::new(
+                tmp.path().to_path_buf(),
+                dst.clone(),
+                FsSinkConfig {
+                    ignore_existing,
+                    ..FsSinkConfig::default()
+                },
+            );
+            let header = make_file_header("cancelled.bin", 10);
+            let made = tokio::task::spawn_blocking(move || made.recv());
+            tokio::select! {
+                _ = sink.begin_record(&header) => panic!("the record began before it could be cancelled"),
+                _ = made => {}
             }
-            assert!(dst.join("cancelled.bin").exists(), "the file was made");
+            assert!(
+                name.exists(),
+                "ignore_existing={ignore_existing}: the file was made"
+            );
+            // The record is cancelled; the step that made its file ends now.
+            release.send(()).unwrap();
+            let mut waited = 0;
+            while name.exists() && waited < 200 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                waited += 1;
+            }
+            assert!(
+                !name.exists(),
+                "ignore_existing={ignore_existing}: a record cancelled there leaves nothing"
+            );
         }
-        assert!(
-            !dst.join("cancelled.bin").exists(),
-            "a record cancelled there leaves nothing"
-        );
     }
 
     /// cr-ecm16-2: a target settled WITHOUT its writer's handle — a record
