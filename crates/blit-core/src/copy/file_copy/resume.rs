@@ -127,6 +127,31 @@ fn open_resume_partial_with(
     // was followed out and the file made there.
     let resolved = resolve_destination(dst, within)?;
     let keep = |file: &File| cleanup.then(|| keep_handle(file, dst)).transpose();
+    let fresh = |resolved: &Resolved| -> Result<(File, Option<File>, u64)> {
+        let (file, kept) = resolved.fresh(dst, src_len.saturating_add(1), |file| {
+            keep(file).map_err(eyre::Report::new)
+        })?;
+        Ok((file, kept, 0))
+    };
+    // cr-ecm22-4, cr-ecm23-4: a file is reused only when this run's user
+    // owns it and it grants others nothing its source does not.
+    let reusable = |mode: u32, owner: u32| {
+        let wider = source_mode.is_some_and(|source| mode & 0o077 & !(source & 0o077) != 0);
+        !wider && owner == effective_user(dst)
+    };
+    // cr-ecm25-5: asked of what is seen at the name BEFORE it is opened —
+    // a file that may not be reused is replaced whole unopened — and one
+    // this run can neither read nor write is replaced whole too, as the
+    // wire does (cr-ecm24-4). Opened first, a destination this run could
+    // not read failed the copy.
+    if let Some((mode, owner)) = resolved
+        .look()
+        .with_context(|| format!("looking at {}", dst.display()))?
+    {
+        if is_regular(mode) && !reusable(mode, owner) {
+            return fresh(&resolved);
+        }
+    }
     // cr-ecm25-4: where nothing stands, the partial is made staged —
     // private, at its length, its cleanup's handle had — and takes the name
     // only while nothing does. Opened by the name to be made, an empty file
@@ -153,6 +178,9 @@ fn open_resume_partial_with(
         Err(refused) if refused.kind() == std::io::ErrorKind::PermissionDenied => {
             match resolved.open(libc::O_RDONLY) {
                 Ok(file) => (file, false),
+                Err(unread) if unread.kind() == std::io::ErrorKind::PermissionDenied => {
+                    return fresh(&resolved);
+                }
                 Err(_) => {
                     return Err(refused)
                         .with_context(|| format!("opening destination: {}", dst.display()))
@@ -167,14 +195,10 @@ fn open_resume_partial_with(
     let found = file.metadata()?;
     // cr-ecm22-4: a source of mode 0000 is a mode known, and the most
     // private of all — it was taken for no mode, and the destination's
-    // readers kept it.
-    let wider = source_mode.is_some_and(|source| found.mode() & 0o077 & !(source & 0o077) != 0);
-    // cr-ecm23-4: and only a file this run's user owns is reused: one
-    // another owns stays theirs, readable by them whatever its mode, and
-    // what lands in it would be theirs to read. A run as root may set any
-    // file's mode, so that was no test of it.
-    let foreign = found.uid() != effective_user(dst);
-    if !wider && !foreign {
+    // readers kept it. cr-ecm23-4: and only a file this run's user owns is
+    // reused: one another owns stays theirs, readable by them whatever its
+    // mode. Asked again of the file opened, which is what is patched.
+    if reusable(found.mode(), found.uid()) {
         // cr-ecm25-4: the cleanup's handle is had before the file is changed:
         // had after it was made private, a refusal left a file others could
         // read made 600.
@@ -219,10 +243,14 @@ fn open_resume_partial_with(
         }
     }
     drop(file);
-    let (file, kept) = resolved.fresh(dst, src_len.saturating_add(1), |file| {
-        keep(file).map_err(eyre::Report::new)
-    })?;
-    Ok((file, kept, 0))
+    fresh(&resolved)
+}
+
+/// Whether `mode` (type bits included) is a regular file's.
+#[cfg(unix)]
+#[allow(clippy::unnecessary_cast)]
+fn is_regular(mode: u32) -> bool {
+    mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
 }
 
 /// A second handle to `file`, the partial for `dst`. Test seam
@@ -447,13 +475,23 @@ impl Resolved {
     /// Whether anything stands at the name in the held directory — itself,
     /// a link being a link.
     pub(crate) fn stands(&self) -> std::io::Result<bool> {
+        self.look().map(|seen| seen.is_some())
+    }
+
+    /// What stands at the name in the held directory, itself — its mode
+    /// (type bits included) and its owner — or nothing.
+    pub(crate) fn look(&self) -> std::io::Result<Option<(u32, u32)>> {
+        #[cfg(not(target_os = "linux"))]
+        use libc::{fstatat, stat};
+        #[cfg(target_os = "linux")]
+        use libc::{fstatat64 as fstatat, stat64 as stat};
         use std::os::unix::io::AsRawFd as _;
-        let mut found = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let mut found = std::mem::MaybeUninit::<stat>::uninit();
         // SAFETY: the held directory is open for the length of the call, the
         // name is NUL-terminated and outlives it, and `found` is a writable
         // record the call fills on success.
         let looked = unsafe {
-            libc::fstatat(
+            fstatat(
                 self.directory.as_raw_fd(),
                 self.name.as_ptr(),
                 found.as_mut_ptr(),
@@ -461,11 +499,14 @@ impl Resolved {
             )
         };
         if looked == 0 {
-            return Ok(true);
+            // SAFETY: the call succeeded, so the record is filled in.
+            let found = unsafe { found.assume_init() };
+            #[allow(clippy::unnecessary_cast)]
+            return Ok(Some((found.st_mode as u32, found.st_uid as u32)));
         }
         let error = std::io::Error::last_os_error();
         if error.kind() == std::io::ErrorKind::NotFound {
-            return Ok(false);
+            return Ok(None);
         }
         Err(error)
     }
@@ -1118,6 +1159,61 @@ mod tests {
             0,
             "nothing elsewhere"
         );
+        Ok(())
+    }
+
+    /// cr-ecm25-5: a local resume into a destination this run cannot read is
+    /// copied whole — one whose mode says it is not reused (0004, for a
+    /// 0600 source), and one that would be (its own, 0200) but cannot be
+    /// opened — and one that may not be reused (0644, for a 0600 source) is
+    /// not opened at all. Opened first, the first two failed the copy where
+    /// the wire copies them whole.
+    #[cfg(unix)]
+    #[test]
+    fn a_local_resume_into_a_destination_it_cannot_read_copies_it_whole() -> Result<()> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let data = vec![7u8; 4096];
+        std::fs::write(&src, &data)?;
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))?;
+        if std::fs::metadata(&src)?.uid() == 0 {
+            // Root reads any file: nothing to show.
+            return Ok(());
+        }
+        for (name, mode) in [
+            ("others.bin", 0o004),
+            ("own.bin", 0o200),
+            ("wider.bin", 0o644),
+        ] {
+            let dst = tmp.path().join(name);
+            std::fs::write(&dst, &data[..1000])?;
+            std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(mode))?;
+            let opened = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            {
+                let opened = std::sync::Arc::clone(&opened);
+                WHILE_A_PARTIAL_IS_OPENED_HOOKS.lock().unwrap().push((
+                    dst.clone(),
+                    std::sync::Arc::new(move |_: &Path| {
+                        opened.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }),
+                ));
+            }
+            let copied = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024);
+            WHILE_A_PARTIAL_IS_OPENED_HOOKS
+                .lock()
+                .unwrap()
+                .retain(|(at, _)| at != &dst);
+            copied.map_err(|error| eyre::eyre!("{name}: {error:#}"))?;
+            assert_eq!(std::fs::read(&dst)?, data, "{name}");
+            if name == "wider.bin" {
+                assert_eq!(
+                    opened.load(std::sync::atomic::Ordering::SeqCst),
+                    0,
+                    "not opened: its mode said it is not reused"
+                );
+            }
+        }
         Ok(())
     }
 
