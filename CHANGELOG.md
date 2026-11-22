@@ -270,6 +270,12 @@ part, and a job you can list, read, re-run and retry.
   stopped being one. Small files copied together, and every file to or
   from a daemon, kept theirs, as `cp` and `rsync` keep them all. (Linux;
   seen by measuring beside those two.)
+- **With `--resume`, a partial copy is its owner's alone while it is
+  being written** (mode 600), and gets its source's mode when it is
+  complete. A partial was made with the usual mask — readable by all —
+  and one of a read-only source could not be written by the retry. A
+  partial left by an earlier run that others could read, or that this
+  run cannot write, is not resumed: it is replaced by a fresh one.
 - `check` of a single file against a destination of another name
   compares the two. With the source named in `--files-from`, or a
   pattern naming either file, it looked for one file's name on the

@@ -59,6 +59,84 @@ pub fn resume_copy_file(src: &Path, dst: &Path, block_size: usize) -> Result<Res
     resume_copy_from(&mut src_file, src_len, dst, block_size)
 }
 
+/// The partial a resume patches, and how much of it there already is.
+///
+/// cr-ecm17-3, cr-ecm18-2 (Unix): a partial is made PRIVATE and writable
+/// by its owner (0600) — from the moment it is made, for a reader who
+/// opens a file keeps what it could open it for whatever its mode becomes
+/// later (narrowing it afterwards left such a reader its bytes). It stays
+/// so while it is worked on; the source's own mode is given when the copy
+/// completes (cr-ecm16-1) — a read-only source's partial was made
+/// read-only, and the retry could not write to it. A partial there
+/// already is resumed only if it is such a file; one others could read,
+/// or one this run cannot write, is not reused: it is removed and a fresh
+/// one made. A destination that is not a regular file — a link — is
+/// opened as it always was.
+#[cfg(unix)]
+fn open_partial(dst: &Path) -> Result<(File, u64)> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    let fresh = || -> Result<(File, u64)> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(dst)
+            .with_context(|| format!("making the partial {}", dst.display()))?;
+        Ok((file, 0))
+    };
+    match std::fs::symlink_metadata(dst) {
+        Ok(found) if found.is_file() => {
+            let mode = found.permissions().mode() & 0o777;
+            if mode & 0o077 == 0 && mode & 0o600 == 0o600 {
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(dst)
+                    .with_context(|| format!("opening the partial {}", dst.display()))?;
+                let opened = file.metadata()?;
+                if (opened.dev(), opened.ino()) != (found.dev(), found.ino()) {
+                    eyre::bail!("the partial {} changed while it was opened", dst.display());
+                }
+                Ok((file, opened.len()))
+            } else {
+                std::fs::remove_file(dst).with_context(|| {
+                    format!(
+                        "removing the partial {}, which others could read or this run could \
+                         not write, to make a private one",
+                        dst.display()
+                    )
+                })?;
+                fresh()
+            }
+        }
+        Ok(_) => {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(dst)
+                .with_context(|| format!("opening destination: {}", dst.display()))?;
+            let len = file.metadata()?.len();
+            Ok((file, len))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => fresh(),
+        Err(error) => Err(error).with_context(|| format!("looking at {}", dst.display())),
+    }
+}
+
+#[cfg(not(unix))]
+fn open_partial(dst: &Path) -> Result<(File, u64)> {
+    let dst_len = std::fs::metadata(dst).map(|m| m.len()).unwrap_or(0);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dst)
+        .with_context(|| format!("opening destination: {}", dst.display()))?;
+    Ok((file, dst_len))
+}
+
 /// [`resume_copy_file`] on an already-OPENED source handle (ssc-4,
 /// SOURCE_SIDE_CONTAINMENT D-C): the caller validated `src_len` against
 /// the manifest on this same handle and re-stats it afterwards; the
@@ -72,44 +150,13 @@ pub fn resume_copy_from(
 ) -> Result<ResumeCopyOutcome> {
     src_file.seek(SeekFrom::Start(0))?;
 
-    // Get destination length (0 if doesn't exist)
-    let dst_len = std::fs::metadata(dst).map(|m| m.len()).unwrap_or(0);
-
     // Ensure parent directory exists
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating parent directory: {}", parent.display()))?;
     }
 
-    let mut dst_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dst)
-        .with_context(|| format!("opening destination: {}", dst.display()))?;
-    // cr-ecm17-3: the partial — made now, or there already — is narrowed
-    // to what its source allows BEFORE a byte is written: a resume that
-    // failed part-way left a private file's bytes in a partial readable
-    // by all, made with the usual mask, its mode given only when the copy
-    // completed (cr-ecm16-1). If it cannot be narrowed, nothing is
-    // written.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let source = src_file.metadata()?.permissions().mode() & 0o7777;
-        let now = dst_file.metadata()?.permissions().mode() & 0o7777;
-        if now & !source != 0 {
-            dst_file
-                .set_permissions(std::fs::Permissions::from_mode(now & source))
-                .with_context(|| {
-                    format!(
-                        "narrowing {} to what its source allows before writing to it",
-                        dst.display()
-                    )
-                })?;
-        }
-    }
+    let (mut dst_file, dst_len) = open_partial(dst)?;
 
     // cr-win-1: while blocks are patched in place the destination must
     // never be the source's size — an interruption would otherwise leave a
@@ -228,6 +275,18 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    /// A partial as a resume makes one (cr-ecm18-2): private and writable
+    /// by its owner — the only kind it reuses.
+    fn as_a_partial(path: &Path) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        let _ = path;
+        Ok(())
+    }
+
     /// cr-win-1: blocks patch the destination in place, so an interrupted
     /// resume of a same-size file kept the source's size with a write-time
     /// mtime and passed for finished on every later compare. It stays one
@@ -282,6 +341,65 @@ mod tests {
                 dst.display(),
                 mode_of(dst)?
             );
+        }
+        Ok(())
+    }
+
+    /// cr-ecm18-2: a partial is private and writable by its owner while it
+    /// is worked on, whatever its source's mode — a read-only source's
+    /// partial was made read-only, and no retry could write to it — and has
+    /// its source's mode once the copy completes.
+    #[cfg(unix)]
+    #[test]
+    fn a_partial_is_private_and_writable_while_it_is_worked_on() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir()?;
+        let mode_of = |path: &Path| -> Result<u32> {
+            Ok(std::fs::metadata(path)?.permissions().mode() & 0o777)
+        };
+        for mode in [0o644, 0o444] {
+            let src = tmp.path().join(format!("src-{mode:o}"));
+            std::fs::write(&src, vec![3u8; 10_000])?;
+            std::fs::set_permissions(&src, std::fs::Permissions::from_mode(mode))?;
+            let dst = tmp.path().join(format!("dst-{mode:o}"));
+            // Interrupted: the source claims more than it holds.
+            assert!(resume_copy_from(&mut File::open(&src)?, 12_000, &dst, 1024).is_err());
+            assert_eq!(mode_of(&dst)?, 0o600, "{mode:o}: while it is worked on");
+            // The retry writes to it, and gives the source's mode at the end.
+            resume_copy_from(&mut File::open(&src)?, 10_000, &dst, 1024)?;
+            assert_eq!(std::fs::read(&dst)?, vec![3u8; 10_000]);
+            assert_eq!(mode_of(&dst)?, mode, "{mode:o}: once it is done");
+        }
+        Ok(())
+    }
+
+    /// cr-ecm18-2: a partial others could read is not reused — a reader
+    /// who opened it keeps what it held, and gets none of the source's new
+    /// bytes — and a private one is.
+    #[cfg(unix)]
+    #[test]
+    fn a_partial_is_reused_only_if_it_is_private() -> Result<()> {
+        use std::io::Read as _;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let data: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&src, &data)?;
+        for (mode, reused) in [(0o644, false), (0o600, true)] {
+            let dst = tmp.path().join(format!("partial-{mode:o}"));
+            std::fs::write(&dst, &data[..1024])?;
+            std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(mode))?;
+            let before = std::fs::metadata(&dst)?.ino();
+            let mut reader = File::open(&dst)?;
+            let outcome = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024)?;
+            assert_eq!(std::fs::read(&dst)?, data, "{mode:o}");
+            assert_eq!(std::fs::metadata(&dst)?.ino() == before, reused, "{mode:o}");
+            assert_eq!(outcome.blocks_skipped > 0, reused, "{mode:o}: {outcome:?}");
+            if !reused {
+                let mut held = Vec::new();
+                reader.read_to_end(&mut held)?;
+                assert_eq!(held, &data[..1024], "the reader keeps what it held");
+            }
         }
         Ok(())
     }
@@ -350,6 +468,7 @@ mod tests {
 
         // Create partial destination (first 5KB)
         std::fs::write(&dst, &data[..5000])?;
+        as_a_partial(&dst)?;
 
         // Resume copy
         let outcome = resume_copy_file(&src, &dst, 1024)?;
@@ -372,6 +491,7 @@ mod tests {
         let data: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
         std::fs::write(&src, &data)?;
         std::fs::write(&dst, &data)?;
+        as_a_partial(&dst)?;
 
         // Resume should skip all blocks
         let outcome = resume_copy_file(&src, &dst, 1024)?;
@@ -396,6 +516,7 @@ mod tests {
         // Create longer destination (10KB)
         let dst_data: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
         std::fs::write(&dst, &dst_data)?;
+        as_a_partial(&dst)?;
 
         // Resume should truncate
         let outcome = resume_copy_file(&src, &dst, 1024)?;
@@ -424,6 +545,7 @@ mod tests {
             *byte = 0xFF;
         }
         std::fs::write(&dst, &corrupted)?;
+        as_a_partial(&dst)?;
 
         // Resume should fix the corrupted block
         let outcome = resume_copy_file(&src, &dst, 1024)?;
