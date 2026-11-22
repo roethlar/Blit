@@ -118,6 +118,17 @@ impl TypedOperand {
 #[allow(clippy::result_large_err)]
 fn start_is_contained(module_root: &Path, start_abs: &Path) -> Result<(), Status> {
     use std::io::ErrorKind::{NotADirectory, NotFound};
+    // cr-uv7-2: nothing at all at the root's path — the module's folder
+    // was moved or removed — is no way out of the module, for the module
+    // itself or anything below it. The read goes on, finds nothing, and
+    // says so in its command's own words (`cannot access …: No such file
+    // or directory`, and its exit status), as for any path that is not
+    // there: the request was refused whole, and `--json` was empty.
+    // Something there that cannot be resolved — a link to nothing, a
+    // ring — is judged below, and refused, as before.
+    if fs::symlink_metadata(module_root).is_err_and(|error| error.kind() == NotFound) {
+        return Ok(());
+    }
     // The module itself, however it was typed, is in the module. Judged
     // by its ancestors — as what is no directory, typed as one, is — a
     // module that is one file would be out of itself.
@@ -1616,6 +1627,18 @@ mod typed_operand_tests {
             assert!(refused.message().contains("path containment"), "{typed:?}");
         }
         fs::remove_file(&module).unwrap();
+        // cr-uv7-2: a link to nothing there is refused too; nothing at all
+        // there is no way out — the read goes on, and says it is not there.
+        symlink(top.join("nowhere"), &module).unwrap();
+        for typed in ["", "."] {
+            let at = start(typed).below(&module);
+            assert!(start_is_contained(&module, &at).is_err(), "{typed:?}");
+        }
+        fs::remove_file(&module).unwrap();
+        for typed in ["", ".", "ring/x"] {
+            let at = start(typed).below(&module);
+            assert!(start_is_contained(&module, &at).is_ok(), "{typed:?}");
+        }
         fs::rename(&moved, &module).unwrap();
         // Not looked up, in the module: the read goes on, and fails there.
         for typed in ["ring/x", "ring/x/y", "ring/", "missing/x"] {

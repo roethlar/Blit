@@ -744,6 +744,46 @@ fn a_start_that_cannot_be_looked_up_is_told_and_one_out_of_the_module_refused() 
     }
 }
 
+/// cr-uv7-2: a module whose folder has gone is told as `ls` tells a path
+/// that is not there — `cannot access …: No such file or directory`, exit
+/// 2, the failure in `--json` — and `du` and `find` say it their own way.
+/// The request was refused whole as if the module had left itself: exit
+/// 1, and nothing in `--json`.
+#[cfg(unix)]
+#[test]
+fn a_module_whose_folder_has_gone_is_told_as_a_path_that_is_not_there() {
+    let ctx = TestContext::new();
+    fs::rename(&ctx.module_dir, ctx.workspace.join("moved-away")).unwrap();
+    let module = remote(&ctx, "");
+    let ran = blit(&ctx, &["ls", "--json", &module]);
+    assert_eq!(ran.code, Some(2), "{}", ran.all());
+    let listed: serde_json::Value = serde_json::from_slice(&ran.stdout)
+        .unwrap_or_else(|error| panic!("{error}: {}", ran.all()));
+    assert_eq!(listed["failures"][0]["action"], "cannot access");
+    assert_eq!(listed["failures"][0]["reason"], "No such file or directory");
+    let ran = blit(&ctx, &["ls", &module]);
+    assert_eq!(ran.code, Some(2), "{}", ran.all());
+    assert_eq!(
+        ran.stderr,
+        format!("blit ls: cannot access '{module}': No such file or directory\n")
+    );
+    for (verb, said) in [
+        (
+            "du",
+            format!("blit du: cannot access '{module}': No such file or directory\n"),
+        ),
+        (
+            "find",
+            format!("blit find: \u{2018}{module}\u{2019}: No such file or directory\n"),
+        ),
+    ] {
+        let ran = blit(&ctx, &[verb, &module]);
+        assert_eq!(ran.code, Some(1), "{verb}: {}", ran.all());
+        assert_eq!(ran.stderr, said, "{verb}");
+    }
+    fs::rename(ctx.workspace.join("moved-away"), &ctx.module_dir).unwrap();
+}
+
 /// AC-8: an option `ls` has and `blit ls` does not take is refused by
 /// name before anything is asked of a daemon — nothing listens where
 /// these are sent.
