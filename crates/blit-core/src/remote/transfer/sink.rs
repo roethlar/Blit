@@ -1516,6 +1516,14 @@ impl TransferSink for FsTransferSink {
                     .insert(relative_path.to_string(), file);
             }
             Ok(None) => {}
+            // cr-ecm21-5: a volume that refuses writes, or the destination
+            // root gone, is no one file's: the session ends, as it does for
+            // a block that meets it (cr-pfc2-1). It was held as this file's,
+            // and every payload after it was drained into a destination
+            // that took none of them.
+            Err(error) if !failure_is_containable(&self.dst_root, relative_path, &error) => {
+                return Err(error);
+            }
             // cr-ecm20-2: a partial that cannot be had safely is not
             // written: its blocks are passed over, and the file fails at
             // its completion record.
@@ -2620,6 +2628,7 @@ fn hold_partial(
     total_size: u64,
     baseline: Option<ResumeBaseline>,
 ) -> Result<Option<(u64, u64)>> {
+    hold_fault(dst)?;
     #[cfg(unix)]
     match baseline {
         Some(ResumeBaseline::Whole) => return hold_whole(dst, total_size),
@@ -2700,6 +2709,30 @@ fn hold_hashed(
             .with_context(|| format!("marking {} unfinished", dst.display()))?;
     }
     Ok(file_identity(&now))
+}
+
+/// Test seam (cr-ecm21-5): a hold that fails with this kind of error, by
+/// its path — a read-only volume, say, which no test can make for real.
+/// Production never sets it.
+#[cfg(test)]
+pub(crate) static HOLD_FAULTS: std::sync::Mutex<Vec<(PathBuf, std::io::ErrorKind)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn hold_fault(_dst: &Path) -> Result<()> {
+    #[cfg(test)]
+    {
+        let fault = HOLD_FAULTS.lock().ok().and_then(|faults| {
+            faults
+                .iter()
+                .find(|(at, _)| at == _dst)
+                .map(|(_, kind)| *kind)
+        });
+        if let Some(kind) = fault {
+            return Err(eyre::Report::new(std::io::Error::from(kind))
+                .wrap_err(format!("holding the resume partial {}", _dst.display())));
+        }
+    }
+    Ok(())
 }
 
 /// cr-win-1: hold a resume partial one byte longer than its source before
@@ -7751,6 +7784,61 @@ mod cr_win_1_tests {
             .unwrap();
         assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
         assert_eq!(std::fs::read(&at).unwrap(), b"somebody's", "untouched");
+    }
+
+    /// cr-ecm21-5: a volume that refuses writes, met at a resume's hold,
+    /// ends the session — as a block that meets it does (cr-pfc2-1). It was
+    /// held as one file's failure, and the receiver went on draining
+    /// payloads into a destination that took none. One file's own failure
+    /// there stays that file's.
+    #[tokio::test]
+    async fn a_volume_that_refuses_writes_at_a_hold_ends_the_session() {
+        struct Unfaulted(Vec<PathBuf>);
+        impl Drop for Unfaulted {
+            fn drop(&mut self) {
+                if let Ok(mut faults) = HOLD_FAULTS.lock() {
+                    faults.retain(|(at, _)| !self.0.contains(at));
+                }
+            }
+        }
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let (read_only, one) = (dst.join("ro.bin"), dst.join("one.bin"));
+        let _unfaulted = {
+            let mut faults = HOLD_FAULTS.lock().unwrap();
+            faults.push((read_only.clone(), std::io::ErrorKind::ReadOnlyFilesystem));
+            faults.push((one.clone(), std::io::ErrorKind::PermissionDenied));
+            Unfaulted(vec![read_only, one])
+        };
+        sink.note_resume_baseline("ro.bin", ResumeBaseline::Whole);
+        assert!(
+            sink.hold_resume_partial("ro.bin", 4).await.is_err(),
+            "a read-only volume ends the session"
+        );
+        sink.note_resume_baseline("one.bin", ResumeBaseline::Whole);
+        sink.hold_resume_partial("one.bin", 4)
+            .await
+            .expect("one file's own failure is that file's");
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "one.bin".to_string(),
+                total_size: 4,
+                mtime_seconds: 0,
+                permissions: 0o600,
+                windows_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
     }
 
     /// cr-ecm20-1: a wire resume's hold, its blocks and its completion are
