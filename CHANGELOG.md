@@ -278,7 +278,9 @@ part, and a job you can list, read, re-run and retry.
   owner's alone meanwhile — over the network too; one this run's user
   does not own (a run as root included), or that others may read where
   its source may not (a reader who has it open would read the new
-  bytes), is copied whole into a fresh one.
+  bytes), is copied whole into a fresh one — and so is one this run
+  cannot read, which failed the copy (locally; over the network it
+  ended the transfer).
 - `check` of a single file against a destination of another name
   compares the two. With the source named in `--files-from`, or a
   pattern naming either file, it looked for one file's name on the
