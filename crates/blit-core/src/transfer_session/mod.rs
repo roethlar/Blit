@@ -6732,12 +6732,23 @@ async fn compute_resume_block_hashes(
         }
         #[cfg(not(unix))]
         let _ = source_mode;
+        // cr-ecm21-2: the hashes are of the file AS IT WAS BEFORE THEY WERE
+        // READ, unchanged to the last of them — read no further than the
+        // size it had — or none are sent. A block written once it was
+        // hashed was paired with the version the file had after, which the
+        // writer then found unchanged, and the source skipped the block.
+        let before = crate::moved::Version::of(
+            &file
+                .metadata()
+                .map_err(|e| eyre::eyre!("stat {} for block hashes: {e}", dst.display()))?,
+        );
+        let mut bounded = Read::take(&mut file, before.size);
         let mut hashes = Vec::new();
         let mut buf = vec![0u8; block_size];
         loop {
             let mut filled = 0usize;
             while filled < block_size {
-                let got = file
+                let got = bounded
                     .read(&mut buf[filled..])
                     .map_err(|e| eyre::eyre!("hashing {}: {e}", dst.display()))?;
                 if got == 0 {
@@ -6749,6 +6760,7 @@ async fn compute_resume_block_hashes(
                 break;
             }
             hashes.push(blake3::hash(&buf[..filled]).as_bytes().to_vec());
+            between_hashed_blocks(&dst);
             // A file growing concurrently with this read could blow past
             // the stat-time cap check — degrade, don't overshoot.
             if hashes.len() as u64 > MAX_RESUME_BLOCK_HASHES {
@@ -6758,16 +6770,45 @@ async fn compute_resume_block_hashes(
                 break;
             }
         }
-        let hashed = file
+        let after = file
             .metadata()
             .map_err(|e| eyre::eyre!("stat {} for block hashes: {e}", dst.display()))?;
-        Ok((
-            hashes,
-            ResumeBaseline::Hashed(crate::moved::Version::of(&hashed)),
-        ))
+        if crate::moved::Version::of(&after) != before {
+            return whole();
+        }
+        Ok((hashes, ResumeBaseline::Hashed(before)))
     })
     .await
     .map_err(|err| eyre::eyre!("resume hash task panicked: {err}"))?
+}
+
+/// Test seam (cr-ecm21-2): runs after each block a resume's partial is
+/// hashed by, keyed by its path. Production never sets it.
+#[cfg(test)]
+pub(crate) type BetweenHashedBlocksHook = Arc<dyn Fn(&Path) + Send + Sync>;
+
+#[cfg(test)]
+pub(crate) static BETWEEN_HASHED_BLOCKS_HOOKS: std::sync::Mutex<
+    Vec<(PathBuf, BetweenHashedBlocksHook)>,
+> = std::sync::Mutex::new(Vec::new());
+
+fn between_hashed_blocks(_path: &Path) {
+    #[cfg(test)]
+    {
+        let hooks: Vec<BetweenHashedBlocksHook> = BETWEEN_HASHED_BLOCKS_HOOKS
+            .lock()
+            .map(|hooks| {
+                hooks
+                    .iter()
+                    .filter(|(at, _)| at == _path)
+                    .map(|(_, hook)| Arc::clone(hook))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for hook in hooks {
+            hook(_path);
+        }
+    }
 }
 
 /// otp-7a: validate and claim the resume-flagged need an IN-STREAM
@@ -11060,6 +11101,62 @@ mod own_incomplete_copy_tests {
         assert!(hashes.is_empty());
         assert_eq!(baseline, ResumeBaseline::Whole);
         unchanged();
+    }
+
+    /// cr-ecm21-2: a block written once it was hashed — as many bytes, the
+    /// time put back — leaves no hash sent: the hashes were paired with the
+    /// version the file had after, the writer found it unchanged, and the
+    /// source skipped the block.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_partial_written_while_it_is_hashed_is_sent_whole() {
+        use crate::remote::transfer::sink::ResumeBaseline;
+        use std::os::unix::fs::FileExt as _;
+        struct Unhooked(PathBuf);
+        impl Drop for Unhooked {
+            fn drop(&mut self) {
+                if let Ok(mut hooks) = BETWEEN_HASHED_BLOCKS_HOOKS.lock() {
+                    hooks.retain(|(at, _)| at != &self.0);
+                }
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let at = root.join("r.bin");
+        std::fs::write(&at, vec![3u8; 3072]).unwrap();
+        let (hashes, baseline) =
+            compute_resume_block_hashes(&root, None, "r.bin", None, 0o644, 1024)
+                .await
+                .unwrap();
+        assert_eq!(hashes.len(), 3);
+        assert!(matches!(baseline, ResumeBaseline::Hashed(_)));
+        let _unhooked = {
+            let target = at.clone();
+            let written = std::sync::atomic::AtomicBool::new(false);
+            BETWEEN_HASHED_BLOCKS_HOOKS.lock().unwrap().push((
+                at.clone(),
+                Arc::new(move |_: &Path| {
+                    if !written.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        let was = filetime::FileTime::from_last_modification_time(
+                            &std::fs::metadata(&target).unwrap(),
+                        );
+                        let file = std::fs::OpenOptions::new()
+                            .write(true)
+                            .open(&target)
+                            .unwrap();
+                        file.write_at(&[9u8; 16], 0).unwrap();
+                        filetime::set_file_mtime(&target, was).unwrap();
+                    }
+                }),
+            ));
+            Unhooked(at.clone())
+        };
+        let (hashes, baseline) =
+            compute_resume_block_hashes(&root, None, "r.bin", None, 0o644, 1024)
+                .await
+                .unwrap();
+        assert!(hashes.is_empty(), "{} hashes", hashes.len());
+        assert_eq!(baseline, ResumeBaseline::Whole);
     }
 
     /// cr-uv8-1: and it reads only the file it SAW. Another file put at a
