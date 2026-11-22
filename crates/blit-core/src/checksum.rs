@@ -188,16 +188,42 @@ pub fn hash_reader(reader: &mut dyn Read, ty: ChecksumType) -> Result<Vec<u8>> {
     }
 }
 
-/// Hash a whole file with the given algorithm.
+/// cr-ecm29-4, cr-ecm30-5: a file opened to be hashed — without waiting, so
+/// a FIFO put in its place after a look cannot hold the open — and only if
+/// what was opened is a regular file. Opened to be read, a FIFO waited for a
+/// writer, and the comparison with it: the local `--checksum` copy's, the
+/// wire's, `check`'s. One opener for every comparison that hashes a file.
+pub(crate) fn open_regular_file(path: &Path) -> Result<File> {
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        open.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = open
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    let found = file
+        .metadata()
+        .with_context(|| format!("looking at {}", path.display()))?;
+    if !found.is_file() {
+        eyre::bail!("{} is not a regular file", path.display());
+    }
+    Ok(file)
+}
+
+/// Hash a whole file with the given algorithm — opened through
+/// [`open_regular_file`].
 pub fn hash_file(path: &Path, ty: ChecksumType) -> Result<Vec<u8>> {
-    let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut f = open_regular_file(path)?;
     hash_reader(&mut f, ty)
 }
 
 /// Compute a partial hash consisting of the first and last `bytes` of the file using BLAKE3.
 /// If the file is smaller than 2*bytes, the whole file is hashed.
 pub fn partial_hash_first_last(path: &Path, bytes: usize) -> Result<Vec<u8>> {
-    let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut f = open_regular_file(path)?;
     let len = f.metadata()?.len();
     if len as usize <= bytes * 2 {
         // Whole-file Blake3 — identical to hash_reader's Blake3 arm.
@@ -221,6 +247,33 @@ pub fn partial_hash_first_last(path: &Path, bytes: usize) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cr-ecm30-5: hashing a file does not wait on a FIFO at its path — put
+    /// there after a comparison's look at a same-size file — and finds no
+    /// hash in it: the file is copied. Opened to be read, it waited for a
+    /// writer, and a local `--checksum` copy with it.
+    #[cfg(unix)]
+    #[test]
+    fn hashing_a_file_does_not_wait_on_a_fifo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let at = tmp.path().join("r.bin");
+        let name = std::ffi::CString::new(at.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `name` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+        let (done, waited) = std::sync::mpsc::channel();
+        {
+            let at = at.clone();
+            std::thread::spawn(move || {
+                let _ = done.send(hash_file(&at, ChecksumType::Blake3).is_err());
+            });
+        }
+        let Ok(refused) = waited.recv_timeout(std::time::Duration::from_secs(20)) else {
+            // A writer lets the waiting open go, so the test can end.
+            let _ = std::fs::OpenOptions::new().write(true).open(&at);
+            panic!("hashing waited on the FIFO");
+        };
+        assert!(refused, "a FIFO has no hash");
+    }
 
     /// w7-4: hash_file is now a thin wrapper over hash_reader; pin
     /// the equivalence for every algorithm (and against hash_data,

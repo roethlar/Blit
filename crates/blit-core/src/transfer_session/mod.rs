@@ -6625,19 +6625,9 @@ fn resolve_attribute_repair(
 /// with it.
 fn hash_file_abortable(path: &Path, abort: &AtomicBool) -> Result<Vec<u8>> {
     use std::io::Read;
-    let mut file = {
-        let mut open = std::fs::OpenOptions::new();
-        open.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            open.custom_flags(libc::O_NONBLOCK);
-        }
-        open.open(path)?
-    };
-    if !file.metadata()?.is_file() {
-        eyre::bail!("{} is not a regular file", path.display());
-    }
+    // cr-ecm30-5: through the one opener every comparison that hashes a
+    // file shares.
+    let mut file = crate::checksum::open_regular_file(path)?;
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
