@@ -1237,16 +1237,14 @@ fn places(pattern: &str, windows: bool) -> Vec<Place<'_>> {
     out
 }
 
-/// The characters two classes are tried on: every one a name can hold
-/// below 128 — control characters too (cr-ecm17-4: a class holding a tab
-/// shared it with its other spelling, and the tab was never tried) — and
-/// one beyond (a class holding a letter beyond ASCII is refused, but a
-/// negated class holds them all).
+/// The characters two classes are tried on: every one below 128 —
+/// control characters too (cr-ecm17-4: a class holding a tab shared it
+/// with its other spelling, and the tab was never tried), and `/`
+/// (cr-ecm18-4: a class matches it in a path, as a `*` does, and `1[a/]2`
+/// and `1[A/]2` both match `1/2`) — and one beyond (a class holding a
+/// letter beyond ASCII is refused, but a negated class holds them all).
 fn class_trials() -> impl Iterator<Item = char> {
-    (1u8..=0x7f)
-        .map(char::from)
-        .filter(|c| *c != '/')
-        .chain(std::iter::once('é'))
+    (1u8..=0x7f).map(char::from).chain(std::iter::once('é'))
 }
 
 fn places_apart(a: &Place, b: &Place) -> bool {
@@ -2446,6 +2444,9 @@ mod tests {
         // two classes share it, and the name checked is shown; beside a
         // letter, the letter tells them apart.
         assert_eq!(others("[a\t]"), ["A"]);
+        // cr-ecm18-4: and one holding `/` holds it in both: `1[a/]2` and
+        // `1[A/]2` both match the path `1/2`.
+        assert_eq!(others("1[a/]2"), ["1A2"]);
         assert_eq!(others("[a\t]x"), ["[A\t]X"]);
 
         // And what is printed is true of the run: the name shown is taken
