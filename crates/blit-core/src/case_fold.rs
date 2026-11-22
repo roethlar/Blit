@@ -1174,7 +1174,9 @@ const MOST_EXAMPLES: usize = 2;
 ///   `/` itself; a class that may hold one (`[x/]`) may hold another
 ///   character instead, and the pattern then matches an entry's own name
 ///   at any depth (`a[x/]*1` matches `A/ax1` by its name, as `A[X/]*1`
-///   matches it by its whole path);
+///   matches it by its whole path). cr-ecm20-5: nor does a `/` in one
+///   alternative of a brace group (`a{/,x}*1`), which the other
+///   alternatives need not hold;
 /// - a pattern of one component matches an entry's own name at any depth,
 ///   AND the whole path from the root (`IMG_*.jpg` matches `d/IMG_x.jpg`
 ///   and `IMG_a/b.jpg`) — so where it starts is not fixed.
@@ -1192,11 +1194,7 @@ fn cannot_share_a_name(typed: &str, spelling: &str, windows: bool) -> bool {
     if ours.len() != theirs.len() {
         return false;
     }
-    let body = match ours.last() {
-        Some(Place::Char('/')) => &ours[..ours.len() - 1],
-        _ => &ours[..],
-    };
-    let anchored = body.iter().any(|place| matches!(place, Place::Char('/')));
+    let anchored = must_part(typed, windows);
     let apart_here = |pairs: &mut dyn Iterator<Item = (&Place, &Place)>| {
         pairs
             .take_while(|(x, y)| !matches!(x, Place::Varies) && !matches!(y, Place::Varies))
@@ -1204,6 +1202,39 @@ fn cannot_share_a_name(typed: &str, spelling: &str, windows: bool) -> bool {
     };
     apart_here(&mut ours.iter().rev().zip(theirs.iter().rev()))
         || (anchored && apart_here(&mut ours.iter().zip(&theirs)))
+}
+
+/// Whether every path `pattern` matches has a separator the pattern
+/// itself puts there — one outside every class and every brace group (a
+/// trailing one aside): such a pattern matches the whole path, from the
+/// root, and never an entry's own name (cr-ecm19-5, cr-ecm20-5).
+fn must_part(pattern: &str, windows: bool) -> bool {
+    let separator = |c: char| c == '/' || (windows && c == '\\');
+    let body = pattern.strip_suffix(separator).unwrap_or(pattern);
+    let mut depth = 0usize;
+    let mut rest = body;
+    while let Some(c) = rest.chars().next() {
+        let len = match c {
+            '[' => bracket_class_len(rest).unwrap_or(1),
+            '\\' if !windows => match rest[1..].chars().next() {
+                Some('/') if depth == 0 => return true,
+                Some(next) => 1 + next.len_utf8(),
+                None => 1,
+            },
+            '{' => {
+                depth += 1;
+                1
+            }
+            '}' => {
+                depth = depth.saturating_sub(1);
+                1
+            }
+            c if separator(c) && depth == 0 => return true,
+            c => c.len_utf8(),
+        };
+        rest = &rest[len..];
+    }
+    false
 }
 
 /// One place of a pattern, as [`cannot_share_a_name`] reads it: a
@@ -2458,14 +2489,23 @@ mod tests {
         // `A[X/]*1` matches it by its whole path. The name checked is
         // shown, not that spelling.
         assert_eq!(others("a[x/]*1"), ["AXx1"]);
-        for (name, as_typed, with_the_option) in [("AXx1", false, true), ("A/ax1", true, true)] {
-            let taken = |ignore_case: bool| {
-                let filter = crate::fs_enum::FileFilter::probing("a[x/]*1", false, ignore_case)
-                    .expect("a pattern");
-                Asked::named(Role::Include, &filter, name).0
-            };
-            assert_eq!(taken(false), as_typed, "{name} as typed");
-            assert_eq!(taken(true), with_the_option, "{name} with --ignore-case");
+        // cr-ecm20-5: nor does a `/` in one alternative of a brace group:
+        // `a{/,x}*1` matches `A/ax1` by its name, `A{/,X}*1` by its path.
+        assert_eq!(others("a{/,x}*1"), ["A/x1"]);
+        for (pattern, shown) in [("a[x/]*1", "AXx1"), ("a{/,x}*1", "A/x1")] {
+            for (name, as_typed, with_the_option) in [(shown, false, true), ("A/ax1", true, true)] {
+                let taken = |ignore_case: bool| {
+                    let filter = crate::fs_enum::FileFilter::probing(pattern, false, ignore_case)
+                        .expect("a pattern");
+                    Asked::named(Role::Include, &filter, name).0
+                };
+                assert_eq!(taken(false), as_typed, "{pattern}: {name} as typed");
+                assert_eq!(
+                    taken(true),
+                    with_the_option,
+                    "{pattern}: {name} with --ignore-case"
+                );
+            }
         }
         assert_eq!(others("[a\t]x"), ["[A\t]X"]);
 
