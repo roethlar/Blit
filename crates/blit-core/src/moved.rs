@@ -132,27 +132,40 @@ fn path_digest(path: &[u8]) -> u128 {
 }
 
 /// cr-uv7-1, cr-uv8-1: the digest of what `file` holds — read through
-/// that descriptor, AS THE FILE `version` IS. No more than `version.size`
-/// bytes are read, and once they have been, the descriptor must be that
-/// version: that file (Unix: its device and its number there), unchanged.
+/// that descriptor, AS THE FILE `version` IS: that file (Unix: its device
+/// and its number there), unchanged. Anything else is an error, and
+/// nothing is known of what it holds.
 ///
-/// One look, after the read, answers for all of it. The time a file was
-/// last changed (Unix) moves with every change to it, and no program sets
-/// it: a descriptor that is the version once read was that file,
-/// unchanged, from the look the version came from to the end of the read
-/// — written to anywhere meanwhile, a part already read included, it is
-/// not. Anything else is an error, and nothing is known of what it holds.
+/// The descriptor is looked at before a byte of it is read (cr-uv9-2):
+/// another file, or this one changed already, is not read at all — not
+/// for as long as the file that was seen. No more than `version.size`
+/// bytes are read, and once they have been it is looked at again: the
+/// time a file was last changed (Unix) moves with every change to it, and
+/// no program sets it, so a descriptor that is the version once read was
+/// that file, unchanged, to the end of the read — written to anywhere
+/// meanwhile, a part already read included, it is not.
 pub fn content_of(file: &std::fs::File, version: &Version) -> std::io::Result<[u8; 32]> {
     use std::io::Read as _;
+    let as_seen = || -> std::io::Result<()> {
+        if Version::of(&file.metadata()?) == *version {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(
+                "not the file that was seen: another file, or changed since",
+            ))
+        }
+    };
+    as_seen()?;
     while_content_is_read(version, "reading", 0);
     let mut hasher = blake3::Hasher::new();
     let read = std::io::copy(&mut file.take(version.size), &mut hasher)?;
     while_content_is_read(version, "read", read);
-    if read != version.size || Version::of(&file.metadata()?) != *version {
+    if read != version.size {
         return Err(std::io::Error::other(
-            "not the file that was seen: another file, or changed since",
+            "not the file that was seen: it holds less than it did",
         ));
     }
+    as_seen()?;
     Ok(*hasher.finalize().as_bytes())
 }
 
@@ -1027,6 +1040,31 @@ mod content_tests {
         assert_eq!(seen(&other).mtime_nanos, version.mtime_nanos);
         assert!(content_of(&std::fs::File::open(&other).unwrap(), &version).is_err());
         assert!(content_of(&std::fs::File::open(&path).unwrap(), &version).is_ok());
+    }
+
+    /// cr-uv9-2: a descriptor that is not the file as it was seen — another
+    /// file, of the same bytes and time, or this one changed — is not read
+    /// at all: nothing of it is consumed.
+    #[test]
+    fn a_file_that_is_not_the_one_is_not_read() {
+        use std::io::Seek as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("one");
+        std::fs::write(&path, vec![1u8; 70_000]).unwrap();
+        let version = seen(&path);
+        let other = tmp.path().join("other");
+        std::fs::write(&other, vec![1u8; 70_000]).unwrap();
+        filetime::set_file_mtime(&other, mtime_of(&path)).unwrap();
+        let mut file = std::fs::File::open(&other).unwrap();
+        assert!(content_of(&file, &version).is_err());
+        assert_eq!(file.stream_position().unwrap(), 0, "another file");
+
+        let was = mtime_of(&path);
+        std::fs::write(&path, vec![2u8; 70_000]).unwrap();
+        filetime::set_file_mtime(&path, was).unwrap();
+        let mut file = std::fs::File::open(&path).unwrap();
+        assert!(content_of(&file, &version).is_err());
+        assert_eq!(file.stream_position().unwrap(), 0, "the file changed");
     }
 
     /// No further than the size it was seen with: a file that grows as it
