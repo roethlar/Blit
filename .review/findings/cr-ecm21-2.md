@@ -1,9 +1,9 @@
 # cr-ecm21-2: a wire resume's hashes were paired with the version taken after them
 
 **Severity**: HIGH — a block written while later blocks were hashed is skipped by the source and the file reported complete with the wrong bytes
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r23` (Codex openreview, 2026-11-22) reviewed `5d2f8def..24d4064f` — the six `combined-r22` fixes — with `guard_confirmed: true`: "Checking the file version before and after hashing, ignoring empty blocks for acquisition, retaining the Unix write handle, and distinguishing volume failures from per-file failures are sound choices."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm21-2`)
+**Commit**: `7fe281bd`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r22` over `b92c9a17..5d2f8def` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r22.codex.md`. It completes cr-ecm20-1 (`5b3bf24e`).
 
 ## Evidence

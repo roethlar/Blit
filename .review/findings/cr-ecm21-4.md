@@ -1,9 +1,9 @@
 # cr-ecm21-4: delivery and failure cleanup lost the writer's handle
 
 **Severity**: HIGH — a failed wire resume marks a file renamed over its name one byte longer; a local resume whose identity cannot be read is acknowledged, and a move releases its source
-**Status**: Fixed on Unix, awaiting review; the Windows half is BLOCKED (no Windows host reachable — `michael@10.1.10.222` and `michael@10.1.10.173`: "No route to host", 2026-11-22)
+**Status**: Verified on Unix — `combined-r23` (Codex openreview, 2026-11-22) reviewed `5d2f8def..24d4064f` — the six `combined-r22` fixes — with `guard_confirmed: true`: "Checking the file version before and after hashing, ignoring empty blocks for acquisition, retaining the Unix write handle, and distinguishing volume failures from per-file failures are sound choices." An identity look that fails, and a handle left open by a source-reported failure, are cr-ecm22-3's and cr-ecm22-5's; the Windows half stays open
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm21-4`)
+**Commit**: `50b416ed`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r22` over `b92c9a17..5d2f8def` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r22.codex.md`. It completes cr-ecm20-1 (`5b3bf24e`) and cr-ecm20-4 (`ae10d707`).
 
 ## Evidence

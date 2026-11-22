@@ -1,9 +1,9 @@
 # cr-uv11-1: `find -type … -delete` removed whatever replaced the entry found
 
 **Severity**: HIGH — `find -type l -delete` removes a regular file that took the link's name after the walk tested it
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r23` (Codex openreview, 2026-11-22) reviewed `5d2f8def..24d4064f` — the six `combined-r22` fixes — with `guard_confirmed: true`. "Windows supplies no Unix parent identity, so the walker drops the known type. If a regular file replaces a selected link, `find -type l -delete` can remove that file. Preserve the type and check the entry without following links before removal." The remaining work is cr-uv12-1 (Windows)
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv11-1`)
+**Commit**: `6b965293`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r22` over `b92c9a17..5d2f8def` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r22.codex.md`. It completes cr-uv10-2 (`55f43417`).
 
 ## Evidence

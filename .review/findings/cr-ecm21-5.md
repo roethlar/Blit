@@ -1,9 +1,9 @@
 # cr-ecm21-5: a volume failure at a resume's hold was one file's
 
 **Severity**: MEDIUM — a destination that stops taking writes during a resume's hold is held as one file's failure, and the receiver drains every payload after it into a volume that takes none
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r23` (Codex openreview, 2026-11-22) reviewed `5d2f8def..24d4064f` — the six `combined-r22` fixes — with `guard_confirmed: true`: "Checking the file version before and after hashing, ignoring empty blocks for acquisition, retaining the Unix write handle, and distinguishing volume failures from per-file failures are sound choices."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm21-5`)
+**Commit**: `760119f4`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r22` over `b92c9a17..5d2f8def` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r22.codex.md`. It completes cr-ecm20-2 (`9ee5cb63`).
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-ecm21-3: the fresh-private-partial rule, locally and through a link
 
 **Severity**: HIGH — a local resume of a private source into a destination others can read patches it in place, for a reader who has it open; a wire resume through a link cut the file it names before it could set its mode
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r23` (Codex openreview, 2026-11-22) reviewed `5d2f8def..24d4064f` — the six `combined-r22` fixes — with `guard_confirmed: true`. "With a 256 KiB process file-size limit, Linux `copy --resume` exited 2 and replaced an 18-byte destination with an empty file. The rename succeeds before setting the unfinished length fails. Set the required mode and length on the staged file before renaming it, on both local and wire paths." "For `entry → middle → actual`, Linux `copy --resume` exited 0, replaced `middle` with a regular file, and left the old bytes in `actual`. Resolve the final referent within the destination boundary before placing the replacement." "A Linux acquisition probe showed that a mode-`0000` source reused the inode of a `0644` destination. If a privileged backup can read that source, an existing destination reader retains access to subsequent writes. Treat zero permission bits as a known mode. On the wire, use one metadata sample for reuse eligibility and the hash baseline so a permission change between the two reads cannot invalidate the decision." "A valid 255-byte basename made Linux `copy --resume` exit 2 with `File name too long` because the temporary name includes the entire basename plus a suffix. Generate a short sibling name independent of the destination basename and retry collisions." The remaining work is cr-ecm22-1, cr-ecm22-2, cr-ecm22-4 and cr-ecm22-6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm21-3`)
+**Commit**: `abe9d4a1`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r22` over `b92c9a17..5d2f8def` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r22.codex.md`. It completes cr-ecm20-2 (`9ee5cb63`).
 
 ## Evidence
