@@ -5220,16 +5220,7 @@ async fn destination_session_inner(
                 if let Some(raw) = header.raw_relative_path.as_deref() {
                     sink.note_raw_name(&header.relative_path, raw);
                 }
-                let outcome = if complete.ok {
-                    finish_block_record(sink.as_ref(), &header, &complete).await?
-                } else {
-                    // Contract v7: a failed close leaves the partial
-                    // unstamped and reports the file.
-                    crate::remote::transfer::SinkOutcome::failed(
-                        header.relative_path.clone(),
-                        complete.reason.clone(),
-                    )
-                };
+                let outcome = close_zero_block_record(sink.as_ref(), &header, &complete).await?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
                 contained_failures.merge_failures(&outcome);
@@ -6990,6 +6981,25 @@ async fn receive_block_record(
 /// (the wire complete frame carries only `total_bytes`, which must match
 /// the size the manifest promised, exactly as a file record must
 /// complete at `header.size` bytes).
+/// otp-7a: the close of a resume record no block came before — every
+/// block matched, or the source failed before its first: finalized, or
+/// (contract v7) failed — the partial stays unstamped and the file is
+/// reported, by the sink, told so (cr-ecm23-6). Reported here, the sink
+/// was never told, and kept what it had noted for the file to the
+/// session's end.
+async fn close_zero_block_record(
+    sink: &dyn TransferSink,
+    header: &FileHeader,
+    complete: &BlockTransferComplete,
+) -> Result<crate::remote::transfer::SinkOutcome> {
+    if complete.ok {
+        return finish_block_record(sink, header, complete).await;
+    }
+    sink.fail_resume_record(&header.relative_path, &complete.reason)
+        .await
+        .map_err(|e| tag_path(e, &header.relative_path))
+}
+
 async fn finish_block_record(
     sink: &dyn TransferSink,
     header: &FileHeader,
@@ -11215,6 +11225,55 @@ mod own_incomplete_copy_tests {
                 relative_path: "r.bin".to_string(),
                 offset: 0,
                 content: b"1234".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(outcome.file_failed("r.bin"), "{outcome:?}");
+        assert_eq!(sink.0.load(Ordering::SeqCst), 1, "the sink is told");
+    }
+
+    /// cr-ecm23-6: a resume record the source closes failed before its
+    /// first block goes to the sink as that, so it lets go of what it noted
+    /// for the file. It was reported failed here, and the sink never told.
+    #[tokio::test]
+    async fn a_failed_close_with_no_block_reaches_the_sink() {
+        struct Fails(std::sync::atomic::AtomicUsize, PathBuf);
+        #[async_trait::async_trait]
+        impl TransferSink for Fails {
+            async fn write_payload(
+                &self,
+                _payload: PreparedPayload,
+            ) -> Result<crate::remote::transfer::SinkOutcome> {
+                Ok(crate::remote::transfer::SinkOutcome::default())
+            }
+            async fn fail_resume_record(
+                &self,
+                path: &str,
+                reason: &str,
+            ) -> Result<crate::remote::transfer::SinkOutcome> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(crate::remote::transfer::SinkOutcome::failed(path, reason))
+            }
+            fn root(&self) -> &Path {
+                &self.1
+            }
+        }
+        let sink = Fails(std::sync::atomic::AtomicUsize::new(0), PathBuf::new());
+        let header = FileHeader {
+            relative_path: "r.bin".to_string(),
+            size: 8,
+            ..Default::default()
+        };
+        let outcome = close_zero_block_record(
+            &sink,
+            &header,
+            &crate::generated::BlockTransferComplete {
+                relative_path: "r.bin".to_string(),
+                total_bytes: 8,
+                windows_metadata: None,
+                ok: false,
+                reason: "source: cannot open".to_string(),
             },
         )
         .await
