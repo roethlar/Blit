@@ -88,6 +88,28 @@ pub fn resume_copy_from(
         .truncate(false)
         .open(dst)
         .with_context(|| format!("opening destination: {}", dst.display()))?;
+    // cr-ecm17-3: the partial — made now, or there already — is narrowed
+    // to what its source allows BEFORE a byte is written: a resume that
+    // failed part-way left a private file's bytes in a partial readable
+    // by all, made with the usual mask, its mode given only when the copy
+    // completed (cr-ecm16-1). If it cannot be narrowed, nothing is
+    // written.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let source = src_file.metadata()?.permissions().mode() & 0o7777;
+        let now = dst_file.metadata()?.permissions().mode() & 0o7777;
+        if now & !source != 0 {
+            dst_file
+                .set_permissions(std::fs::Permissions::from_mode(now & source))
+                .with_context(|| {
+                    format!(
+                        "narrowing {} to what its source allows before writing to it",
+                        dst.display()
+                    )
+                })?;
+        }
+    }
 
     // cr-win-1: while blocks are patched in place the destination must
     // never be the source's size — an interruption would otherwise leave a
@@ -222,6 +244,45 @@ mod tests {
         let mut src_file = File::open(&src)?;
         assert!(resume_copy_from(&mut src_file, 12_000, &dst, 1024).is_err());
         assert_eq!(std::fs::metadata(&dst)?.len(), 12_001);
+        Ok(())
+    }
+
+    /// cr-ecm17-3: a resume that fails part-way leaves nothing of its
+    /// source readable beyond what its source allows — not in a partial it
+    /// made, not in one left before with a wider mode. It left 1 KiB of a
+    /// private source in a partial readable by all.
+    #[cfg(unix)]
+    #[test]
+    fn an_interrupted_resume_leaves_nothing_readable_beyond_its_source() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir()?;
+        let src = tmp.path().join("private");
+        std::fs::write(&src, vec![9u8; 10_000])?;
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))?;
+        let mode_of = |path: &Path| -> Result<u32> {
+            Ok(std::fs::metadata(path)?.permissions().mode() & 0o7777)
+        };
+        let fresh = tmp.path().join("fresh");
+        let left = tmp.path().join("left");
+        std::fs::write(&left, vec![0u8; 512])?;
+        std::fs::set_permissions(&left, std::fs::Permissions::from_mode(0o644))?;
+        for dst in [&fresh, &left] {
+            // The source claims more than it holds: the read fails after
+            // blocks of it have landed.
+            assert!(resume_copy_from(&mut File::open(&src)?, 12_000, dst, 1024).is_err());
+            assert!(
+                std::fs::read(dst)?.contains(&9),
+                "some of the source landed in {}",
+                dst.display()
+            );
+            assert_eq!(
+                mode_of(dst)? & 0o077,
+                0,
+                "{} is readable beyond its owner: {:o}",
+                dst.display(),
+                mode_of(dst)?
+            );
+        }
         Ok(())
     }
 
