@@ -1,9 +1,9 @@
 # cr-ecm17-2: a failed write's cleanup through a link reported removed what it had left
 
 **Severity**: HIGH — a failed write through a link leaves its partial in the file the link names and reports it removed, so nothing tells a later run it is an incomplete copy
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r19` (Codex openreview, 2026-11-22) reviewed `ca377805..17f4eb97` — the eight `combined-r18` fixes — with `guard_confirmed: true`. "If the first unlink fails and the name becomes a symlink to the held partial, the second check reports `REMOVED` even though the partial is still reachable there. Preserve the incomplete-file outcome on that path." The remaining work is cr-ecm18-3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm17-2`)
+**Commit**: `6c1cc68d`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r18` over `7912da16..ca377805` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r18.codex.md`. It completes cr-ecm16-2 (`064534f4`), which carried cr-ecm15-1's follow-up.
 
 ## Evidence

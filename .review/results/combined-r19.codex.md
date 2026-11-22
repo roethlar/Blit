@@ -1,0 +1,23 @@
+I would keep the unified transfer engine and daemon-side filesystem operations. The goal of this change is to make interrupted copies safe to retry, remove a moved source only while it still represents the file delivered, and give users accurate filter warnings and native-style utility errors. I would carry the opened file and its identity through cleanup, verify move receipts against a stable file version, and derive warning examples from the effective filter.
+
+**Verdict — `acceptable_with_changes`.** The public per-scan record lets an external source participate in move accounting, and the small-file probe now times the actual close. Both changes fit that approach. I would require the following corrections.
+
+| Severity | Required change |
+|---|---|
+| High | **Keep ownership through record creation and commit.** I cancelled `begin_record` after its file appeared but before the open result reached the writer. A zero-byte destination remained for `--ignore-existing` to skip. During commit, the writer also gives up its handle before awaiting the flush, so cancellation can fall back to cleanup by pathname. Arm cleanup inside the operation that creates the file and retain an identity-bearing handle through the final await. [Record creation](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:1689) · [Commit](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:1875) |
+| High | **Verify both hard-link digest reads.** The scan reopens an absolute path without checking that it still holds the enumerated regular file. During removal, a write to an already-hashed block can leave the digest matching the receipt while the last unlink discards the new bytes. Hash through a verified descriptor, bound the read to the recorded size, recheck its version after hashing, and retain the name on any mismatch. [Source scan](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/source.rs:834) · [Last-link removal](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/deletion.rs:896) |
+| High | **Give a resume partial a private, owner-writable working mode from creation.** A reader that opens a fresh partial under its initial default mode keeps access after `chmod`. I also interrupted a resume from a `0444` source. The partial became `0444`, and the retry failed with `Permission denied`. Apply the final source mode on success and decline reuse of a broader existing partial when its access cannot be secured. [Resume destination](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/copy/file_copy/resume.rs:84) |
+| High | **Return the missing-module result immediately.** `start_is_contained` treats a missing root as a successful check. `ls`, `du`, and `find` then look up the path again. If the root resolves elsewhere by then, the command can read outside the configured module. Pass the observed missing-path error directly to the verb’s existing failure formatter. [Module-root check](/home/michael/dev/gitea_repos/blit_v2/crates/blit-daemon/src/service/admin.rs:129) |
+| Medium | **Use the same identity check on both removal attempts.** If the first unlink fails and the name becomes a symlink to the held partial, the second check reports `REMOVED` even though the partial is still reachable there. Preserve the incomplete-file outcome on that path. [Second removal](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:2506) |
+| Medium | **Show a concrete filename when glob spellings overlap.** The CLI advertised `1[A/]2` as an additional match for `--include '1[a/]2'`. I ran both spellings case-sensitively and both copied `1/2`. The proof omits `/`, which a class can match in a relative path. The verified filename `1A2` would make the warning accurate. [Class comparison](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/case_fold.rs:1248) |
+
+Linux formatting and strict Clippy passed. The workspace suite passed **1,951 tests with 2 ignored** after I set a Git discovery ceiling so two temporary-repository tests could not discover the enclosing checkout. Windows GNU cross-target strict Clippy passed. Runtime verification was Linux-only.
+
+For the independent guard, I made `SourceScan::seeing` discard its record. The external-source integration test failed at the missing record with exit 101. I restored the pinned Git blob, rebuilt, and the same test passed with exit 0. I removed the disposable export and verified that the shared tree showed only the review’s existing untracked records.
+
+```text
+base: ca37780587c4811b31d99771cb69e4a517217c94
+head: 17f4eb9745b26d276e4b5d327950efa0361a867c
+capability_ok: true
+guard_confirmed: true
+```

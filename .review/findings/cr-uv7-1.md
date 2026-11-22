@@ -1,9 +1,9 @@
 # cr-uv7-1: a later name of a file with several could go as the file that was sent, rewritten
 
 **Severity**: HIGH — a move removes the last name of a file rewritten (as many bytes, its time put back) while the removal was between its two looks at an earlier name: the rewritten bytes were sent to nobody
-**Status**: Fixed on Unix, awaiting review; the Windows half is cr-uv6-3's, open
+**Status**: Reviewed, found incomplete — `combined-r19` (Codex openreview, 2026-11-22) reviewed `ca377805..17f4eb97` — the eight `combined-r18` fixes — with `guard_confirmed: true`. "The scan reopens an absolute path without checking that it still holds the enumerated regular file. During removal, a write to an already-hashed block can leave the digest matching the receipt while the last unlink discards the new bytes. Hash through a verified descriptor, bound the read to the recorded size, recheck its version after hashing, and retain the name on any mismatch." The remaining work is cr-uv8-1
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv7-1`)
+**Commit**: `16379d85`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r18` over `7912da16..ca377805` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r18.codex.md`. It completes cr-uv6-1 (`17ac7abe`).
 
 ## Evidence

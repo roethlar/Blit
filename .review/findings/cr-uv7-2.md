@@ -1,9 +1,9 @@
 # cr-uv7-2: a module whose folder had gone was refused whole
 
 **Severity**: MEDIUM — `ls`, `du` and `find` of a module whose folder was moved or removed end with exit 1 and nothing in `--json`, where the local commands say `cannot access … No such file or directory`
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r19` (Codex openreview, 2026-11-22) reviewed `ca377805..17f4eb97` — the eight `combined-r18` fixes — with `guard_confirmed: true`. "`start_is_contained` treats a missing root as a successful check. `ls`, `du`, and `find` then look up the path again. If the root resolves elsewhere by then, the command can read outside the configured module. Pass the observed missing-path error directly to the verb's existing failure formatter." The remaining work is cr-uv8-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv7-2`)
+**Commit**: `cde61b9e`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r18` over `7912da16..ca377805` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r18.codex.md`. It completes cr-uv6-2 (`269d3b88`).
 
 ## Evidence

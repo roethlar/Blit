@@ -1,9 +1,9 @@
 # cr-uv7-3: a source outside the crate could not hand its walk's record back
 
 **Severity**: MEDIUM — a `TransferSource` written outside `blit-core` can record what its walk saw and give it to nobody: a move from it is given no account and removes nothing
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r19` (Codex openreview, 2026-11-22) reviewed `ca377805..17f4eb97` — the eight `combined-r18` fixes — with `guard_confirmed: true`: "The public per-scan record lets an external source participate in move accounting"; the reviewer's own guard was this fix's (the record discarded → the external-source test red)
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv7-3`)
+**Commit**: `de358e10`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r18` over `7912da16..ca377805` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r18.codex.md`. It completes cr-uv6-4 (`4d18150d`).
 
 ## Evidence

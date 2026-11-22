@@ -1,9 +1,9 @@
 # cr-ecm17-3: a resume that failed part-way left private bytes readable by all
 
 **Severity**: HIGH — with `--resume`, a copy of a private file that fails part-way leaves part of it in a partial of mode 644
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r19` (Codex openreview, 2026-11-22) reviewed `ca377805..17f4eb97` — the eight `combined-r18` fixes — with `guard_confirmed: true`. "A reader that opens a fresh partial under its initial default mode keeps access after `chmod`. I also interrupted a resume from a `0444` source. The partial became `0444`, and the retry failed with `Permission denied`. Apply the final source mode on success and decline reuse of a broader existing partial when its access cannot be secured." The remaining work is cr-ecm18-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm17-3`)
+**Commit**: `f2bbdb96`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r18` over `7912da16..ca377805` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r18.codex.md`. It completes cr-ecm16-1 (`cdfc2b95`).
 
 ## Evidence

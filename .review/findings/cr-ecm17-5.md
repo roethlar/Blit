@@ -1,9 +1,9 @@
 # cr-ecm17-5: the small-file probe's close timer timed a hand-over, not a close
 
 **Severity**: LOW — a diagnostic's figure: the reported cost of closing a shard member's file read as nothing
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r19` (Codex openreview, 2026-11-22) reviewed `ca377805..17f4eb97` — the eight `combined-r18` fixes — with `guard_confirmed: true`: "the small-file probe now times the actual close"
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm17-5`)
+**Commit**: `0339185f`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r18` over `7912da16..ca377805` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r18.codex.md`. It follows from cr-ecm16-2 (`064534f4`).
 
 ## Evidence

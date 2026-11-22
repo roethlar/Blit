@@ -1,9 +1,9 @@
 # cr-ecm17-4: the case line's proof assumed a `*` stops at a separator, and never tried a class on a tab
 
 **Severity**: MEDIUM — the line names, as what `--ignore-case` would add, a spelling some paths of which are matched either way
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r19` (Codex openreview, 2026-11-22) reviewed `ca377805..17f4eb97` — the eight `combined-r18` fixes — with `guard_confirmed: true`. "The CLI advertised `1[A/]2` as an additional match for `--include '1[a/]2'`. I ran both spellings case-sensitively and both copied `1/2`. The proof omits `/`, which a class can match in a relative path." The remaining work is cr-ecm18-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm17-4`)
+**Commit**: `c5077057`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r18` over `7912da16..ca377805` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r18.codex.md`. It completes cr-ecm16-4 (`9723cef9`).
 
 ## Evidence

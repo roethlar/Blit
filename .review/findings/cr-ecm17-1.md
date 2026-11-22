@@ -1,9 +1,9 @@
 # cr-ecm17-1: a record cancelled while it noted its file left an empty file
 
 **Severity**: HIGH — a cancelled transfer under `--ignore-existing` leaves an empty file at the destination, which every later run keeping what exists skips as somebody's
-**Status**: Fixed on Unix, awaiting review; the Windows half (cr-ecm16-2's) stays open
+**Status**: Reviewed, found incomplete — `combined-r19` (Codex openreview, 2026-11-22) reviewed `ca377805..17f4eb97` — the eight `combined-r18` fixes — with `guard_confirmed: true`. "I cancelled `begin_record` after its file appeared but before the open result reached the writer. A zero-byte destination remained for `--ignore-existing` to skip. During commit, the writer also gives up its handle before awaiting the flush, so cancellation can fall back to cleanup by pathname. Arm cleanup inside the operation that creates the file and retain an identity-bearing handle through the final await." The remaining work is cr-ecm18-1
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm17-1`)
+**Commit**: `8b984864`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r18` over `7912da16..ca377805` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r18.codex.md`. It completes cr-ecm16-2 (`064534f4`).
 
 ## Evidence
