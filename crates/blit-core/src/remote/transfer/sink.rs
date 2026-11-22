@@ -2749,12 +2749,24 @@ fn hold_partial(
     }
     let _ = baseline;
     let held = hold_partial_unfinished(dst, total_size);
-    // Elsewhere than Unix the partial is written by its name, as before.
+    // cr-ecm23-2: on Unix every block and the completion go through what
+    // the hold holds, so a hold that cannot be had is the file's failure:
+    // its first look that failed was dropped, and the completion, holding
+    // nothing, opened the name and reported the file written.
     #[cfg(unix)]
-    return held.map(|file| HeldPartial::of(file, dst)).transpose();
+    {
+        let file = held.with_context(|| format!("holding the resume partial {}", dst.display()))?;
+        HeldPartial::of(file, dst).map(Some)
+    }
+    // Elsewhere than Unix the partial is written by its name, as before.
     #[cfg(not(unix))]
     {
-        drop(held);
+        if let Err(error) = held {
+            log::warn!(
+                "could not hold the resume partial {} unfinished: {error}",
+                dst.display()
+            );
+        }
         Ok(None)
     }
 }
@@ -2863,10 +2875,11 @@ fn hold_fault(_dst: &Path) -> Result<()> {
 
 /// cr-win-1: hold a resume partial one byte longer than its source before
 /// the first block patches it (see [`TransferSink::hold_resume_partial`]).
-/// Best-effort: a partial this end cannot open for writing cannot be
-/// patched either, so its blocks fail and the file is reported. Created
-/// when missing, as the block writes would create it.
-fn hold_partial_unfinished(dst: &Path, total_size: u64) -> Option<std::fs::File> {
+/// Created when missing, as the block writes would create it. Elsewhere
+/// than Unix its failure is passed over — a partial this end cannot open
+/// for writing cannot be patched either, so its blocks fail and the file is
+/// reported; on Unix it is the file's failure (cr-ecm23-2).
+fn hold_partial_unfinished(dst: &Path, total_size: u64) -> std::io::Result<std::fs::File> {
     // cr-ecm19-4: a partial made here is made private (600), and one here
     // already is made so through this handle — whatever the mask it was
     // made under — before a block patches it.
@@ -2877,8 +2890,10 @@ fn hold_partial_unfinished(dst: &Path, total_size: u64) -> Option<std::fs::File>
         use std::os::unix::fs::OpenOptionsExt as _;
         hold.mode(0o600);
     }
-    let held = hold.open(dst).and_then(|file| {
+    hold.open(dst).and_then(|file| {
         while_a_file_is_made(dst);
+        #[cfg(unix)]
+        identity_fault(dst)?;
         let meta = file.metadata()?;
         #[cfg(unix)]
         if meta.is_file() {
@@ -2894,17 +2909,7 @@ fn hold_partial_unfinished(dst: &Path, total_size: u64) -> Option<std::fs::File>
             mark_unfinished(&file, total_size)?;
         }
         Ok(file)
-    });
-    match held {
-        Ok(file) => Some(file),
-        Err(error) => {
-            log::warn!(
-                "could not hold the resume partial {} unfinished: {error}",
-                dst.display()
-            );
-            None
-        }
-    }
+    })
 }
 
 /// cr-win-1: settle a target whose write failed after touching it, so it
@@ -7979,6 +7984,44 @@ mod cr_win_1_tests {
         assert_eq!(std::fs::read(&at).unwrap(), b"somebody's", "not marked");
     }
 
+    /// cr-ecm23-2: a hold with no word of the hashes whose first look at the
+    /// file fails fails the file: its completion is refused. The failure was
+    /// passed over, and the completion, holding nothing, opened the name and
+    /// reported the file written.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hold_with_no_word_of_the_hashes_fails_when_it_cannot_be_had() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let at = dst.join("r.bin");
+        std::fs::write(&at, b"0123456789").unwrap();
+        IDENTITY_FAULTS.lock().unwrap().push(at.clone());
+        let held = sink.hold_resume_partial("r.bin", 10).await;
+        IDENTITY_FAULTS.lock().unwrap().retain(|fault| fault != &at);
+        held.unwrap();
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "r.bin".to_string(),
+                total_size: 10,
+                mtime_seconds: 0,
+                permissions: 0o600,
+                windows_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert!(outcome.file_failed("r.bin"), "{outcome:?}");
+        assert_eq!(outcome.files_written, 0, "{outcome:?}");
+    }
+
     /// cr-ecm23-1: a fresh partial for the wire is known — which file it is
     /// — before it takes the destination's place: a look that fails leaves
     /// the destination as it stood, and the file fails. Learned after the
@@ -8545,7 +8588,7 @@ mod cr_win_1_tests {
             ));
             Hooked(fresh.clone())
         };
-        hold_partial_unfinished(&fresh, 10);
+        hold_partial_unfinished(&fresh, 10).unwrap();
         let made_as = seen.lock().unwrap().expect("the seam ran");
         assert_eq!(made_as & 0o077, 0, "made as {made_as:o}");
         assert_eq!(mode_of(&fresh), 0o600);
@@ -8553,7 +8596,7 @@ mod cr_win_1_tests {
         let there = tmp.path().join("there");
         std::fs::write(&there, b"old").unwrap();
         std::fs::set_permissions(&there, std::fs::Permissions::from_mode(0o644)).unwrap();
-        hold_partial_unfinished(&there, 10);
+        hold_partial_unfinished(&there, 10).unwrap();
         assert_eq!(mode_of(&there), 0o600);
 
         let by_a_block = tmp.path().join("by-a-block");
