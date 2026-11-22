@@ -148,7 +148,11 @@ fn open_resume_partial_with(
         .look()
         .with_context(|| format!("looking at {}", dst.display()))?
     {
-        if is_regular(mode) && !reusable(mode, owner) {
+        // cr-ecm26-5: and what is not a regular file — a FIFO, a socket, a
+        // device — is not opened: it is replaced whole (a directory there
+        // refuses the rename). Opened, a FIFO this run could only read
+        // waited for a writer.
+        if !is_regular(mode) || !reusable(mode, owner) {
             return fresh(&resolved);
         }
     }
@@ -193,6 +197,11 @@ fn open_resume_partial_with(
     };
     while_a_partial_is_opened(dst);
     let found = file.metadata()?;
+    // cr-ecm26-5: and what was opened is a regular file, or it is replaced.
+    if !found.is_file() {
+        drop(file);
+        return fresh(&resolved);
+    }
     // cr-ecm22-4: a source of mode 0000 is a mode known, and the most
     // private of all — it was taken for no mode, and the destination's
     // readers kept it. cr-ecm23-4: and only a file this run's user owns is
@@ -1163,6 +1172,43 @@ mod tests {
             0,
             "nothing elsewhere"
         );
+        Ok(())
+    }
+
+    /// cr-ecm26-5: a FIFO at the name — one this run may only read — is
+    /// replaced whole, not opened: the resume ends with the source's bytes
+    /// in a regular file. Opened to be read, the FIFO waited for a writer,
+    /// and the resume with it.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_the_name_is_replaced_not_opened() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let data = vec![7u8; 4096];
+        std::fs::write(&src, &data)?;
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))?;
+        let dst = tmp.path().join("fifo");
+        let name = std::ffi::CString::new(dst.as_os_str().as_encoded_bytes())?;
+        // SAFETY: `name` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o444) }, 0);
+        let (done, waited) = std::sync::mpsc::channel();
+        {
+            let (src, dst, data) = (src.clone(), dst.clone(), data.clone());
+            std::thread::spawn(move || {
+                let copied = File::open(&src)
+                    .map_err(eyre::Report::new)
+                    .and_then(|mut opened| {
+                        resume_copy_from(&mut opened, data.len() as u64, &dst, 1024)
+                    });
+                let _ = done.send(copied.map(|_| ()));
+            });
+        }
+        waited
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .map_err(|_| eyre::eyre!("the resume waited on the FIFO"))??;
+        assert!(std::fs::symlink_metadata(&dst)?.file_type().is_file());
+        assert_eq!(std::fs::read(&dst)?, data);
         Ok(())
     }
 
