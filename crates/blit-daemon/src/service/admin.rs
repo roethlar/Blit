@@ -116,18 +116,21 @@ impl TypedOperand {
 /// what could not be looked up. That part out of the module, the request
 /// is refused as before.
 #[allow(clippy::result_large_err)]
-fn start_is_contained(module_root: &Path, start_abs: &Path) -> Result<(), Status> {
+fn start_is_contained(module_root: &Path, start_abs: PathBuf) -> Result<Readable, Status> {
     use std::io::ErrorKind::{NotADirectory, NotFound};
     // cr-uv7-2: nothing at all at the root's path — the module's folder
     // was moved or removed — is no way out of the module, for the module
-    // itself or anything below it. The read goes on, finds nothing, and
-    // says so in its command's own words (`cannot access …: No such file
-    // or directory`, and its exit status), as for any path that is not
-    // there: the request was refused whole, and `--json` was empty.
-    // Something there that cannot be resolved — a link to nothing, a
-    // ring — is judged below, and refused, as before.
-    if fs::symlink_metadata(module_root).is_err_and(|error| error.kind() == NotFound) {
-        return Ok(());
+    // itself or anything below it; it is told in its command's own words
+    // (`cannot access …: No such file or directory`, and its exit status),
+    // as for any path that is not there: the request was refused whole,
+    // and `--json` was empty. cr-uv8-2: told WITH THE ERROR SEEN HERE, and
+    // nothing looked up again — the read that went on to find nothing
+    // could find, by then, a link to somewhere else at the root's path.
+    // Something there that cannot be resolved — a link to nothing, a ring
+    // — is judged below, and refused, as before.
+    match fs::symlink_metadata(module_root) {
+        Err(error) if error.kind() == NotFound => return Ok(Readable::Gone(error)),
+        _ => {}
     }
     // The module itself, however it was typed, is in the module. Judged
     // by its ancestors — as what is no directory, typed as one, is — a
@@ -143,7 +146,7 @@ fn start_is_contained(module_root: &Path, start_abs: &Path) -> Result<(), Status
     // and is told `Not a directory` by the read.
     if start_abs.components().eq(module_root.components()) {
         return match fs::canonicalize(module_root) {
-            Ok(now) if now == module_root => Ok(()),
+            Ok(now) if now == module_root => Ok(Readable::At(start_abs)),
             Ok(now) => Err(Status::permission_denied(format!(
                 "path containment: the module's root '{}' now resolves to '{}'",
                 module_root.display(),
@@ -163,7 +166,18 @@ fn start_is_contained(module_root: &Path, start_abs: &Path) -> Result<(), Status
         }
     }
     blit_core::path_safety::verify_contained(module_root, &looked_up)
-        .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))
+        .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))?;
+    Ok(Readable::At(start_abs))
+}
+
+/// What [`start_is_contained`] makes of a read's start (cr-uv8-2): the
+/// path to read — the only way a read gets one — or what to tell instead.
+#[derive(Debug)]
+enum Readable {
+    At(PathBuf),
+    /// Nothing at the module root's path: this error, told as the
+    /// command tells a start that is not there.
+    Gone(std::io::Error),
 }
 
 /// Read a removal's operands. One that cannot be an operand — the
@@ -552,12 +566,11 @@ pub(crate) fn stream_disk_usage(
 ) -> Result<(), Status> {
     // As typed (cr-uv1-1): `du link/` measures the directory the link
     // points to, and `du doc/` of a file is `Not a directory`.
-    let start_abs = start.below(&module_root);
     // F2: containment check before any filesystem operation. The walk
     // never follows a link, but the start point itself can be a symlink
     // that points outside the module root. `module_root` here is the
     // canonical root — du callers don't mutate it.
-    start_is_contained(&module_root, &start_abs)?;
+    let readable = start_is_contained(&module_root, start.below(&module_root))?;
 
     let send = |reply: du_reply::Reply| {
         sender
@@ -583,6 +596,13 @@ pub(crate) fn stream_disk_usage(
         }
     };
     let closed = || response_channel_closed("sending disk usage result");
+    let start_abs = match readable {
+        Readable::At(start_abs) => start_abs,
+        Readable::Gone(error) => {
+            return send(failure(Path::new(""), "cannot access", &error))
+                .map_err(|Stopped| closed());
+        }
+    };
     match disk_usage(&start_abs, options, &mut emit) {
         Ok(()) => Ok(()),
         Err(UsageEnd::Stopped(Stopped)) => Err(closed()),
@@ -617,11 +637,10 @@ pub(crate) fn stream_listing(
 
     // As typed (cr-uv1-1): `ls link/` lists the directory the link points
     // to, and `ls doc/` of a file is `Not a directory`.
-    let start_abs = start.below(&module_root);
     // F2: containment check before any filesystem operation. A path that
     // is itself a link out of the module is refused here, whether or not
     // it would be listed into. `module_root` is the canonical root.
-    start_is_contained(&module_root, &start_abs)?;
+    let readable = start_is_contained(&module_root, start.below(&module_root))?;
 
     let send = |reply: Reply| {
         sender
@@ -669,6 +688,13 @@ pub(crate) fn stream_listing(
             raw_name,
             reason: os_reason(error),
         })
+    };
+    let start_abs = match readable {
+        Readable::At(start_abs) => start_abs,
+        Readable::Gone(error) => {
+            return send(failure("cannot access", std::ffi::OsStr::new(""), &error))
+                .map_err(|Stopped| response_channel_closed("sending listing"));
+        }
     };
     let mut batch: Vec<LsEntry> = Vec::new();
     let listed = {
@@ -764,13 +790,12 @@ pub(crate) fn stream_find(
     // As typed (cr-uv1-1): `find link/` and `find link/.` start in the
     // directory the link points to, and `find doc/` of a file is
     // `Not a directory`.
-    let start_abs = start.below(&module_root);
     let start_as_directory = start.as_directory;
     // F2: containment check before any filesystem operation. The walk
     // follows no link below the start, and a start that is itself a link
     // out of the module is refused here, whether or not it would be
     // entered. `module_root` is the canonical root.
-    start_is_contained(&module_root, &start_abs)?;
+    let readable = start_is_contained(&module_root, start.below(&module_root))?;
 
     let mut found = FoundBatch {
         paths: Vec::with_capacity(FoundBatch::MOST),
@@ -784,6 +809,14 @@ pub(crate) fn stream_find(
             reason: os_reason(error),
             deleting,
         })
+    };
+    let start_abs = match readable {
+        Readable::At(start_abs) => start_abs,
+        Readable::Gone(error) => {
+            return found
+                .reply(failure(Path::new(""), &error, false))
+                .map_err(|Stopped| response_channel_closed("sending find result"));
+        }
     };
     // The start by its names alone, from the module's root: no separator
     // or `.` after it to make the system look through a link standing
@@ -1669,7 +1702,7 @@ mod typed_operand_tests {
             for typed in ["", "."] {
                 let at = start(typed).below(root);
                 assert!(
-                    start_is_contained(root, &at).is_ok(),
+                    start_is_contained(root, at).is_ok(),
                     "{typed:?} of {root:?}"
                 );
             }
@@ -1682,7 +1715,7 @@ mod typed_operand_tests {
         symlink(&outside, &module).unwrap();
         for typed in ["", ".", "ring", "ring/x"] {
             let at = start(typed).below(&module);
-            let refused = start_is_contained(&module, &at).expect_err(typed);
+            let refused = start_is_contained(&module, at).expect_err(typed);
             assert_eq!(refused.code(), tonic::Code::PermissionDenied, "{typed:?}");
             assert!(refused.message().contains("path containment"), "{typed:?}");
         }
@@ -1692,24 +1725,31 @@ mod typed_operand_tests {
         symlink(top.join("nowhere"), &module).unwrap();
         for typed in ["", "."] {
             let at = start(typed).below(&module);
-            assert!(start_is_contained(&module, &at).is_err(), "{typed:?}");
+            assert!(start_is_contained(&module, at).is_err(), "{typed:?}");
         }
         fs::remove_file(&module).unwrap();
+        // cr-uv8-2: and what is told is the error seen, the path not read.
         for typed in ["", ".", "ring/x"] {
             let at = start(typed).below(&module);
-            assert!(start_is_contained(&module, &at).is_ok(), "{typed:?}");
+            assert!(
+                matches!(
+                    start_is_contained(&module, at),
+                    Ok(Readable::Gone(ref error)) if error.kind() == std::io::ErrorKind::NotFound
+                ),
+                "{typed:?}"
+            );
         }
         fs::rename(&moved, &module).unwrap();
         // Not looked up, in the module: the read goes on, and fails there.
         for typed in ["ring/x", "ring/x/y", "ring/", "missing/x"] {
             let at = start(typed).below(&module);
-            assert!(start_is_contained(&module, &at).is_ok(), "{typed:?}");
+            assert!(start_is_contained(&module, at).is_ok(), "{typed:?}");
         }
         // By a way out of the module: refused, whatever cannot be looked
         // up beyond the link that leaves it.
         for typed in ["out", "out/", "out/ring/x", "out/missing"] {
             let at = start(typed).below(&module);
-            let refused = start_is_contained(&module, &at).expect_err(typed);
+            let refused = start_is_contained(&module, at).expect_err(typed);
             assert_eq!(refused.code(), tonic::Code::PermissionDenied, "{typed:?}");
             assert!(refused.message().contains("path containment"), "{typed:?}");
         }
