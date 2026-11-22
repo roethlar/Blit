@@ -372,6 +372,34 @@ mod tests {
         (names, ended.err().map(|end| format!("{end:?}")))
     }
 
+    /// cr-uv10-1: and nothing a link put above its root leads to. The root
+    /// is a path with no link in it, resolved when it was configured; a
+    /// folder above it replaced by a link to another tree led the listing
+    /// there — the root opened by its path. It is an error now, for the
+    /// root itself and for a path below it.
+    #[cfg(unix)]
+    #[test]
+    fn a_listing_is_not_led_away_by_a_link_above_its_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let top = tmp.path().canonicalize().unwrap();
+        let root = top.join("above").join("module");
+        fs::create_dir_all(root.join("dir")).unwrap();
+        fs::write(root.join("dir/inside"), b"").unwrap();
+        fs::create_dir_all(top.join("elsewhere/module/dir")).unwrap();
+        fs::write(top.join("elsewhere/module/dir/leaked"), b"").unwrap();
+        assert_eq!(listed_in(&root, &root).0, ["dir"]);
+        assert_eq!(listed_in(&root.join("dir"), &root).0, ["inside"]);
+        fs::rename(top.join("above"), top.join("above-was-here")).unwrap();
+        std::os::unix::fs::symlink(top.join("elsewhere"), top.join("above")).unwrap();
+        for start in [root.clone(), root.join("dir")] {
+            let (names, ended) = listed_in(&start, &root);
+            assert!(
+                names.is_empty() && ended.is_some(),
+                "{start:?}: {names:?} {ended:?}"
+            );
+        }
+    }
+
     /// cr-uv9-1: a listing reads what its root holds and nothing outside
     /// it. A start replaced by a link as it is about to be read, or a
     /// directory on the way to what a start links to, is an error — by

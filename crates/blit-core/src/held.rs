@@ -260,6 +260,54 @@ mod imp {
     /// each in the one before and never through a link; searched, and
     /// opened to be listed with `to_list`. With no root, opened by its
     /// path.
+    /// cr-uv10-1: the directory at an ABSOLUTE path with no link in it — the
+    /// root a walk is given, resolved when it was configured — opened from
+    /// `/` one name at a time, never through a link. A folder above it
+    /// replaced by a link would have led the open, by the path, wherever
+    /// the link points; here it is an error. A relative path is opened by
+    /// its path.
+    fn open_unlinked(path: &Path, last_flags: libc::c_int) -> io::Result<OwnedFd> {
+        if !path.is_absolute() {
+            return open_path(path, last_flags);
+        }
+        let names: Vec<&OsStr> = path
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(name) => Some(Ok(name)),
+                Component::RootDir => None,
+                _ => Some(Err(io::Error::from(io::ErrorKind::InvalidInput))),
+            })
+            .collect::<io::Result<_>>()?;
+        if names.is_empty() {
+            return open_path(path, last_flags);
+        }
+        let mut held = open_path(
+            Path::new("/"),
+            TO_SEARCH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )?;
+        for (index, name) in names.iter().enumerate() {
+            let flags = if index + 1 == names.len() {
+                last_flags
+            } else {
+                TO_SEARCH | libc::O_DIRECTORY | libc::O_CLOEXEC
+            };
+            held = open_at(held.as_raw_fd(), &c_name(name)?, flags | libc::O_NOFOLLOW)?;
+        }
+        Ok(held)
+    }
+
+    /// cr-uv10-1: the entry at an absolute path with no link in it, itself:
+    /// looked up in its directory, opened by [`open_unlinked`].
+    fn look_unlinked(path: &Path) -> io::Result<Looked> {
+        match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) if path.is_absolute() => {
+                let held = open_unlinked(parent, TO_SEARCH | libc::O_DIRECTORY | libc::O_CLOEXEC)?;
+                look_at(held.as_raw_fd(), &c_name(name)?, false)
+            }
+            _ => look_path(path),
+        }
+    }
+
     fn open_canonical(canonical: &Path, root: Option<&Path>, to_list: bool) -> io::Result<OwnedFd> {
         let last_flags = if to_list {
             TO_LIST
@@ -282,12 +330,9 @@ mod imp {
             .collect::<io::Result<_>>()?;
         if names.is_empty() {
             before_entering(root);
-            return open_path(root, last_flags | libc::O_NOFOLLOW);
+            return open_unlinked(root, last_flags);
         }
-        let mut held = open_path(
-            root,
-            TO_SEARCH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )?;
+        let mut held = open_unlinked(root, TO_SEARCH | libc::O_DIRECTORY | libc::O_CLOEXEC)?;
         let mut at = root.to_path_buf();
         for (index, name) in names.iter().enumerate() {
             at.push(name);
@@ -537,7 +582,9 @@ mod imp {
                 Some(root) if path != root => {
                     look_held(open_canonical(path, Some(root), false)?.as_raw_fd())
                 }
-                _ => look_path(path),
+                // cr-uv10-1: the root itself, never through a link above it.
+                Some(_) => look_unlinked(path),
+                None => look_path(path),
             }
         }
 
