@@ -1,9 +1,9 @@
 # cr-ecm24-7: a directory that can be searched but not listed was refused a fresh partial
 
 **Severity**: MEDIUM — a resume that replaces a destination in a directory this run may write and search but not list (0300) failed with `EACCES`; it succeeded before cr-ecm23-3, which brought this in
-**Status**: Fixed on Unix, awaiting review
+**Status**: Verified on Unix — `combined-r26` (Codex openreview, 2026-11-22) reviewed `19025839..05ff50d7` — the eight `combined-r25` fixes — with `guard_confirmed: true`: "I would keep the new Unix destination resolver. It handles exact-file destinations and directories the user can write and search without listing."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm24-7`)
+**Commit**: `948dafda`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r25` over `c89b1eb1..19025839` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r25.codex.md`. It completes cr-ecm23-3 (`6bf9c2f9`).
 
 ## Evidence

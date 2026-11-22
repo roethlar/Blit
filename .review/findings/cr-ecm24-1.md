@@ -1,9 +1,9 @@
 # cr-ecm24-1: a local resume created through a link before the destination was checked
 
 **Severity**: HIGH — a local resume through a link to a name outside the destination, not there yet, made a `0600` file there, and that new file then passed the reuse check
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r26` (Codex openreview, 2026-11-22) reviewed `19025839..05ff50d7` — the eight `combined-r25` fixes — with `guard_confirmed: true`: "I would keep the new Unix destination resolver. It handles exact-file destinations and directories the user can write and search without listing." "A whole-file grant creates the missing file by pathname and checks its identity afterward. An injected identity failure left a visible nine-byte file. A concurrent parent change can also redirect that creation. Prepare the file in the held directory and publish it with exclusive-create semantics." The remaining work is cr-ecm25-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm24-1`)
+**Commit**: `4f0978c2`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r25` over `c89b1eb1..19025839` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r25.codex.md`. It completes cr-ecm23-3 (`6bf9c2f9`).
 
 ## Evidence

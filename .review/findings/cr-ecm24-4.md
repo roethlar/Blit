@@ -1,9 +1,9 @@
 # cr-ecm24-4: a destination this run could not read aborted the transfer
 
 **Severity**: HIGH — an unreadable destination (`0004`) in a writable directory ended the whole pull while its hashes were taken, though its mode already said a `0600` source needed a fresh copy; older than this plan
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r26` (Codex openreview, 2026-11-22) reviewed `19025839..05ff50d7` — the eight `combined-r25` fixes — with `guard_confirmed: true`. "An injected `EIO` on the second destination block propagated out of hash computation. The grant sender then returns early, abandoning unrelated files. Discard the incomplete hashes and request the whole file when the error is confined to that file." "`blit copy --resume` from a `0600` source to an owned `0004` destination in a writable directory exited 2. The wire path already selects a fresh copy for this case. Make that decision locally before requiring read access to the old file." The remaining work is cr-ecm25-3 and cr-ecm25-5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm24-4`)
+**Commit**: `f6cb0495`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r25` over `c89b1eb1..19025839` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r25.codex.md`. It was there at both of the reviewer's revisions.
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-ecm24-8: a closed record left its raw name and its hold marker
 
 **Severity**: MEDIUM — after a resume record closed, failed or completed, the sink kept its raw-name mapping and its hold marker to the session's end
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r26` (Codex openreview, 2026-11-22) reviewed `19025839..05ff50d7` — the eight `combined-r25` fixes — with `guard_confirmed: true`: nothing further asked of it; a file the source skips is cr-ecm25-6's
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm24-8`)
+**Commit**: `b38564c2`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r25` over `c89b1eb1..19025839` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r25.codex.md`. It completes cr-ecm22-5 (`bdc472dd`) and cr-ecm23-6 (`a3b73d30`).
 
 ## Evidence

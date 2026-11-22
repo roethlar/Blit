@@ -1,9 +1,9 @@
 # cr-ecm24-2: a local resume published its fresh partial before it had every handle it needed
 
 **Severity**: HIGH — with the cleanup handle's duplication refused (`EMFILE`), an eight-byte destination was left nine bytes of nothing before a byte of the source was written
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r26` (Codex openreview, 2026-11-22) reviewed `19025839..05ff50d7` — the eight `combined-r25` fixes — with `guard_confirmed: true`. "Injecting `EMFILE` at the clone used for metadata updates left nine zero bytes in place of an eight-byte destination before any source bytes were written. Carry the acquired handle through copying and metadata updates." "Refusing the cleanup handle changed a reusable file from `0644` to `0600`. With an absent destination, the same refusal left an empty file. Acquire the handle before changing an existing file's mode, and stage a new file until acquisition succeeds." The remaining work is cr-ecm25-1 and cr-ecm25-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm24-2`)
+**Commit**: `7778af82`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r25` over `c89b1eb1..19025839` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r25.codex.md`. It completes cr-ecm23-1 (`399adf58`) for the local route.
 
 ## Evidence

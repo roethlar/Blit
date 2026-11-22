@@ -1,9 +1,9 @@
 # cr-ecm24-3: a destination that is one file was refused its own replacement
 
 **Severity**: HIGH — a resumed pull to an exact file path (a `0600` source over an existing `0644` target) exited 2; it succeeded before cr-ecm23-3, which brought this in
-**Status**: Fixed on Unix, awaiting review
+**Status**: Verified on Unix — `combined-r26` (Codex openreview, 2026-11-22) reviewed `19025839..05ff50d7` — the eight `combined-r25` fixes — with `guard_confirmed: true`: "I would keep the new Unix destination resolver. It handles exact-file destinations and directories the user can write and search without listing."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm24-3`)
+**Commit**: `1ea96c6b`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r25` over `c89b1eb1..19025839` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r25.codex.md`. It completes cr-ecm23-3 (`6bf9c2f9`).
 
 ## Evidence

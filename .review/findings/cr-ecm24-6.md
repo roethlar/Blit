@@ -1,9 +1,9 @@
 # cr-ecm24-6: a name typed as a directory was made a file
 
 **Severity**: MEDIUM — a fresh partial for `absent/` was renamed to a regular file `absent`; before cr-ecm23-3, which brought this in, the name was refused
-**Status**: Fixed on Unix, awaiting review
+**Status**: Verified on Unix — `combined-r26` (Codex openreview, 2026-11-22) reviewed `19025839..05ff50d7` — the eight `combined-r25` fixes — with `guard_confirmed: true`: "I would keep the new Unix destination resolver. It handles exact-file destinations and directories the user can write and search without listing." (the resolver it lives in kept)
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm24-6`)
+**Commit**: `b974de0c`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r25` over `c89b1eb1..19025839` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r25.codex.md`. It completes cr-ecm23-3 (`6bf9c2f9`).
 
 ## Evidence

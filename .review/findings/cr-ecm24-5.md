@@ -1,9 +1,9 @@
 # cr-ecm24-5: a hold that could not make its partial private wrote it anyway
 
 **Severity**: HIGH — on the wire's hold with no word of the hashes, a refused `set_permissions(0600)` was only logged, and the partial was patched with the mode it had
-**Status**: Fixed on Unix, awaiting review
+**Status**: Verified on Unix — `combined-r26` (Codex openreview, 2026-11-22) reviewed `19025839..05ff50d7` — the eight `combined-r25` fixes — with `guard_confirmed: true`: nothing further asked of it
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm24-5`)
+**Commit**: `f2e49297`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r25` over `c89b1eb1..19025839` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r25.codex.md`. It completes cr-ecm23-2 (`99c909fe`).
 
 ## Evidence
