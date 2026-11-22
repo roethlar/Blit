@@ -115,7 +115,13 @@ pub fn open_resume_partial(
     // private of all — it was taken for no mode, and the destination's
     // readers kept it.
     let wider = source_mode.is_some_and(|source| found.mode() & 0o077 & !(source & 0o077) != 0);
+    // cr-ecm23-4: and only a file this run's user owns is reused: one
+    // another owns stays theirs, readable by them whatever its mode, and
+    // what lands in it would be theirs to read. A run as root may set any
+    // file's mode, so that was no test of it.
+    let foreign = found.uid() != effective_user(dst);
     if !wider
+        && !foreign
         && make_partial_private(&file)
             .with_context(|| format!("making the partial {} private", dst.display()))?
     {
@@ -140,6 +146,29 @@ pub fn open_resume_partial(
     drop(file);
     Ok((fresh_partial(dst, src_len.saturating_add(1))?, 0))
 }
+
+/// The user this run is to the system — its effective user id. Test seam
+/// (cr-ecm23-4): a test may make the run another user for one path — root,
+/// which no test runs as. Production never sets it.
+#[cfg(unix)]
+pub(crate) fn effective_user(_at: &Path) -> u32 {
+    #[cfg(test)]
+    if let Some(user) = RUN_AS.lock().ok().and_then(|run_as| {
+        run_as
+            .iter()
+            .find(|(at, _)| at == _at)
+            .map(|(_, user)| *user)
+    }) {
+        return user;
+    }
+    // SAFETY: `geteuid` has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// The paths a test runs as another user for ([`effective_user`]).
+#[cfg(all(test, unix))]
+pub(crate) static RUN_AS: std::sync::Mutex<Vec<(std::path::PathBuf, u32)>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// cr-ecm19-4: make the partial `file` private and writable by its owner
 /// (600) through that handle. `Ok(false)`: this run may not set its mode —
@@ -638,6 +667,40 @@ mod tests {
                 0o644
             );
         }
+        Ok(())
+    }
+
+    /// cr-ecm23-4: a destination another user owns is not reused, even by a
+    /// run that may set its mode (root): its owner can read what lands in
+    /// it. Made private and patched in place, it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_another_owns_takes_a_fresh_partial() -> Result<()> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let data = vec![7u8; 4096];
+        std::fs::write(&src, &data)?;
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))?;
+        let dst = tmp.path().join("dst");
+        std::fs::write(&dst, &data[..1000])?;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o600))?;
+        let found = std::fs::metadata(&dst)?;
+        if found.uid() == 0 {
+            // Run as root, the file is root's own: nothing to model.
+            return Ok(());
+        }
+        // The run as root, and the file this test's user's — another's.
+        RUN_AS.lock().unwrap().push((dst.clone(), 0));
+        let copied = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024);
+        RUN_AS.lock().unwrap().retain(|(at, _)| at != &dst);
+        copied?;
+        assert_ne!(
+            std::fs::metadata(&dst)?.ino(),
+            found.ino(),
+            "a fresh partial"
+        );
+        assert_eq!(std::fs::read(&dst)?, data);
         Ok(())
     }
 

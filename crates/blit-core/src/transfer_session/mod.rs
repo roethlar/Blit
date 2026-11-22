@@ -6711,12 +6711,12 @@ async fn compute_resume_block_hashes(
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
-            // SAFETY: `geteuid` has no preconditions and cannot fail.
-            let me = unsafe { libc::geteuid() };
-            let ours = me == 0 || found.uid() == me;
+            // cr-ecm23-4: a file this run's user owns — root's run too: one
+            // another owns stays theirs, readable by them whatever its mode.
+            let ours = found.uid() == crate::copy::effective_user(&dst);
             let others = found.mode() & 0o077;
             // A source of mode 0000 is a mode known (cr-ecm22-4); only one
-            // that carries none — a Windows source — is not asked.
+            // whose header carries none is not asked (cr-ecm23-5).
             let wider = source_mode.is_some_and(|source| others & !(source & 0o077) != 0);
             if !ours || wider {
                 return whole();
@@ -11144,6 +11144,40 @@ mod own_incomplete_copy_tests {
             .unwrap();
         assert_eq!(hashes.len(), 5, "no mode to ask");
         unchanged();
+    }
+
+    /// cr-ecm23-4: a wire resume reuses only a file this run's user owns —
+    /// a run as root too: a file another owns is not hashed, and every block
+    /// comes into a fresh partial. Root reused any file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_wire_resume_reuses_only_a_file_this_run_owns() {
+        use crate::remote::transfer::sink::ResumeBaseline;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let at = root.join("r.bin");
+        std::fs::write(&at, vec![3u8; 5000]).unwrap();
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o600)).unwrap();
+        if std::fs::metadata(&at).unwrap().uid() == 0 {
+            // Run as root, the file is root's own: nothing to model.
+            return;
+        }
+        let (hashes, _) =
+            compute_resume_block_hashes(&root, None, "r.bin", None, Some(0o100600), 1024)
+                .await
+                .unwrap();
+        assert_eq!(hashes.len(), 5, "its own: reused");
+        crate::copy::RUN_AS.lock().unwrap().push((at.clone(), 0));
+        let hashed =
+            compute_resume_block_hashes(&root, None, "r.bin", None, Some(0o100600), 1024).await;
+        crate::copy::RUN_AS
+            .lock()
+            .unwrap()
+            .retain(|(path, _)| path != &at);
+        let (hashes, baseline) = hashed.unwrap();
+        assert!(hashes.is_empty(), "another's, to a run as root");
+        assert_eq!(baseline, ResumeBaseline::Whole);
     }
 
     /// cr-ecm23-5: a source's mode is known by the mode its header carries —
