@@ -164,17 +164,29 @@ fn open_resume_partial_with(
     // this run can neither read nor write is replaced whole too, as the
     // wire does (cr-ecm24-4). Opened first, a destination this run could
     // not read failed the copy.
-    if let Some((mode, owner)) = resolved
+    let seen = resolved
         .look()
-        .with_context(|| format!("looking at {}", dst.display()))?
-    {
+        .with_context(|| format!("looking at {}", dst.display()))?;
+    after_a_destination_is_looked_at(dst);
+    match seen {
+        // cr-ecm26-1: nothing there: the partial is made exclusively from
+        // this look on. An open after it could adopt a file made in between.
+        None => {
+            let (file, kept) =
+                resolved.fresh_exclusive(dst, src_len.saturating_add(1), |file| {
+                    keep(file).map_err(eyre::Report::new)
+                })?;
+            while_a_partial_is_opened(dst);
+            return Ok((file, kept, 0));
+        }
         // cr-ecm26-5: and what is not a regular file — a FIFO, a socket, a
         // device — is not opened: it is replaced whole (a directory there
         // refuses the rename). Opened, a FIFO this run could only read
         // waited for a writer.
-        if !is_regular(mode) || !reusable(mode, owner) {
+        Some((mode, owner)) if !is_regular(mode) || !reusable(mode, owner) => {
             return fresh(&resolved);
         }
+        Some(_) => {}
     }
     // cr-ecm25-4: where nothing stands, the partial is made staged —
     // private, at its length, its cleanup's handle had — and takes the name
@@ -302,6 +314,63 @@ fn keep_handle(file: &File, _dst: &Path) -> std::io::Result<File> {
         return Err(std::io::Error::from_raw_os_error(libc::EMFILE));
     }
     file.try_clone()
+}
+
+/// Test seam (cr-ecm26-1): runs once what stands at a resume's name has been
+/// looked at and before anything is opened or made — for a test to put a
+/// file there in between. Keyed by path. Production never sets it.
+#[cfg(all(test, unix))]
+pub(crate) static AFTER_A_LOOK_HOOKS: std::sync::Mutex<
+    Vec<(std::path::PathBuf, PartialOpenedHook)>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn after_a_destination_is_looked_at(_dst: &Path) {
+    #[cfg(test)]
+    {
+        let hooks: Vec<PartialOpenedHook> = AFTER_A_LOOK_HOOKS
+            .lock()
+            .map(|hooks| {
+                hooks
+                    .iter()
+                    .filter(|(at, _)| at == _dst)
+                    .map(|(_, hook)| std::sync::Arc::clone(hook))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for hook in hooks {
+            hook(_dst);
+        }
+    }
+}
+
+/// Test seams (cr-ecm26-1): a second name refused, as a filesystem with none
+/// refuses it; and the staged name's removal refused. By path. Production
+/// never sets them.
+#[cfg(all(test, unix))]
+pub(crate) static LINK_FAULTS: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(all(test, unix))]
+pub(crate) static STAGED_UNLINK_FAULTS: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn faulted(_faults: &str, _dst: &Path) -> bool {
+    #[cfg(test)]
+    {
+        let faults = match _faults {
+            "link" => &LINK_FAULTS,
+            _ => &STAGED_UNLINK_FAULTS,
+        };
+        if faults
+            .lock()
+            .is_ok_and(|faults| faults.iter().any(|at| at == _dst))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Test seam (cr-ecm26-4): a read-only partial's writable reopen refused,
@@ -625,42 +694,7 @@ impl Resolved {
             }
         };
         if exclusive {
-            // A second name for the staged file, made only while nothing has
-            // it, and the staged name let go.
-            // SAFETY: the held directory is open for the length of the call,
-            // and both names are NUL-terminated and outlive it.
-            let linked = unsafe {
-                libc::linkat(
-                    self.directory.as_raw_fd(),
-                    staged.as_ptr(),
-                    self.directory.as_raw_fd(),
-                    self.name.as_ptr(),
-                    0,
-                )
-            };
-            if linked == 0 {
-                unmade();
-                return Ok((file, readied));
-            }
-            let error = std::io::Error::last_os_error();
-            // A filesystem with no second names (FAT) refuses the link: there
-            // the staged file is renamed in only while nothing stands at the
-            // name, looked at just before — the one window it leaves.
-            let no_links = matches!(error.raw_os_error(), Some(libc::EPERM | libc::EOPNOTSUPP));
-            if !no_links || self.stands().unwrap_or(true) {
-                unmade();
-                let error = if no_links {
-                    std::io::Error::from(std::io::ErrorKind::AlreadyExists)
-                } else {
-                    error
-                };
-                return Err(error).with_context(|| {
-                    format!(
-                        "putting a fresh partial where nothing stood, {}",
-                        dst.display()
-                    )
-                });
-            }
+            return self.publish_exclusive(dst, file, readied, &staged, unmade);
         }
         // SAFETY: the held directory is open for the length of the call, and
         // both names are NUL-terminated and outlive it.
@@ -679,6 +713,111 @@ impl Resolved {
                 .with_context(|| format!("putting a fresh partial in place of {}", dst.display()));
         }
         Ok((file, readied))
+    }
+}
+
+#[cfg(unix)]
+impl Resolved {
+    /// cr-ecm25-2, cr-ecm26-1: the staged partial takes the name only while
+    /// nothing has it — a second name made for it (`linkat`, which fails if
+    /// the name is taken), and the staged name let go, or the file fails
+    /// and says so: kept, the staged name was a second name for the partial
+    /// that nothing would remove. Where a filesystem has no second names
+    /// (FAT), by a rename that will not replace (`RENAME_NOREPLACE`), and
+    /// where there is no such rename the file fails, safely: a look and a
+    /// rename let a file made between them be replaced.
+    fn publish_exclusive<T>(
+        &self,
+        dst: &Path,
+        file: File,
+        readied: T,
+        staged: &std::ffi::CStr,
+        unmade: impl Fn(),
+    ) -> Result<(File, T)> {
+        use std::os::unix::io::AsRawFd as _;
+        let held = self.directory.as_raw_fd();
+        let refused = if faulted("link", dst) {
+            Some(std::io::Error::from_raw_os_error(libc::EPERM))
+        } else {
+            // SAFETY: the held directory is open for the length of the call,
+            // and both names are NUL-terminated and outlive it.
+            let linked =
+                unsafe { libc::linkat(held, staged.as_ptr(), held, self.name.as_ptr(), 0) };
+            (linked != 0).then(std::io::Error::last_os_error)
+        };
+        let Some(refused) = refused else {
+            let let_go = if faulted("staged", dst) {
+                Err(std::io::Error::from_raw_os_error(libc::EIO))
+            } else {
+                // SAFETY: as for `linkat` above.
+                match unsafe { libc::unlinkat(held, staged.as_ptr(), 0) } {
+                    0 => Ok(()),
+                    _ => Err(std::io::Error::last_os_error()),
+                }
+            };
+            if let Err(error) = let_go {
+                // The name it took goes again — while it is this partial —
+                // and the staged name once more.
+                use std::os::unix::fs::MetadataExt as _;
+                let ours = file.metadata().ok().map(|meta| (meta.dev(), meta.ino()));
+                let there = std::fs::symlink_metadata(dst)
+                    .ok()
+                    .map(|meta| (meta.dev(), meta.ino()));
+                if ours.is_some() && ours == there {
+                    // SAFETY: as for `linkat` above.
+                    unsafe { libc::unlinkat(held, self.name.as_ptr(), 0) };
+                }
+                unmade();
+                return Err(error).with_context(|| {
+                    format!("letting go of the staged name beside {}", dst.display())
+                });
+            }
+            return Ok((file, readied));
+        };
+        let no_links = matches!(refused.raw_os_error(), Some(libc::EPERM | libc::EOPNOTSUPP));
+        if !no_links {
+            unmade();
+            return Err(refused).with_context(|| {
+                format!(
+                    "putting a fresh partial where nothing stood, {}",
+                    dst.display()
+                )
+            });
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: as for `linkat` above.
+            let renamed = unsafe {
+                libc::renameat2(
+                    held,
+                    staged.as_ptr(),
+                    held,
+                    self.name.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            };
+            if renamed == 0 {
+                return Ok((file, readied));
+            }
+            let error = std::io::Error::last_os_error();
+            unmade();
+            Err(error).with_context(|| {
+                format!(
+                    "putting a fresh partial where nothing stood, {}",
+                    dst.display()
+                )
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            unmade();
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported)).with_context(|| {
+                format!(
+                    "putting a fresh partial where nothing stood, {}: this filesystem gives a file no second name",
+                    dst.display()
+                )
+            })
+        }
     }
 }
 
@@ -1234,6 +1373,60 @@ mod tests {
             0,
             "nothing elsewhere"
         );
+        Ok(())
+    }
+
+    /// cr-ecm26-1: where nothing stood when it was looked at, a resume makes
+    /// its partial exclusively: a file put at the name since is left as it
+    /// is, and the resume fails — where links are refused too. And a staged
+    /// name that cannot be let go fails the resume, leaving nothing at the
+    /// name. Opened after the look, the file put there was adopted; renamed
+    /// in after a second look, one made between was replaced; and the staged
+    /// name's removal was not asked.
+    #[cfg(unix)]
+    #[test]
+    fn a_partial_where_nothing_stood_is_made_exclusively() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir()?;
+        for (name, links) in [("linked", true), ("unlinked", false)] {
+            let dst = tmp.path().join(name);
+            {
+                let theirs = dst.clone();
+                AFTER_A_LOOK_HOOKS.lock().unwrap().push((
+                    dst.clone(),
+                    std::sync::Arc::new(move |_: &Path| {
+                        std::fs::write(&theirs, b"theirs").unwrap();
+                        std::fs::set_permissions(&theirs, std::fs::Permissions::from_mode(0o644))
+                            .unwrap();
+                    }),
+                ));
+            }
+            if !links {
+                LINK_FAULTS.lock().unwrap().push(dst.clone());
+            }
+            let had = open_resume_partial_held(&dst, Some(0o100600), 8, None);
+            AFTER_A_LOOK_HOOKS
+                .lock()
+                .unwrap()
+                .retain(|(at, _)| at != &dst);
+            LINK_FAULTS.lock().unwrap().retain(|at| at != &dst);
+            assert!(had.is_err(), "{name}");
+            assert_eq!(std::fs::read(&dst)?, b"theirs", "{name}: left as it is");
+        }
+        let kept = tmp.path().join("kept");
+        STAGED_UNLINK_FAULTS.lock().unwrap().push(kept.clone());
+        let had = open_resume_partial_held(&kept, Some(0o100600), 8, None);
+        STAGED_UNLINK_FAULTS
+            .lock()
+            .unwrap()
+            .retain(|at| at != &kept);
+        assert!(had.is_err(), "a staged name not let go fails the resume");
+        assert!(!kept.exists(), "nothing left at the name");
+        let mut left: Vec<_> = std::fs::read_dir(tmp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<_>>()?;
+        left.sort();
+        assert_eq!(left, ["linked", "unlinked"], "no staged name left");
         Ok(())
     }
 
