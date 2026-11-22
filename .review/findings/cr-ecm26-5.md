@@ -1,9 +1,9 @@
 # cr-ecm26-5: a FIFO at the name could block the resume's open
 
 **Severity**: MEDIUM — a FIFO at the destination that this run could only read reached an `O_RDONLY` open, which waits for a writer, and the resume with it
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r28` (Codex openreview, 2026-11-22) reviewed `e025a3e2..10145127` — the six `combined-r27` fixes — with `guard_confirmed: true`. "A read-only FIFO that takes a regular file's place after lookup can block the open indefinitely, before the descriptor check runs. Use a nonblocking open and validate the descriptor. A symlink that appears at the resolved leaf can instead enter the generic replacement branch and be overwritten. Retry link resolution or fail that file while preserving the link." The remaining work is cr-ecm27-3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm26-5`)
+**Commit**: `1435ba23`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r27` over `05ff50d7..e025a3e2` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r27.codex.md`. It completes cr-ecm25-5 (`660eb9d0`).
 
 ## Evidence

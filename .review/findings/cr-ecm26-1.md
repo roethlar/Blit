@@ -1,9 +1,9 @@
 # cr-ecm26-1: a partial where nothing stood was not made exclusively from the first look
 
 **Severity**: HIGH — locally, a look that found nothing was followed by an ordinary writable open that could adopt a file made in between; where links are refused, a look and a rename could replace a file made between them; and a staged name left after a successful link was not reported
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r28` (Codex openreview, 2026-11-22) reviewed `e025a3e2..10145127` — the six `combined-r27` fixes — with `guard_confirmed: true`. "With a dangling destination symlink and an injected staging-name unlink failure, acquisition returned an error but left a nine-byte file at the symlink target. Rollback inspects the original pathname and unlinks through the held directory. A replacement between the identity check and unlink can also be removed. Prefer a single atomic no-replace rename and avoid rollback that can unlink a replacement." "An absent-name resume fails on a macOS volume that refuses hard links even when the volume supports `renameatx_np(RENAME_EXCL)`. Use that operation and cover both vacant and occupied destinations." The remaining work is cr-ecm27-1 and -6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm26-1`)
+**Commit**: `7615d648`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r27` over `05ff50d7..e025a3e2` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r27.codex.md`. It completes cr-ecm25-2 (`e2f50cae`) and cr-ecm25-4 (`a8283606`).
 
 ## Evidence

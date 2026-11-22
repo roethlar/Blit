@@ -1,9 +1,9 @@
 # cr-ecm26-3: a destination that could not be compared still failed, on the wire and locally
 
 **Severity**: HIGH on the wire, MEDIUM locally — an `ESTALE` on the wire's last look after hashing ended the transfer, abandoning unrelated files; a local destination block that could not be read (`EIO`) failed that copy
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r28` (Codex openreview, 2026-11-22) reviewed `e025a3e2..10145127` — the six `combined-r27` fixes — with `guard_confirmed: true`: "The cursor reset, local rewrite after a failed block read, and whole-file fallback after the final wire metadata check all fit that approach. I would keep them"
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm26-3`)
+**Commit**: `c7ca4d8d`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r27` over `05ff50d7..e025a3e2` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r27.codex.md`. It completes cr-ecm25-3 (`b61b6c6c`) and cr-ecm25-5 (`660eb9d0`).
 
 ## Evidence

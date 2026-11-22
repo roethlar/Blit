@@ -1,9 +1,9 @@
 # cr-ecm26-6: the sink's own skip kept the file's baseline
 
 **Severity**: MEDIUM — `FsTransferSink::skip_record`, called directly as the public receive pipeline calls it, left the file's recorded baseline; only the session's wrappers cleaned up
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r28` (Codex openreview, 2026-11-22) reviewed `e025a3e2..10145127` — the six `combined-r27` fixes — with `guard_confirmed: true`. "Running the base revision's skip test against head produced zero cleanup calls where it expected one. A sink that implements `forget_resume` and inherits `skip_record` now retains its state on the data plane. Have the trait's default `skip_record` call `forget_resume`, and keep the wrapper's ledger validation and delegation." The remaining work is cr-ecm27-5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm26-6`)
+**Commit**: `1cf8782c`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r27` over `05ff50d7..e025a3e2` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r27.codex.md`. It completes cr-ecm25-6 (`c913ad4f`).
 
 ## Evidence

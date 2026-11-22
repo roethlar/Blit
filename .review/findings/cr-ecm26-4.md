@@ -1,9 +1,9 @@
 # cr-ecm26-4: a read-only partial made writable kept its new mode when its reopen failed
 
 **Severity**: MEDIUM — an owned `0444` destination became `0600` when its writable reopen was refused (`EMFILE`)
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r28` (Codex openreview, 2026-11-22) reviewed `e025a3e2..10145127` — the six `combined-r27` fixes — with `guard_confirmed: true`. "Injecting `ESTALE` at the final length lookup left an owned `0444` file at `0600`. Carry forward the length from the validated metadata or retain rollback through that last call. The wire's hashed-partial path needs the same protection if its writable reopen fails after `chmod`." The remaining work is cr-ecm27-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm26-4`)
+**Commit**: `c9942b72`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r27` over `05ff50d7..e025a3e2` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r27.codex.md`. It completes cr-ecm25-4 (`a8283606`).
 
 ## Evidence
