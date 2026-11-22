@@ -61,6 +61,26 @@ pub fn resume_copy_file(src: &Path, dst: &Path, block_size: usize) -> Result<Res
     resume_copy_from(&mut src_file, src_len, dst, block_size)
 }
 
+/// Test seam (cr-ecm26-3): a read of a resumed destination's block fails, by
+/// its path and offset — an `EIO` no test can make for real. Production
+/// never sets it.
+fn dst_read_fault(_dst: &Path, _offset: u64) -> std::io::Result<()> {
+    #[cfg(test)]
+    if DST_READ_FAULTS.lock().is_ok_and(|faults| {
+        faults
+            .iter()
+            .any(|(at, offset)| at == _dst && *offset == _offset)
+    }) {
+        return Err(std::io::Error::other("an input/output error (a test's)"));
+    }
+    Ok(())
+}
+
+/// The blocks a test has [`dst_read_fault`] fail.
+#[cfg(test)]
+pub(crate) static DST_READ_FAULTS: std::sync::Mutex<Vec<(std::path::PathBuf, u64)>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// The partial a resume patches, and how much of it there already is.
 ///
 /// cr-ecm17-3, cr-ecm18-2, cr-ecm19-4 (Unix): a partial is PRIVATE and
@@ -891,6 +911,10 @@ pub fn resume_copy_through(
     // cursor at 0, matching `offset == 0` / `dst_cursor_pos == 0` on the
     // first iteration.
     let mut dst_cursor_pos = 0u64;
+    // cr-ecm26-3: once a destination block cannot be read, the rest of the
+    // file is written: it cannot be compared. Read with `?`, such a block
+    // failed the copy, a readable source and a writable file notwithstanding.
+    let mut unreadable = false;
 
     while offset < src_len {
         let remaining = src_len - offset;
@@ -904,16 +928,28 @@ pub fn resume_copy_through(
         let should_write = if offset < dst_len {
             let dst_available = (dst_len - offset).min(this_block as u64) as usize;
 
-            if dst_available == this_block {
+            if dst_available == this_block && !unreadable {
                 // Full block available, read and hash (seek only if the
                 // dst cursor isn't already aligned to this offset).
-                if dst_cursor_pos != offset {
-                    dst_file.seek(SeekFrom::Start(offset))?;
+                let read = dst_read_fault(dst, offset).and_then(|()| {
+                    if dst_cursor_pos != offset {
+                        dst_file.seek(SeekFrom::Start(offset))?;
+                    }
+                    dst_file.read_exact(&mut dst_buf[..this_block])
+                });
+                match read {
+                    Ok(()) => {
+                        dst_cursor_pos = offset + this_block as u64;
+                        src_hash != hash_block(&dst_buf[..this_block])
+                    }
+                    Err(_) => {
+                        unreadable = true;
+                        dst_cursor_pos = u64::MAX;
+                        true
+                    }
                 }
-                dst_file.read_exact(&mut dst_buf[..this_block])?;
-                dst_cursor_pos = offset + this_block as u64;
-                let dst_hash = hash_block(&dst_buf[..this_block]);
-                src_hash != dst_hash
+            } else if unreadable {
+                true
             } else {
                 // Partial block at end of dest, need to write
                 true
@@ -1730,6 +1766,32 @@ mod tests {
         assert_eq!(outcome.blocks_skipped, 0);
         assert_eq!(std::fs::read(&dst)?, data);
 
+        Ok(())
+    }
+
+    /// cr-ecm26-3: a local resume whose destination block cannot be read
+    /// writes the rest of the file and succeeds: it cannot be compared. Read
+    /// with `?`, the block failed the copy.
+    #[test]
+    fn a_block_that_cannot_be_read_is_written_with_the_rest() -> Result<()> {
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let data: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&src, &data)?;
+        let dst = tmp.path().join("dst");
+        std::fs::write(&dst, &data)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o600))?;
+        }
+        DST_READ_FAULTS.lock().unwrap().push((dst.clone(), 1024));
+        let copied = resume_copy_from(&mut File::open(&src)?, 4096, &dst, 1024);
+        DST_READ_FAULTS.lock().unwrap().retain(|(at, _)| at != &dst);
+        let outcome = copied?;
+        assert_eq!(outcome.bytes_transferred, 3072, "the rest written");
+        assert_eq!(std::fs::read(&dst)?, data);
         Ok(())
     }
 

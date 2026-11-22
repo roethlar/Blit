@@ -6643,8 +6643,9 @@ fn hash_file_abortable(path: &Path, abort: &AtomicBool) -> Result<Vec<u8>> {
 /// empty/short list — the implicit full-transfer fallback (plan D1): the
 /// source sends every block a hash does not vouch for.
 /// Test seam (cr-ecm25-3): a read of a destination being hashed fails, by
-/// its path and at the block given — an `EIO` no test can make for real.
-/// Production never sets it.
+/// its path and at the block given — an `EIO` no test can make for real;
+/// at `usize::MAX`, the look after the last block (cr-ecm26-3). Production
+/// never sets it.
 #[cfg(test)]
 pub(crate) static HASH_READ_FAULTS: StdMutex<Vec<(PathBuf, usize)>> = StdMutex::new(Vec::new());
 
@@ -6788,9 +6789,11 @@ async fn compute_resume_block_hashes(
                 break;
             }
         }
-        let after = file
-            .metadata()
-            .map_err(|e| eyre::eyre!("stat {} for block hashes: {e}", dst.display()))?;
+        // cr-ecm26-3: the look after the hashes, failing, leaves them
+        // unverified: the file comes whole. It ended the transfer.
+        let Ok(after) = hash_read_fault(&dst, usize::MAX).and_then(|()| file.metadata()) else {
+            return whole();
+        };
         if crate::moved::Version::of(&after) != before {
             return whole();
         }
@@ -11217,6 +11220,36 @@ mod own_incomplete_copy_tests {
             .retain(|(path, _)| path != &at);
         let (hashes, baseline) = hashed.unwrap();
         assert!(hashes.is_empty(), "its unfinished hashes dropped");
+        assert_eq!(baseline, ResumeBaseline::Whole);
+    }
+
+    /// cr-ecm26-3: the look after a destination's hashes, failing, sends the
+    /// file whole and nothing ends: the hashes cannot be verified. It ended
+    /// the transfer, every other file with it.
+    #[tokio::test]
+    async fn a_failed_look_after_hashing_sends_the_file_whole() {
+        use crate::remote::transfer::sink::ResumeBaseline;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let at = root.join("r.bin");
+        std::fs::write(&at, vec![3u8; 5000]).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        HASH_READ_FAULTS
+            .lock()
+            .unwrap()
+            .push((at.clone(), usize::MAX));
+        let hashed =
+            compute_resume_block_hashes(&root, None, "r.bin", None, Some(0o100600), 1024).await;
+        HASH_READ_FAULTS
+            .lock()
+            .unwrap()
+            .retain(|(path, _)| path != &at);
+        let (hashes, baseline) = hashed.unwrap();
+        assert!(hashes.is_empty(), "unverified hashes dropped");
         assert_eq!(baseline, ResumeBaseline::Whole);
     }
 
