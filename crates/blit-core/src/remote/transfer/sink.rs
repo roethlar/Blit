@@ -2584,11 +2584,8 @@ fn settle_failed_target_known(
                 })
             };
             let not_its_own = || held.is_some_and(|held| identity_at(dst) != Some(held));
-            if not_its_own() {
-                if !followed_to_held() {
-                    return REMOVED;
-                }
-                let note = match mark(handle.as_ref()) {
+            let left_through_a_link = |marked: std::io::Result<()>| {
+                let note = match marked {
                     Ok(()) => format!(
                         "{INCOMPLETE_LEFT_IN_PLACE}: its name is a link to it, which is not \
                          this run's to remove, so it was left one byte longer than the source"
@@ -2598,10 +2595,16 @@ fn settle_failed_target_known(
                          be marked unfinished ({mark_error})"
                     ),
                 };
-                return Settled {
+                Settled {
                     note: Some(note),
                     removed: false,
-                };
+                }
+            };
+            if not_its_own() {
+                if !followed_to_held() {
+                    return REMOVED;
+                }
+                return left_through_a_link(mark(handle.as_ref()));
             }
             if remove().is_ok() {
                 return REMOVED;
@@ -2609,8 +2612,14 @@ fn settle_failed_target_known(
             let marked = mark(handle.as_ref());
             drop(handle);
             before_the_second_removal(dst);
+            // cr-ecm18-3: the same three cases as before the first: a link
+            // put there since, to the file held, leaves the partial
+            // reachable at the name — it was reported removed.
             if not_its_own() {
-                return REMOVED;
+                if !followed_to_held() {
+                    return REMOVED;
+                }
+                return left_through_a_link(marked);
             }
             let remove_error = match remove() {
                 Ok(()) => return REMOVED,
@@ -7793,30 +7802,53 @@ mod cr_win_1_tests {
                 }
             }
         }
-        let tmp = tempdir().unwrap();
-        let folder = tmp.path().join("folder");
-        std::fs::create_dir_all(&folder).unwrap();
-        let dest = folder.join("partial");
-        let held = std::fs::File::create(&dest).unwrap();
-        let theirs = tmp.path().join("theirs");
-        std::fs::write(&theirs, b"somebody's").unwrap();
-        // The first removal fails: the folder may not be written to.
-        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let _hooked = {
-            let (theirs, at, writable) = (theirs.clone(), dest.clone(), folder.clone());
-            BEFORE_SECOND_REMOVAL_HOOKS.lock().unwrap().push((
-                dest.clone(),
-                Arc::new(move |_: &Path| {
-                    std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(0o755))
-                        .unwrap();
-                    std::fs::rename(&theirs, &at).unwrap();
-                }),
-            ));
-            Hooked(dest.clone(), folder.clone())
-        };
-        let settled = settle_failed_target(&dest, Some(held), 10, OnFailure::Remove);
-        assert!(settled.removed, "nothing of this write's is at the name");
-        assert_eq!(std::fs::read(&dest).unwrap(), b"somebody's");
+        // Between the two removals another hand puts there somebody's
+        // file — or (cr-ecm18-3) a link to the partial itself, moved aside.
+        for link_to_it in [false, true] {
+            let tmp = tempdir().unwrap();
+            let folder = tmp.path().join("folder");
+            std::fs::create_dir_all(&folder).unwrap();
+            let dest = folder.join("partial");
+            let held = std::fs::File::create(&dest).unwrap();
+            let theirs = tmp.path().join("theirs");
+            std::fs::write(&theirs, b"somebody's").unwrap();
+            let aside = folder.join("aside");
+            // The first removal fails: the folder may not be written to.
+            std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let _hooked = {
+                let (theirs, at, writable, aside) =
+                    (theirs.clone(), dest.clone(), folder.clone(), aside.clone());
+                BEFORE_SECOND_REMOVAL_HOOKS.lock().unwrap().push((
+                    dest.clone(),
+                    Arc::new(move |_: &Path| {
+                        std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(0o755))
+                            .unwrap();
+                        if link_to_it {
+                            std::fs::rename(&at, &aside).unwrap();
+                            std::os::unix::fs::symlink("aside", &at).unwrap();
+                        } else {
+                            std::fs::rename(&theirs, &at).unwrap();
+                        }
+                    }),
+                ));
+                Hooked(dest.clone(), folder.clone())
+            };
+            let settled = settle_failed_target(&dest, Some(held), 10, OnFailure::Remove);
+            if link_to_it {
+                assert!(!settled.removed, "the partial is reachable at the name");
+                assert!(
+                    settled
+                        .note
+                        .as_deref()
+                        .is_some_and(|note| note.contains(INCOMPLETE_LEFT_IN_PLACE)),
+                    "{settled:?}"
+                );
+                assert!(dest.is_symlink());
+            } else {
+                assert!(settled.removed, "nothing of this write's is at the name");
+                assert_eq!(std::fs::read(&dest).unwrap(), b"somebody's");
+            }
+        }
     }
 
     /// cr-ecm17-1, cr-ecm18-1: a record cancelled while its file is being
