@@ -403,6 +403,40 @@ pub(crate) static STAGED_UNLINK_FAULTS: std::sync::Mutex<Vec<std::path::PathBuf>
 pub(crate) static EXCHANGE_FAULTS: std::sync::Mutex<Vec<std::path::PathBuf>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Test seam (cr-ecm29-1): the exchange that puts back what was not to be
+/// replaced refused (`EIO`). By path. Production never sets it.
+#[cfg(all(test, unix))]
+pub(crate) static BACK_FAULTS: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Test seam (cr-ecm29-1): runs once a fresh partial is swapped in for what
+/// stood at its name and before what came out is looked at — for a test to
+/// put something else at the name. Keyed by path. Production never sets it.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) static AFTER_AN_EXCHANGE_HOOKS: std::sync::Mutex<
+    Vec<(std::path::PathBuf, PartialOpenedHook)>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(target_os = "linux")]
+fn after_an_exchange(_dst: &Path) {
+    #[cfg(test)]
+    {
+        let hooks: Vec<PartialOpenedHook> = AFTER_AN_EXCHANGE_HOOKS
+            .lock()
+            .map(|hooks| {
+                hooks
+                    .iter()
+                    .filter(|(at, _)| at == _dst)
+                    .map(|(_, hook)| std::sync::Arc::clone(hook))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for hook in hooks {
+            hook(_dst);
+        }
+    }
+}
+
 #[cfg(unix)]
 fn faulted(_faults: &str, _dst: &Path) -> bool {
     #[cfg(test)]
@@ -411,6 +445,7 @@ fn faulted(_faults: &str, _dst: &Path) -> bool {
             "rename" => &RENAME_FAULTS,
             "link" => &LINK_FAULTS,
             "exchange" => &EXCHANGE_FAULTS,
+            "back" => &BACK_FAULTS,
             _ => &STAGED_UNLINK_FAULTS,
         };
         if faults
@@ -566,6 +601,9 @@ pub fn fresh_partial_ready<T>(
 pub(crate) struct Resolved {
     directory: std::os::unix::io::OwnedFd,
     name: std::ffi::CString,
+    /// The held directory's path (canonical): to say where something is
+    /// left (cr-ecm29-1).
+    place: std::path::PathBuf,
 }
 
 /// [`Resolved`]: the place `dst` names, `within` the destination's root
@@ -632,6 +670,7 @@ pub(crate) fn resolve_destination(dst: &Path, within: Option<&Path>) -> Result<R
     let resolved = Resolved {
         directory: held,
         name: c_string(&name)?,
+        place: directory,
     };
     after_a_destination_is_resolved(dst);
     Ok(resolved)
@@ -813,11 +852,45 @@ impl Resolved {
                     .with_context(|| format!("making a fresh partial for {}", dst.display()));
             }
         };
+        // cr-ecm29-1: where the partial is staged, to say where what is left
+        // there is; and which file it is, so that only it is removed from
+        // there — after an exchange, what stood at the name is there.
+        let kept_at = {
+            use std::os::unix::ffi::OsStrExt as _;
+            self.place
+                .join(std::ffi::OsStr::from_bytes(stage_name.as_bytes()))
+                .join("partial")
+        };
+        let mine = match file.metadata() {
+            Ok(found) => {
+                use std::os::unix::fs::MetadataExt as _;
+                (found.dev(), found.ino())
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "looking at the fresh partial for {}: it is left at {}",
+                        dst.display(),
+                        kept_at.display()
+                    )
+                })
+            }
+        };
         before_a_fresh_partial_is_published(dst);
+        // cr-ecm29-1: the partial is removed only while it is what stands in
+        // the stage, and the stage only once empty. Removed by its name, what
+        // a failed putting back left there went — what had stood at the name
+        // — and so did what came to the name while it was put back.
         let unmade = || {
-            // SAFETY: the stage is open for the length of the call, and
-            // `staged` is a NUL-terminated name that outlives it.
-            unsafe { libc::unlinkat(stage.as_raw_fd(), staged.as_ptr(), 0) };
+            let ours = matches!(
+                entry_at(stage.as_raw_fd(), staged),
+                Ok(Some(there)) if there.identity == mine
+            );
+            if ours {
+                // SAFETY: the stage is open for the length of the call, and
+                // `staged` is a NUL-terminated name that outlives it.
+                unsafe { libc::unlinkat(stage.as_raw_fd(), staged.as_ptr(), 0) };
+            }
             stage_gone();
         };
         let prepared = file
@@ -847,7 +920,7 @@ impl Resolved {
             return exclusively(file, readied);
         };
         let expected = seen.identity;
-        match self.publish_replacing(dst, stage.as_raw_fd(), staged, expected, &unmade)? {
+        match self.publish_replacing(dst, stage.as_raw_fd(), staged, expected, &kept_at, &unmade)? {
             Replacing::Done => {
                 stage_gone();
                 Ok((file, readied))
@@ -874,6 +947,7 @@ impl Resolved {
         stage: std::os::unix::io::RawFd,
         staged: &std::ffi::CStr,
         expected: (u64, u64),
+        kept_at: &Path,
         unmade: &impl Fn(),
     ) -> Result<Replacing> {
         #[cfg(target_os = "linux")]
@@ -903,6 +977,7 @@ impl Resolved {
             };
             match swapped {
                 Ok(()) => {
+                    after_an_exchange(dst);
                     // cr-ecm29-7: looked at in the stage through its own
                     // descriptor. Looked at through `/proc`, a daemon with
                     // none put back what it was to replace, and failed.
@@ -910,16 +985,32 @@ impl Resolved {
                     let theirs = !matches!(out, Ok(Some(out)) if out.identity == expected);
                     if theirs {
                         // Not what was to be replaced: it goes back.
-                        let back = swap();
+                        let back = if faulted("back", dst) {
+                            Err(std::io::Error::from_raw_os_error(libc::EIO))
+                        } else {
+                            swap()
+                        };
+                        // cr-ecm29-1: and the partial goes only if it is what
+                        // came back to the stage. Anything else there — what
+                        // stood at the name, not put back; or what came to
+                        // the name while it was — is left, and said where.
                         unmade();
+                        let left = !matches!(entry_at(stage, staged), Ok(None));
                         return match back {
-                            Ok(()) => Err(eyre::eyre!(
+                            Ok(()) if !left => Err(eyre::eyre!(
                                 "something else came to stand at {} while a fresh partial was made for it; it is left as it is",
                                 dst.display()
                             )),
+                            Ok(()) => Err(eyre::eyre!(
+                                "something else came to stand at {} while a fresh partial was made for it, and is put back; what came to stand there while it was is left at {}",
+                                dst.display(),
+                                kept_at.display()
+                            )),
                             Err(error) => Err(error).with_context(|| {
                                 format!(
-                                    "putting back what came to stand at {}: it is in the private directory beside it",
+                                    "putting back what came to stand at {}: it is left at {}, and the unfinished partial at {}",
+                                    dst.display(),
+                                    kept_at.display(),
                                     dst.display()
                                 )
                             }),
@@ -948,7 +1039,7 @@ impl Resolved {
                 }
             }
         }
-        let _ = (stage, staged, expected);
+        let _ = (stage, staged, expected, kept_at);
         unmade();
         eyre::bail!(
             "{} is left as it is: this filesystem cannot swap a fresh partial in for it, and renamed over it, whatever had come to stand there since would be replaced",
@@ -1868,6 +1959,108 @@ mod tests {
         std::fs::write(&dst, &data[..1000])?;
         std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o644))?;
         Ok((src, dst, data))
+    }
+
+    /// cr-ecm29-1: what an exchange swapped out that is not put back — the
+    /// exchange back refused — is left in the stage, and the error says
+    /// where. Removed by the cleanup whatever it was, it was lost.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn what_is_not_put_back_is_left_where_the_error_says() -> Result<()> {
+        let tmp = tempdir()?;
+        let (src, dst, data) = wider_destination(tmp.path())?;
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::write(&elsewhere, b"elsewhere")?;
+        {
+            let (at, to) = (dst.clone(), elsewhere.clone());
+            BEFORE_A_FRESH_PARTIAL_IS_PUBLISHED_HOOKS
+                .lock()
+                .unwrap()
+                .push((
+                    dst.clone(),
+                    std::sync::Arc::new(move |_: &Path| {
+                        std::fs::remove_file(&at).unwrap();
+                        std::os::unix::fs::symlink(&to, &at).unwrap();
+                    }),
+                ));
+        }
+        BACK_FAULTS.lock().unwrap().push(dst.clone());
+        let copied = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024);
+        BACK_FAULTS.lock().unwrap().retain(|at| at != &dst);
+        BEFORE_A_FRESH_PARTIAL_IS_PUBLISHED_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(at, _)| at != &dst);
+        let error = copied.expect_err("the resume fails");
+        let kept = std::fs::canonicalize(stage_beside(&dst))?.join("partial");
+        assert!(
+            format!("{error:#}").contains(&kept.display().to_string()),
+            "{error:#}"
+        );
+        assert_eq!(
+            std::fs::read_link(&kept)?,
+            elsewhere,
+            "the link is left there"
+        );
+        assert_eq!(std::fs::read(&elsewhere)?, b"elsewhere");
+        Ok(())
+    }
+
+    /// cr-ecm29-1: what comes to the name while what was not to be replaced
+    /// is put back lands in the stage, and is left there, the error saying
+    /// where. Removed by the cleanup as the partial, it was lost.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn what_comes_while_it_is_put_back_is_left_where_the_error_says() -> Result<()> {
+        let tmp = tempdir()?;
+        let (src, dst, data) = wider_destination(tmp.path())?;
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::write(&elsewhere, b"elsewhere")?;
+        {
+            let (at, to) = (dst.clone(), elsewhere.clone());
+            BEFORE_A_FRESH_PARTIAL_IS_PUBLISHED_HOOKS
+                .lock()
+                .unwrap()
+                .push((
+                    dst.clone(),
+                    std::sync::Arc::new(move |_: &Path| {
+                        std::fs::remove_file(&at).unwrap();
+                        std::os::unix::fs::symlink(&to, &at).unwrap();
+                    }),
+                ));
+        }
+        {
+            let (at, aside) = (dst.clone(), tmp.path().join("theirs"));
+            AFTER_AN_EXCHANGE_HOOKS.lock().unwrap().push((
+                dst.clone(),
+                std::sync::Arc::new(move |_: &Path| {
+                    std::fs::write(&aside, b"theirs").unwrap();
+                    std::fs::rename(&aside, &at).unwrap();
+                }),
+            ));
+        }
+        let copied = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024);
+        AFTER_AN_EXCHANGE_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(at, _)| at != &dst);
+        BEFORE_A_FRESH_PARTIAL_IS_PUBLISHED_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(at, _)| at != &dst);
+        let error = copied.expect_err("the resume fails");
+        assert!(
+            std::fs::symlink_metadata(&dst)?.file_type().is_symlink(),
+            "the link is put back"
+        );
+        let kept = std::fs::canonicalize(stage_beside(&dst))?.join("partial");
+        assert_eq!(std::fs::read(&kept)?, b"theirs", "what came is left there");
+        assert!(
+            format!("{error:#}").contains(&kept.display().to_string()),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::read(&elsewhere)?, b"elsewhere");
+        Ok(())
     }
 
     /// cr-ecm29-2: what a fresh partial replaces is what the first look
