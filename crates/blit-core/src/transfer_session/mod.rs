@@ -6644,8 +6644,9 @@ fn hash_file_abortable(path: &Path, abort: &AtomicBool) -> Result<Vec<u8>> {
 /// source sends every block a hash does not vouch for.
 /// Test seam (cr-ecm25-3): a read of a destination being hashed fails, by
 /// its path and at the block given — an `EIO` no test can make for real;
-/// at `usize::MAX`, the look after the last block (cr-ecm26-3). Production
-/// never sets it.
+/// at `usize::MAX`, the look after the last block (cr-ecm26-3); at
+/// `usize::MAX - 1`, the first look at the file opened (cr-ecm27-2).
+/// Production never sets it.
 #[cfg(test)]
 pub(crate) static HASH_READ_FAULTS: StdMutex<Vec<(PathBuf, usize)>> = StdMutex::new(Vec::new());
 
@@ -6726,8 +6727,10 @@ async fn compute_resume_block_hashes(
                 }
             }
             Ok(_) => return whole(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return whole(),
-            Err(e) => return Err(eyre::eyre!("stat {} for block hashes: {e}", dst.display())),
+            // cr-ecm27-2: a look that fails — the file gone, a folder on its
+            // way become a file (`ENOTDIR`), or anything else of this one
+            // file's — sends it whole. It ended the transfer.
+            Err(_) => return whole(),
         }
         let Ok(mut file) = std::fs::File::open(&dst) else {
             return whole();
@@ -6743,9 +6746,10 @@ async fn compute_resume_block_hashes(
         // cr-ecm22-4: ONE look decides whether the file is reused and is
         // the version its hashes are of: two let a change between them
         // undo the decision.
-        let found = file
-            .metadata()
-            .map_err(|e| eyre::eyre!("stat {} for block hashes: {e}", dst.display()))?;
+        // cr-ecm27-2: and so does the first look at the file opened.
+        let Ok(found) = hash_read_fault(&dst, usize::MAX - 1).and_then(|()| file.metadata()) else {
+            return whole();
+        };
         // And asked again of the file opened, which the hashes are of.
         if !reusable(&found) {
             return whole();
@@ -11250,6 +11254,45 @@ mod own_incomplete_copy_tests {
             .retain(|(path, _)| path != &at);
         let (hashes, baseline) = hashed.unwrap();
         assert!(hashes.is_empty(), "unverified hashes dropped");
+        assert_eq!(baseline, ResumeBaseline::Whole);
+    }
+
+    /// cr-ecm27-2: the first looks at a destination, failing, send the file
+    /// whole and nothing ends — a folder on its way become a file
+    /// (`ENOTDIR`), and the first look at the file opened. Each ended the
+    /// transfer, every other file with it.
+    #[tokio::test]
+    async fn a_failed_first_look_sends_the_file_whole() {
+        use crate::remote::transfer::sink::ResumeBaseline;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        std::fs::write(root.join("album"), b"a file now").unwrap();
+        let (hashes, baseline) =
+            compute_resume_block_hashes(&root, None, "album/photo", None, Some(0o100600), 1024)
+                .await
+                .unwrap();
+        assert!(hashes.is_empty(), "a folder become a file");
+        assert_eq!(baseline, ResumeBaseline::Whole);
+
+        let at = root.join("r.bin");
+        std::fs::write(&at, vec![3u8; 5000]).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        HASH_READ_FAULTS
+            .lock()
+            .unwrap()
+            .push((at.clone(), usize::MAX - 1));
+        let hashed =
+            compute_resume_block_hashes(&root, None, "r.bin", None, Some(0o100600), 1024).await;
+        HASH_READ_FAULTS
+            .lock()
+            .unwrap()
+            .retain(|(path, _)| path != &at);
+        let (hashes, baseline) = hashed.unwrap();
+        assert!(hashes.is_empty(), "the opened file's look failed");
         assert_eq!(baseline, ResumeBaseline::Whole);
     }
 
