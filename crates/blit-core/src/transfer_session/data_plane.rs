@@ -2294,9 +2294,13 @@ impl TransferSink for NeedListSink {
             } => {
                 let total_size = self.check_block(relative_path, *offset, bytes.len() as u64)?;
                 // cr-win-1: see `TransferSink::hold_resume_partial`.
-                self.inner
-                    .hold_resume_partial(relative_path, total_size)
-                    .await?;
+                // cr-ecm21-1: a block that carries nothing — a keep-alive —
+                // has nothing: the partial is had for bytes to land in it.
+                if !bytes.is_empty() {
+                    self.inner
+                        .hold_resume_partial(relative_path, total_size)
+                        .await?;
+                }
             }
             PreparedPayload::FileBlockComplete {
                 relative_path,
@@ -2836,6 +2840,62 @@ mod tests {
             })
             .await
             .expect_err("duplicate completion must fault");
+    }
+
+    /// cr-ecm21-1: a block that carries nothing — a keep-alive — has no
+    /// partial: the hold is asked for bytes to land, and an empty block
+    /// changed the file's mode and length before any came.
+    #[tokio::test]
+    async fn an_empty_block_holds_no_partial() {
+        struct Holds(std::sync::atomic::AtomicUsize, PathBuf);
+        #[async_trait]
+        impl TransferSink for Holds {
+            async fn write_payload(&self, _payload: PreparedPayload) -> Result<SinkOutcome> {
+                Ok(SinkOutcome::default())
+            }
+            async fn hold_resume_partial(&self, _path: &str, _size: u64) -> Result<()> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn root(&self) -> &Path {
+                &self.1
+            }
+        }
+        let ledger: SharedNeedLedger = Arc::default();
+        ledger.lock().unwrap().grant(
+            FileHeader {
+                relative_path: "r.bin".to_string(),
+                size: 8,
+                ..Default::default()
+            },
+            true,
+        );
+        let holds = Arc::new(Holds(
+            std::sync::atomic::AtomicUsize::new(0),
+            PathBuf::new(),
+        ));
+        let sink = NeedListSink::new(
+            Arc::clone(&holds) as Arc<dyn TransferSink>,
+            Arc::clone(&ledger),
+            Some(ResumeRecv {
+                resumed: Arc::new(AtomicU64::new(0)),
+            }),
+            None,
+        )
+        .with_lane(0, 3);
+        let block = |bytes: Vec<u8>| PreparedPayload::FileBlock {
+            relative_path: "r.bin".to_string(),
+            offset: 0,
+            bytes,
+        };
+        sink.write_payload(block(Vec::new())).await.unwrap();
+        assert_eq!(
+            holds.0.load(Ordering::SeqCst),
+            0,
+            "a keep-alive holds nothing"
+        );
+        sink.write_payload(block(b"bytes".to_vec())).await.unwrap();
+        assert_eq!(holds.0.load(Ordering::SeqCst), 1);
     }
 
     /// Contract v7 (A5, A10): a zero-block resume closes straight from

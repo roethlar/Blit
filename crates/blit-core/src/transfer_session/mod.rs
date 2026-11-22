@@ -5181,10 +5181,6 @@ async fn destination_session_inner(
                 if let Some(raw) = header.raw_relative_path.as_deref() {
                     sink.note_raw_name(&header.relative_path, raw);
                 }
-                // cr-win-1: before the first patch lands, so an interrupted
-                // record never leaves the partial at the source's size.
-                sink.hold_resume_partial(&header.relative_path, header.size)
-                    .await?;
                 let outcome =
                     receive_block_record(transport, sink.as_ref(), &header, block).await?;
                 files_written += outcome.files_written as u64;
@@ -6893,6 +6889,15 @@ async fn receive_block_record(
                     header.relative_path, block.offset, len, header.size
                 ),
             ));
+        }
+        // cr-win-1: before the first patch lands, so an interrupted record
+        // never leaves the partial at the source's size — cr-ecm21-1: the
+        // first block that carries bytes; one that carries nothing has
+        // nothing.
+        if !block.content.is_empty() {
+            sink.hold_resume_partial(&header.relative_path, header.size)
+                .await
+                .map_err(|e| tag_path(e, &header.relative_path))?;
         }
         let outcome = sink
             .write_payload(PreparedPayload::FileBlock {

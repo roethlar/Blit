@@ -1564,6 +1564,12 @@ impl TransferSink for FsTransferSink {
                     "block-write",
                 )
                 .await?;
+                // cr-ecm21-1: a block that carries nothing — a keep-alive —
+                // writes nothing and has nothing: the partial is had only
+                // for bytes to land in it.
+                if bytes.is_empty() {
+                    return Ok(SinkOutcome::default());
+                }
                 // cr-ecm20-2: a partial that could not be had safely, or
                 // whose block failed already, is written no more: the file
                 // fails once, at its completion record.
@@ -1609,6 +1615,11 @@ impl TransferSink for FsTransferSink {
                     "block-complete",
                 )
                 .await?;
+                // cr-ecm21-1: a completion no block came before — every
+                // block matched — has its partial too, by the hashes' word,
+                // before it is cut and stamped: it went to the name, and a
+                // file put there since was cut and stamped as complete.
+                self.hold_resume_partial(&relative_path, total_size).await?;
                 let held = self
                     .resume_files
                     .lock()
@@ -7786,6 +7797,77 @@ mod cr_win_1_tests {
             .unwrap();
         assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
         assert_eq!(std::fs::read(&at).unwrap(), b"somebody's", "untouched");
+    }
+
+    /// cr-ecm21-1: a completion no block came before — every block matched
+    /// — has its partial first, by the hashes' word: an owner's read-only
+    /// file is made writable through what holds it and stamped (it failed
+    /// with `Permission denied`), and one put at the name since is not cut
+    /// or stamped (it was). And a block that carries nothing touches
+    /// nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_resume_with_no_block_has_its_partial_and_an_empty_block_has_nothing() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let complete = |rel: &str| PreparedPayload::FileBlockComplete {
+            relative_path: rel.to_string(),
+            total_size: 10,
+            mtime_seconds: 1_600_000_000,
+            permissions: 0o644,
+            windows_metadata: None,
+        };
+        let ro = dst.join("ro.bin");
+        std::fs::write(&ro, b"0123456789").unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o444)).unwrap();
+        sink.note_resume_baseline(
+            "ro.bin",
+            ResumeBaseline::Hashed(crate::moved::Version::of(&std::fs::metadata(&ro).unwrap())),
+        );
+        let outcome = sink.write_payload(complete("ro.bin")).await.unwrap();
+        assert_eq!(outcome.files_failed_total, 0, "{outcome:?}");
+        assert_eq!(std::fs::read(&ro).unwrap(), b"0123456789");
+        assert_eq!(
+            std::fs::metadata(&ro).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        let replaced = dst.join("replaced.bin");
+        std::fs::write(&replaced, b"0123456789").unwrap();
+        sink.note_resume_baseline(
+            "replaced.bin",
+            ResumeBaseline::Hashed(crate::moved::Version::of(
+                &std::fs::metadata(&replaced).unwrap(),
+            )),
+        );
+        let theirs = tmp.path().join("theirs");
+        std::fs::write(&theirs, b"somebody else's").unwrap();
+        std::fs::rename(&theirs, &replaced).unwrap();
+        let outcome = sink.write_payload(complete("replaced.bin")).await.unwrap();
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        assert_eq!(std::fs::read(&replaced).unwrap(), b"somebody else's");
+
+        sink.write_payload(PreparedPayload::FileBlock {
+            relative_path: "untouched.bin".to_string(),
+            offset: 0,
+            bytes: Vec::new(),
+        })
+        .await
+        .unwrap();
+        assert!(
+            !dst.join("untouched.bin").exists(),
+            "an empty block makes nothing"
+        );
     }
 
     /// cr-ecm21-5: a volume that refuses writes, met at a resume's hold,
