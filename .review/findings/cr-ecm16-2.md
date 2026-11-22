@@ -1,9 +1,9 @@
 # cr-ecm16-2: `--ignore-existing` was not held to the END of every write
 
 **Severity**: HIGH — a file moved over a name while a run that keeps what exists writes there is counted delivered, given the run's mode, or removed
-**Status**: Fixed on Unix, awaiting review; the Windows half is open and blocked (below)
+**Status**: Reviewed, found incomplete — `combined-r18` (Codex openreview, 2026-11-22) reviewed `7912da16..ca377805` — the six `combined-r17` fixes — with `guard_confirmed: true`: "Applying Unix shard permissions and timestamps through the writer's handle also fixes a real race." Three things remain. "I cancelled `begin_record` during the new metadata lookup. The head left a zero-byte file that a later `--ignore-existing` run skips … Arm cleanup as part of creation and keep it armed through commit." "I aborted an ordinary overwrite through an unchanged, in-module symlink. The head reported the partial removed, yet reading the same name returned the four partial bytes. The handle identifies the referent and `symlink_metadata` identifies the link … The second unlink after dropping the handle also needs that protection." And the small-file probe's close timer now times a move into `Some`. The Windows half stays open. The remaining work is cr-ecm17-1, -2 and -5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm16-2`)
+**Commit**: `064534f4`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r17` over `13faafd2..7912da16` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r17.codex.md`. It completes cr-ecm15-1 (`b2a9e435`).
 
 ## Evidence

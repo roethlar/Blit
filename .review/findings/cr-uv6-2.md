@@ -1,9 +1,9 @@
 # cr-uv6-2: the module itself passed a read's containment by how its path is spelled
 
 **Severity**: HIGH — a listing of a module whose root has been replaced by a link shows the directory the link points to
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r18` (Codex openreview, 2026-11-22) reviewed `7912da16..ca377805` — the six `combined-r17` fixes — with `guard_confirmed: true`. "After I renamed the module directory, remote `ls --json` exited 1 with empty stdout. Local `ls --json` on the missing path exited 2 with structured output. Return the lookup error through the utility's operand-failure response while continuing to refuse a root that resolves outside the export." The remaining work is cr-uv7-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv6-2`)
+**Commit**: `269d3b88`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r17` over `13faafd2..7912da16` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r17.codex.md`. It completes cr-uv5-5 (`ca4e6855`).
 
 ## Evidence

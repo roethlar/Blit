@@ -1,9 +1,9 @@
 # cr-uv6-1: a write between a removal's two looks was taken for the removal's own change
 
 **Severity**: HIGH — a move removes the last name of a file with bytes appended to it that nobody was sent
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r18` (Codex openreview, 2026-11-22) reviewed `7912da16..ca377805` — the six `combined-r17` fixes — with `guard_confirmed: true`. "On Unix, a same-length rewrite that preserves mtime during hard-link removal passes the new comparison because it discards ctime. Cleanup can then delete the last name for unsent bytes … Verify the delivered content in the ambiguous hard-link case … and retain the source whenever verification fails." (This record's own known gap, required.) The Windows half is cr-uv6-3's. The remaining work is cr-uv7-1
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv6-1`)
+**Commit**: `17ac7abe`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r17` over `13faafd2..7912da16` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r17.codex.md`. It completes cr-uv5-3 (`55094166`).
 
 ## Evidence

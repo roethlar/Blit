@@ -1,9 +1,9 @@
 # cr-ecm16-4: the case line printed a spelling that shares names with the pattern as typed, through `?` or another alternative
 
 **Severity**: MEDIUM — the line names, as what `--ignore-case` would add, a text some names of which are copied either way
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r18` (Codex openreview, 2026-11-22) reviewed `7912da16..ca377805` — the six `combined-r17` fixes — with `guard_confirmed: true`. "`--include '*/Cache/*'` advertised `*/cache/*` as an additional match. I copied `x/Cache/cache/saved` with either pattern as typed. A class containing `a` and a literal tab also shared a match with its advertised uppercase spelling. The component comparison misses separator-crossing `*`, and the class comparison omits tabs." The remaining work is cr-ecm17-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm16-4`)
+**Commit**: `9723cef9`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r17` over `13faafd2..7912da16` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r17.codex.md`. It completes cr-ecm15-2 (`0db7e38c`).
 
 ## Evidence

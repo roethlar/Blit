@@ -1,9 +1,9 @@
 # cr-uv6-4: what a walk saw was kept on a source that scans can share
 
 **Severity**: HIGH — one move's account can hold a file as another scan of the same source saw it, and remove a version nobody sent
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r18` (Codex openreview, 2026-11-22) reviewed `7912da16..ca377805` — the six `combined-r17` fixes — with `guard_confirmed: true`: "Giving each `SourceScan` its own observations fixes interference between scans." But "an external `TransferSource` can collect observations but cannot attach them to a newly constructed `SourceScan` … because `seeing` is crate-private." The remaining work is cr-uv7-3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv6-4`)
+**Commit**: `4d18150d`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r17` over `13faafd2..7912da16` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r17.codex.md`. It completes cr-uv5-2 (`f4e1ab22`).
 
 ## Evidence
