@@ -183,6 +183,15 @@ fn open_resume_partial_with(
         // device — is not opened: it is replaced whole (a directory there
         // refuses the rename). Opened, a FIFO this run could only read
         // waited for a writer.
+        // cr-ecm27-3: a link at the name — come there since the chain was
+        // followed — is left as it is, and the file fails: replaced, the
+        // link was overwritten.
+        Some((mode, _)) if is_link(mode) => {
+            eyre::bail!(
+                "{} became a link while it was being had; it is left as it is",
+                dst.display()
+            );
+        }
         Some((mode, owner)) if !is_regular(mode) || !reusable(mode, owner) => {
             return fresh(&resolved);
         }
@@ -193,7 +202,9 @@ fn open_resume_partial_with(
     // only while nothing does. Opened by the name to be made, an empty file
     // stood there before its cleanup's handle was had, and stayed when that
     // was refused.
-    let first = match resolved.open(libc::O_RDWR) {
+    // cr-ecm27-3: no open waits — a FIFO put in the file's place after the
+    // look cannot hold it; what was opened is checked below.
+    let first = match resolved.open(libc::O_RDWR | libc::O_NONBLOCK) {
         Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {
             let (file, kept) =
                 resolved.fresh_exclusive(dst, src_len.saturating_add(1), |file| {
@@ -212,7 +223,7 @@ fn open_resume_partial_with(
     let (file, writable) = match first {
         Ok(file) => (file, true),
         Err(refused) if refused.kind() == std::io::ErrorKind::PermissionDenied => {
-            match resolved.open(libc::O_RDONLY) {
+            match resolved.open(libc::O_RDONLY | libc::O_NONBLOCK) {
                 Ok(file) => (file, false),
                 Err(unread) if unread.kind() == std::io::ErrorKind::PermissionDenied => {
                     return fresh(&resolved);
@@ -267,7 +278,7 @@ fn open_resume_partial_with(
             } else {
                 // The same file, now writable, or nothing is had.
                 let reopened = reopen_fault(dst)
-                    .and_then(|()| resolved.open(libc::O_RDWR))
+                    .and_then(|()| resolved.open(libc::O_RDWR | libc::O_NONBLOCK))
                     .with_context(|| format!("opening destination: {}", dst.display()));
                 let again = reopened.map_err(undo)?;
                 let same = file.metadata().and_then(|was| {
@@ -303,6 +314,13 @@ fn open_resume_partial_with(
 #[allow(clippy::unnecessary_cast)]
 fn is_regular(mode: u32) -> bool {
     mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
+}
+
+/// Whether `mode` (type bits included) is a link's.
+#[cfg(unix)]
+#[allow(clippy::unnecessary_cast)]
+pub(crate) fn is_link(mode: u32) -> bool {
+    mode & libc::S_IFMT as u32 == libc::S_IFLNK as u32
 }
 
 /// A second handle to `file`, the partial for `dst`. Test seam
@@ -577,10 +595,41 @@ pub(crate) fn resolve_destination(dst: &Path, within: Option<&Path>) -> Result<R
     }
     let held = crate::held::directory_unlinked(&directory)
         .with_context(|| format!("holding the directory {}", directory.display()))?;
-    Ok(Resolved {
+    let resolved = Resolved {
         directory: held,
         name: c_string(&name)?,
-    })
+    };
+    after_a_destination_is_resolved(dst);
+    Ok(resolved)
+}
+
+/// Test seam (cr-ecm27-3): runs once a resume's destination is resolved and
+/// its directory held, before anything at the name is looked at — for a
+/// test to put something else there. Keyed by path. Production never sets
+/// it.
+#[cfg(all(test, unix))]
+pub(crate) static AFTER_A_RESOLVE_HOOKS: std::sync::Mutex<
+    Vec<(std::path::PathBuf, PartialOpenedHook)>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn after_a_destination_is_resolved(_dst: &Path) {
+    #[cfg(test)]
+    {
+        let hooks: Vec<PartialOpenedHook> = AFTER_A_RESOLVE_HOOKS
+            .lock()
+            .map(|hooks| {
+                hooks
+                    .iter()
+                    .filter(|(at, _)| at == _dst)
+                    .map(|(_, hook)| std::sync::Arc::clone(hook))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for hook in hooks {
+            hook(_dst);
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -618,12 +667,6 @@ impl Resolved {
         ready: impl FnOnce(&File) -> Result<T>,
     ) -> Result<(File, T)> {
         self.fresh_as(dst, unfinished, ready, true)
-    }
-
-    /// Whether anything stands at the name in the held directory — itself,
-    /// a link being a link.
-    pub(crate) fn stands(&self) -> std::io::Result<bool> {
-        self.look().map(|seen| seen.is_some())
     }
 
     /// What stands at the name in the held directory, itself — its mode
@@ -1451,6 +1494,86 @@ mod tests {
             .collect::<std::io::Result<_>>()?;
         left.sort();
         assert_eq!(left, ["linked", "unlinked"], "no staged name left");
+        Ok(())
+    }
+
+    /// cr-ecm27-3: what takes the name during acquisition is met safely — a
+    /// FIFO put in a reusable file's place after the look does not hold the
+    /// open (the file is replaced, the resume ends), and a link put there
+    /// before the look is left as it is and the resume fails. Opened to be
+    /// read, the FIFO waited for a writer; replaced, the link was
+    /// overwritten.
+    #[cfg(unix)]
+    #[test]
+    fn what_takes_the_name_during_acquisition_is_met_safely() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let data = vec![7u8; 4096];
+        std::fs::write(&src, &data)?;
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644))?;
+
+        let fifo = tmp.path().join("fifo");
+        std::fs::write(&fifo, &data[..1000])?;
+        std::fs::set_permissions(&fifo, std::fs::Permissions::from_mode(0o644))?;
+        {
+            let at = fifo.clone();
+            AFTER_A_LOOK_HOOKS.lock().unwrap().push((
+                fifo.clone(),
+                std::sync::Arc::new(move |_: &Path| {
+                    std::fs::remove_file(&at).unwrap();
+                    let name = std::ffi::CString::new(at.as_os_str().as_encoded_bytes()).unwrap();
+                    // SAFETY: `name` is a NUL-terminated path that outlives the call.
+                    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o444) }, 0);
+                }),
+            ));
+        }
+        let (done, waited) = std::sync::mpsc::channel();
+        {
+            let (src, fifo, data) = (src.clone(), fifo.clone(), data.clone());
+            std::thread::spawn(move || {
+                let copied = File::open(&src)
+                    .map_err(eyre::Report::new)
+                    .and_then(|mut opened| {
+                        resume_copy_from(&mut opened, data.len() as u64, &fifo, 1024)
+                    });
+                let _ = done.send(copied.map(|_| ()));
+            });
+        }
+        let ended = waited.recv_timeout(std::time::Duration::from_secs(20));
+        AFTER_A_LOOK_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(at, _)| at != &fifo);
+        ended.map_err(|_| eyre::eyre!("the resume waited on the FIFO"))??;
+        assert!(std::fs::symlink_metadata(&fifo)?.file_type().is_file());
+        assert_eq!(std::fs::read(&fifo)?, data);
+
+        let linked = tmp.path().join("linked");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::write(&linked, &data[..1000])?;
+        std::fs::write(&elsewhere, b"elsewhere")?;
+        {
+            let (at, to) = (linked.clone(), elsewhere.clone());
+            AFTER_A_RESOLVE_HOOKS.lock().unwrap().push((
+                linked.clone(),
+                std::sync::Arc::new(move |_: &Path| {
+                    std::fs::remove_file(&at).unwrap();
+                    std::os::unix::fs::symlink(&to, &at).unwrap();
+                }),
+            ));
+        }
+        let copied = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &linked, 1024);
+        AFTER_A_RESOLVE_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(at, _)| at != &linked);
+        assert!(copied.is_err(), "a link at the name fails the resume");
+        assert!(
+            std::fs::symlink_metadata(&linked)?.file_type().is_symlink(),
+            "left a link"
+        );
+        assert_eq!(std::fs::read(&elsewhere)?, b"elsewhere");
         Ok(())
     }
 

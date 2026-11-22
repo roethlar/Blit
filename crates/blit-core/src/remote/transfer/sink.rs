@@ -2869,10 +2869,19 @@ fn hold_whole(dst: &Path, total_size: u64, within: Option<&Path>) -> Result<Opti
     let resolved = crate::copy::resolve_destination(dst, within)?;
     let ready = |file: &std::fs::File| HeldPartial::identity_of(file, dst);
     let unfinished = total_size.saturating_add(1);
-    let stands = resolved
-        .stands()
+    let seen = resolved
+        .look()
         .with_context(|| format!("looking at {}", dst.display()))?;
-    let (file, identity) = if stands {
+    // cr-ecm27-3: a link at the name — come there since the chain was
+    // followed — is left as it is, and the file fails: replaced, the link
+    // was overwritten.
+    if seen.is_some_and(|(mode, _)| crate::copy::is_link(mode)) {
+        eyre::bail!(
+            "{} became a link while it was being had; it is left as it is",
+            dst.display()
+        );
+    }
+    let (file, identity) = if seen.is_some() {
         resolved.fresh(dst, unfinished, ready)?
     } else {
         resolved.fresh_exclusive(dst, unfinished, ready)?
@@ -8132,6 +8141,65 @@ mod cr_win_1_tests {
             .unwrap();
         assert!(outcome.file_failed("r.bin"), "{outcome:?}");
         assert_eq!(sink.baselines_noted(), 0, "its baseline gone");
+    }
+
+    /// cr-ecm27-3: a link that takes the name of a wire resume's whole hold
+    /// before it is looked at is left as it is, and the file fails.
+    /// Replaced, the link was overwritten.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_link_that_takes_the_name_of_a_whole_hold_is_left() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let at = dst.join("r.bin");
+        std::fs::write(&at, b"0123456789").unwrap();
+        let elsewhere = dst.join("elsewhere");
+        std::fs::write(&elsewhere, b"elsewhere").unwrap();
+        {
+            let (at, to) = (at.clone(), elsewhere.clone());
+            crate::copy::AFTER_A_RESOLVE_HOOKS.lock().unwrap().push((
+                at.clone(),
+                Arc::new(move |_: &Path| {
+                    std::fs::remove_file(&at).unwrap();
+                    std::os::unix::fs::symlink(&to, &at).unwrap();
+                }),
+            ));
+        }
+        sink.note_resume_baseline("r.bin", ResumeBaseline::Whole);
+        let held = sink.hold_resume_partial("r.bin", 10).await;
+        crate::copy::AFTER_A_RESOLVE_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(path, _)| path != &at);
+        held.unwrap();
+        assert!(
+            std::fs::symlink_metadata(&at)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "left a link"
+        );
+        assert_eq!(std::fs::read(&elsewhere).unwrap(), b"elsewhere");
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "r.bin".to_string(),
+                total_size: 10,
+                mtime_seconds: 0,
+                permissions: 0o600,
+                windows_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert!(outcome.file_failed("r.bin"), "{outcome:?}");
     }
 
     /// cr-ecm27-4: a wire resume's hashed hold whose writable reopen is
