@@ -2397,7 +2397,9 @@ impl TransferSink for NeedListSink {
         self.require_resume()?;
         self.ledger()
             .settle_resume(relative_path, self.lane, true)?;
-        Ok(SinkOutcome::failed(relative_path, reason))
+        // cr-ecm22-5: and the sink it wraps is told, to let go of the
+        // partial it holds: it never was, and kept it open.
+        self.inner.fail_resume_record(relative_path, reason).await
     }
 
     fn for_lane(&self, epoch: u32, socket_id: u32) -> Option<Arc<dyn TransferSink>> {
@@ -2896,6 +2898,55 @@ mod tests {
         );
         sink.write_payload(block(b"bytes".to_vec())).await.unwrap();
         assert_eq!(holds.0.load(Ordering::SeqCst), 1);
+    }
+
+    /// cr-ecm22-5: a resume record the source closes failed on the data
+    /// plane reaches the sink this one wraps, to let go of the partial it
+    /// holds. The ledger settled it here, and the sink was never told.
+    #[tokio::test]
+    async fn a_failed_resume_record_reaches_the_sink_it_wraps() {
+        struct Fails(std::sync::atomic::AtomicUsize, PathBuf);
+        #[async_trait]
+        impl TransferSink for Fails {
+            async fn write_payload(&self, _payload: PreparedPayload) -> Result<SinkOutcome> {
+                Ok(SinkOutcome::default())
+            }
+            async fn fail_resume_record(&self, path: &str, reason: &str) -> Result<SinkOutcome> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(SinkOutcome::failed(path, reason))
+            }
+            fn root(&self) -> &Path {
+                &self.1
+            }
+        }
+        let ledger: SharedNeedLedger = Arc::default();
+        ledger.lock().unwrap().grant(
+            FileHeader {
+                relative_path: "r.bin".to_string(),
+                size: 8,
+                ..Default::default()
+            },
+            true,
+        );
+        let fails = Arc::new(Fails(
+            std::sync::atomic::AtomicUsize::new(0),
+            PathBuf::new(),
+        ));
+        let sink = NeedListSink::new(
+            Arc::clone(&fails) as Arc<dyn TransferSink>,
+            Arc::clone(&ledger),
+            Some(ResumeRecv {
+                resumed: Arc::new(AtomicU64::new(0)),
+            }),
+            None,
+        )
+        .with_lane(0, 3);
+        let outcome = sink
+            .fail_resume_record("r.bin", "source: read error")
+            .await
+            .unwrap();
+        assert!(outcome.file_failed("r.bin"), "{outcome:?}");
+        assert_eq!(fails.0.load(Ordering::SeqCst), 1, "the sink is told");
     }
 
     /// Contract v7 (A5, A10): a zero-block resume closes straight from

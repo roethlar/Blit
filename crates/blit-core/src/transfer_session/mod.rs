@@ -6943,10 +6943,13 @@ async fn receive_block_record(
                     // Contract v7: the source closed the record failed —
                     // the partial stays unstamped (D-2026-07-09-1's
                     // re-run resumes it) and the file is reported.
-                    record.merge(&crate::remote::transfer::SinkOutcome::failed(
-                        header.relative_path.clone(),
-                        complete.reason.clone(),
-                    ));
+                    // cr-ecm22-5: by the sink, told so, which lets go of
+                    // the partial it holds: reported here, it never was.
+                    let outcome = sink
+                        .fail_resume_record(&header.relative_path, &complete.reason)
+                        .await
+                        .map_err(|e| tag_path(e, &header.relative_path))?;
+                    record.merge(&outcome);
                     return Ok(record);
                 }
                 let outcome = finish_block_record(sink, header, &complete).await?;
@@ -11125,6 +11128,66 @@ mod own_incomplete_copy_tests {
             .unwrap();
         assert_eq!(hashes.len(), 5, "no mode to ask");
         unchanged();
+    }
+
+    /// cr-ecm22-5: a resume record the source closes failed on the control
+    /// lane goes to the sink as that, so it lets go of the partial it holds.
+    /// It was reported failed here, and the sink never told.
+    #[tokio::test]
+    async fn a_failed_close_on_the_control_lane_reaches_the_sink() {
+        struct Fails(std::sync::atomic::AtomicUsize, PathBuf);
+        #[async_trait::async_trait]
+        impl TransferSink for Fails {
+            async fn write_payload(
+                &self,
+                _payload: PreparedPayload,
+            ) -> Result<crate::remote::transfer::SinkOutcome> {
+                Ok(crate::remote::transfer::SinkOutcome::default())
+            }
+            async fn fail_resume_record(
+                &self,
+                path: &str,
+                reason: &str,
+            ) -> Result<crate::remote::transfer::SinkOutcome> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(crate::remote::transfer::SinkOutcome::failed(path, reason))
+            }
+            fn root(&self) -> &Path {
+                &self.1
+            }
+        }
+        let (mut peer, mut transport) = super::transport::in_process_pair();
+        peer.send(frame(Frame::BlockComplete(
+            crate::generated::BlockTransferComplete {
+                relative_path: "r.bin".to_string(),
+                total_bytes: 8,
+                windows_metadata: None,
+                ok: false,
+                reason: "source: read error".to_string(),
+            },
+        )))
+        .await
+        .unwrap();
+        let sink = Fails(std::sync::atomic::AtomicUsize::new(0), PathBuf::new());
+        let header = FileHeader {
+            relative_path: "r.bin".to_string(),
+            size: 8,
+            ..Default::default()
+        };
+        let outcome = receive_block_record(
+            &mut transport,
+            &sink,
+            &header,
+            crate::generated::BlockTransfer {
+                relative_path: "r.bin".to_string(),
+                offset: 0,
+                content: b"1234".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(outcome.file_failed("r.bin"), "{outcome:?}");
+        assert_eq!(sink.0.load(Ordering::SeqCst), 1, "the sink is told");
     }
 
     /// cr-ecm21-2: a block written once it was hashed — as many bytes, the

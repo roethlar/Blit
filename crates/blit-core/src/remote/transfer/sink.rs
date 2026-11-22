@@ -964,7 +964,8 @@ pub trait TransferSink: Send + Sync {
     /// The SOURCE closed `relative_path`'s resume record failed (a v7
     /// `BLOCK_COMPLETE` with `ok = false`): the partial stays unstamped
     /// and the file is reported failed. Same override rule as
-    /// [`Self::skip_record`].
+    /// [`Self::skip_record`]; a sink that wraps another passes it on, and
+    /// one that holds the partial lets it go (cr-ecm22-5).
     async fn fail_resume_record(&self, relative_path: &str, reason: &str) -> Result<SinkOutcome> {
         Ok(SinkOutcome::failed(relative_path, reason))
     }
@@ -1465,6 +1466,14 @@ impl FsTransferSink {
         self.handle_metadata_stamps
             .load(std::sync::atomic::Ordering::Relaxed)
     }
+
+    #[cfg(all(test, unix))]
+    fn held_resume_partials(&self) -> usize {
+        self.resume_files
+            .lock()
+            .expect("resume-files lock poisoned")
+            .len()
+    }
 }
 
 #[async_trait]
@@ -1536,6 +1545,24 @@ impl TransferSink for FsTransferSink {
             .lock()
             .expect("resume-baselines lock poisoned")
             .insert(relative_path.to_string(), baseline);
+    }
+
+    /// cr-ecm22-5: a record the source closed failed lets its partial go —
+    /// the handle its hold took, and whatever was noted for it — as a
+    /// completion does; the partial stays unstamped, one byte longer than
+    /// its source. It was kept to the session's end: a descriptor for
+    /// every file the source failed.
+    async fn fail_resume_record(&self, relative_path: &str, reason: &str) -> Result<SinkOutcome> {
+        self.resume_files
+            .lock()
+            .expect("resume-files lock poisoned")
+            .remove(relative_path);
+        self.resume_baselines
+            .lock()
+            .expect("resume-baselines lock poisoned")
+            .remove(relative_path);
+        let _ = self.take_resume_block_failure(relative_path);
+        Ok(SinkOutcome::failed(relative_path, reason))
     }
 
     async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
@@ -7905,6 +7932,45 @@ mod cr_win_1_tests {
             .unwrap();
         assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
         assert_eq!(std::fs::read(&at).unwrap(), b"somebody's", "not marked");
+    }
+
+    /// cr-ecm22-5: a record the source closes failed lets its partial go —
+    /// the handle its hold took is closed, as a completion closes it — and
+    /// leaves it unstamped. It was kept to the session's end, a descriptor
+    /// for every file the source failed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_resume_record_lets_its_partial_go() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let at = dst.join("r.bin");
+        std::fs::write(&at, b"0123456789").unwrap();
+        sink.note_resume_baseline(
+            "r.bin",
+            ResumeBaseline::Hashed(crate::moved::Version::of(&std::fs::metadata(&at).unwrap())),
+        );
+        sink.hold_resume_partial("r.bin", 10).await.unwrap();
+        assert_eq!(sink.held_resume_partials(), 1);
+        let outcome = sink
+            .fail_resume_record("r.bin", "source: read error")
+            .await
+            .unwrap();
+        assert!(outcome.file_failed("r.bin"), "{outcome:?}");
+        assert_eq!(sink.held_resume_partials(), 0, "let go");
+        assert_eq!(
+            std::fs::metadata(&at).unwrap().len(),
+            11,
+            "unstamped, one byte longer than its source"
+        );
     }
 
     /// cr-ecm21-1: a completion no block came before — every block matched
