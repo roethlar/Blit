@@ -160,10 +160,15 @@ pub struct FindOptions {
 /// for it: the look a removal would want costs every entry a call.
 /// Given only when it is asked for ([`FindOptions::seen`]), and where the
 /// system says (Unix).
+///
+/// cr-uv11-1: and what kind of entry it was, where a test of its kind
+/// (`-type`) held — the listing's own word, for nothing: an entry of
+/// another kind put at the name since does not pass that test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Seen {
     pub within: (u64, u64),
     pub entry: Option<(u64, u64)>,
+    pub kind: Option<Kind>,
 }
 
 impl FindOptions {
@@ -295,6 +300,7 @@ pub fn find_in(
         start.seen(&metadata).map(|(within, entry)| Seen {
             within,
             entry: Some(entry),
+            kind: kind.filter(|_| !options.kinds.is_empty()),
         })
     } else {
         None
@@ -433,6 +439,7 @@ pub fn find_in(
             frame.within.map(|within| Seen {
                 within,
                 entry: looked_at,
+                kind: kind.filter(|_| !options.kinds.is_empty()),
             })
         } else {
             None
@@ -552,6 +559,25 @@ mod tests {
             count: 0,
             unit_bytes: 1,
         }];
+        // cr-uv11-1: and the kind, where a kind was tested.
+        let mut kinds_said = Vec::new();
+        find(
+            &start,
+            b"start",
+            &FindOptions {
+                seen: true,
+                kinds: vec![Kind::File],
+                ..FindOptions::default()
+            },
+            &mut |event| {
+                if let FindEvent::Found(path, _, seen) = event {
+                    kinds_said.push((path, seen.and_then(|seen| seen.kind)));
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(kinds_said, [(PathBuf::from("a/f"), Some(Kind::File))]);
         for (asked, facts) in [(true, false), (true, true), (false, false)] {
             let mut said = Vec::new();
             find(
@@ -581,6 +607,7 @@ mod tests {
                 let expected = asked.then(|| Seen {
                     within: identity(at.parent().unwrap()),
                     entry: looked.then(|| identity(&at)),
+                    kind: None,
                 });
                 assert_eq!(seen, expected, "{path:?}, asked: {asked}, facts: {facts}");
             }

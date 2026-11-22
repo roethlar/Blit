@@ -988,7 +988,14 @@ impl Deleting {
         directory: bool,
         seen: Option<blit_core::find::Seen>,
     ) -> std::io::Result<()> {
-        let seen = seen.map(|seen| (seen.within, seen.entry));
+        let seen = seen.map(|seen| {
+            let kind = seen.kind.map(|kind| match kind {
+                blit_core::find::Kind::File => blit_core::deletion::MetKind::File,
+                blit_core::find::Kind::Link => blit_core::deletion::MetKind::Link,
+                blit_core::find::Kind::Directory => blit_core::deletion::MetKind::Other,
+            });
+            (seen.within, seen.entry, kind)
+        });
         if !relative.as_os_str().is_empty() {
             return self
                 .remover

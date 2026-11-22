@@ -378,7 +378,7 @@ impl Remover {
         &mut self,
         target: &Path,
         directory: bool,
-        seen: Option<((u64, u64), Option<(u64, u64)>)>,
+        seen: Option<((u64, u64), Option<(u64, u64)>, Option<MetKind>)>,
     ) -> std::io::Result<()> {
         let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
             return Err(leaves_the_root());
@@ -400,15 +400,19 @@ impl Remover {
                 self.held = Some((parent.to_path_buf(), passage, identity));
             }
             let (_, passage, identity) = self.held.as_ref().expect("held just above");
-            if let Some((within, entry)) = seen {
+            if let Some((within, entry, kind)) = seen {
                 if *identity != Some(within) {
                     return Err(std::io::Error::other(
                         "the directory it was found in is not the one there now",
                     ));
                 }
-                if let Some(entry) = entry {
+                // cr-uv11-1: and, where the walk said, the kind it was.
+                if entry.is_some() || kind.is_some() {
                     let met = passage.met(&name)?;
-                    if (met.version.device, met.version.inode) != entry {
+                    let replaced = entry
+                        .is_some_and(|entry| (met.version.device, met.version.inode) != entry)
+                        || kind.is_some_and(|kind| met.kind != kind);
+                    if replaced {
                         return Err(std::io::Error::other(
                             "it is not what was found: it was replaced since",
                         ));
@@ -2223,7 +2227,7 @@ mod rm_tests {
             let found = fs::symlink_metadata(path).unwrap();
             (found.dev(), found.ino())
         };
-        let seen_at = |dir: &Path| Some((identity(dir), Some(identity(&dir.join("f")))));
+        let seen_at = |dir: &Path| Some((identity(dir), Some(identity(&dir.join("f"))), None));
         let mut remover = Remover::below(&root);
 
         fs::create_dir_all(root.join("d")).unwrap();
@@ -2256,6 +2260,22 @@ mod rm_tests {
             .remove_found(&root.join("g/f"), false, seen)
             .unwrap();
         assert!(!root.join("g/f").exists(), "as it was: gone");
+
+        // cr-uv11-1: found by its kind alone — a link — and a file put at
+        // its name since: it stays.
+        fs::create_dir_all(root.join("k")).unwrap();
+        std::os::unix::fs::symlink("nowhere", root.join("k/l")).unwrap();
+        let by_kind = Some((identity(&root.join("k")), None, Some(MetKind::Link)));
+        fs::write(root.join("k/file"), b"a file").unwrap();
+        fs::rename(root.join("k/file"), root.join("k/l")).unwrap();
+        assert!(remover
+            .remove_found(&root.join("k/l"), false, by_kind)
+            .is_err());
+        assert_eq!(
+            fs::read(root.join("k/l")).unwrap(),
+            b"a file",
+            "a file is no link"
+        );
     }
 
     /// cr-uv5-3: a file with several names goes by every one of them when
