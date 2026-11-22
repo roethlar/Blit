@@ -1,9 +1,9 @@
 # cr-ecm22-2: a chain of links at the destination was followed one step
 
 **Severity**: HIGH — a resume through `entry → middle → actual` replaced `middle` with a regular file and left the old bytes in `actual`, reporting success
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r24` (Codex openreview, 2026-11-22) reviewed `24d4064f..c89b1eb1` — the six `combined-r23` fixes — with `guard_confirmed: true`. "When a whole-file fallback encounters a dangling link chain, the containment check can accept the original link's parent. `fresh_partial` then follows the chain and can create an unfinished file outside the selected tree. Validate and hold the final parent before creating the sibling there." The remaining work is cr-ecm23-3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm22-2`)
+**Commit**: `2678a740`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r23` over `5d2f8def..24d4064f` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r23.codex.md`. It completes cr-ecm21-3 (`abe9d4a1`).
 
 ## Evidence

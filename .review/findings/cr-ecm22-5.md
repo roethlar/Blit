@@ -1,9 +1,9 @@
 # cr-ecm22-5: a source-reported failure left the partial's handle open
 
 **Severity**: MEDIUM — every resume record the source closes failed kept a descriptor open to the session's end; enough of them exhaust descriptors in a transfer that could have survived them
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r24` (Codex openreview, 2026-11-22) reviewed `24d4064f..c89b1eb1` — the six `combined-r23` fixes — with `guard_confirmed: true`: "The short staging name, pre-rename sizing, and release of held files after a data-bearing failure all serve that goal." "When the source failed before sending its first block, the control lane reported the failure directly. In both initiator roles I measured one saved baseline still present at sink destruction. Route this branch through `fail_resume_record` too." The remaining work is cr-ecm23-6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm22-5`)
+**Commit**: `bdc472dd`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r23` over `5d2f8def..24d4064f` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r23.codex.md`. It completes cr-ecm21-4 (`50b416ed`).
 
 ## Evidence

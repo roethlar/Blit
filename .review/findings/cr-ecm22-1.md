@@ -1,9 +1,9 @@
 # cr-ecm22-1: a fresh partial was renamed into place before it was ready
 
 **Severity**: HIGH — a resume whose fresh partial cannot be given its length leaves the destination an empty file
-**Status**: Fixed on Unix, awaiting review
+**Status**: Verified on Unix — `combined-r24` (Codex openreview, 2026-11-22) reviewed `24d4064f..c89b1eb1` — the six `combined-r23` fixes — with `guard_confirmed: true`: "The short staging name, pre-rename sizing, and release of held files after a data-bearing failure all serve that goal."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm22-1`)
+**Commit**: `cde4405f`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r23` over `5d2f8def..24d4064f` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r23.codex.md`. It completes cr-ecm21-3 (`abe9d4a1`).
 
 ## Evidence

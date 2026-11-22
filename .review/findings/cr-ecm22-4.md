@@ -1,9 +1,9 @@
 # cr-ecm22-4: a source of mode 0000, and the wire's two samples
 
 **Severity**: HIGH — a source of mode 0000 counted as no mode, so a destination others can read kept its inode, and a reader holding it read the source's bytes
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r24` (Codex openreview, 2026-11-22) reviewed `24d4064f..c89b1eb1` — the six `combined-r23` fixes — with `guard_confirmed: true`. "A root-run restore of a private source over another user's `0600` file passes the group-and-other-bit check. That user still owns the inode and can read incoming bytes. Require compatible ownership on both local and wire paths before reusing it." "`--drop-windows-metadata` produces a Windows header with zero permissions and no metadata. The receiver interprets it as Unix mode `0000`. A simulated Windows source and Linux receiver transferred all 131,072 bytes of an identical `0644` file. Using the full wire mode's presence restored the expected zero-byte transfer." The remaining work is cr-ecm23-4 and cr-ecm23-5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm22-4`)
+**Commit**: `8c1f1363`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r23` over `5d2f8def..24d4064f` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r23.codex.md`. It completes cr-ecm21-3 (`abe9d4a1`) and cr-ecm20-2 (`9ee5cb63`).
 
 ## Evidence

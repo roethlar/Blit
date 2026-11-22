@@ -1,9 +1,9 @@
 # cr-ecm22-3: a completion acknowledged without a verified identity
 
 **Severity**: HIGH — a resume reported complete for a file it never verified was the one it held
-**Status**: Fixed on Unix, awaiting review; the Windows half is blocked (no Windows host reachable)
+**Status**: Reviewed, found incomplete — `combined-r24` (Codex openreview, 2026-11-22) reviewed `24d4064f..c89b1eb1` — the six `combined-r23` fixes — with `guard_confirmed: true`. "The wire path renames the file before obtaining its identity. With the repository's identity fault injected, I observed the original `0123456789` replaced by eleven zero bytes before any payload arrived. Obtain the identity on the staged handle and finish preparation before the rename." "On Unix, with no recorded hash baseline, failure of the first metadata read becomes an empty handle. Completion then reopens the path. Injecting the fault at that first read produced one file reported written and zero failures. Return the acquisition error and require a verified handle for completion. Windows also discards a supplied baseline here, leaving its documented zero-block completion issue open." The remaining work is cr-ecm23-1 and cr-ecm23-2; the Windows half stays open, blocked
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm22-3`)
+**Commit**: `eb283420`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r23` over `5d2f8def..24d4064f` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r23.codex.md`. It completes cr-ecm21-1 (`fe38ecd4`) and cr-ecm21-4 (`50b416ed`).
 
 ## Evidence
