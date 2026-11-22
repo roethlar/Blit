@@ -820,6 +820,10 @@ pub fn resume_copy_through(
     block_size: usize,
 ) -> Result<ResumeCopyOutcome> {
     src_file.seek(SeekFrom::Start(0))?;
+    // cr-ecm26-2: the kept handle's cursor stands wherever its caller left
+    // it; the comparison below starts from the file's start. Taken from the
+    // cursor, `xxABCD` at offset 2 was taken for `ABCD` and left `xxAB`.
+    dst_file.seek(SeekFrom::Start(0))?;
 
     // cr-win-1: while blocks are patched in place the destination must
     // never be the source's size — an interruption would otherwise leave a
@@ -1626,6 +1630,29 @@ mod tests {
         assert_eq!(outcome.blocks_skipped, 0);
         assert_eq!(std::fs::read(&dst)?, data);
 
+        Ok(())
+    }
+
+    /// cr-ecm26-2: a copy through a kept handle compares from the start of
+    /// the file, wherever the handle's cursor stands. From the cursor,
+    /// `xxABCD` at offset 2 was taken for `ABCD`, nothing was written, and
+    /// `xxAB` was left.
+    #[test]
+    fn a_copy_through_a_kept_handle_compares_from_the_start() -> Result<()> {
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        std::fs::write(&src, b"ABCD")?;
+        let dst = tmp.path().join("dst");
+        std::fs::write(&dst, b"xxABCD")?;
+        let mut kept = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&dst)?;
+        kept.seek(SeekFrom::Start(2))?;
+        let outcome = resume_copy_through(&mut File::open(&src)?, 4, &mut kept, 6, &dst, 4)?;
+        drop(kept);
+        assert_eq!(std::fs::read(&dst)?, b"ABCD");
+        assert_eq!(outcome.bytes_transferred, 4);
         Ok(())
     }
 
