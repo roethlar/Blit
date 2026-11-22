@@ -2751,8 +2751,8 @@ fn hold_partial(
         Some(ResumeBaseline::Hashed(version)) => return hold_hashed(dst, total_size, &version),
         None => {}
     }
-    let _ = (baseline, within);
-    let held = hold_partial_unfinished(dst, total_size);
+    let _ = baseline;
+    let held = hold_partial_unfinished(dst, total_size, within);
     // cr-ecm23-2: on Unix every block and the completion go through what
     // the hold holds, so a hold that cannot be had is the file's failure:
     // its first look that failed was dropped, and the completion, holding
@@ -2883,18 +2883,30 @@ fn hold_fault(_dst: &Path) -> Result<()> {
 /// than Unix its failure is passed over — a partial this end cannot open
 /// for writing cannot be patched either, so its blocks fail and the file is
 /// reported; on Unix it is the file's failure (cr-ecm23-2).
-fn hold_partial_unfinished(dst: &Path, total_size: u64) -> std::io::Result<std::fs::File> {
+fn hold_partial_unfinished(
+    dst: &Path,
+    total_size: u64,
+    within: Option<&Path>,
+) -> std::io::Result<std::fs::File> {
     // cr-ecm19-4: a partial made here is made private (600), and one here
     // already is made so through this handle — whatever the mask it was
-    // made under — before a block patches it.
-    let mut hold = std::fs::OpenOptions::new();
-    hold.write(true).create(true).truncate(false);
+    // made under — before a block patches it. cr-ecm24-1: on Unix it is had
+    // where the chain of links at the name ends, checked against the
+    // destination and in the directory held, as every partial is.
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        hold.mode(0o600);
-    }
-    hold.open(dst).and_then(|file| {
+    let opened = crate::copy::resolve_destination(dst, within)
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))
+        .and_then(|resolved| resolved.open(libc::O_WRONLY | libc::O_CREAT));
+    #[cfg(not(unix))]
+    let opened = {
+        let _ = within;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dst)
+    };
+    opened.and_then(|file| {
         while_a_file_is_made(dst);
         #[cfg(unix)]
         identity_fault(dst)?;
@@ -7993,6 +8005,46 @@ mod cr_win_1_tests {
         assert_eq!(std::fs::read(&at).unwrap(), b"somebody's", "not marked");
     }
 
+    /// cr-ecm24-1: a wire hold with no word of the hashes, through a link to a
+    /// name outside the destination not there yet, makes nothing there: the
+    /// file fails. Opened by its name to be made, the link was followed out.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hold_with_no_word_of_the_hashes_makes_nothing_outside() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        std::os::unix::fs::symlink("../outside/new", dst.join("r.bin")).unwrap();
+        sink.hold_resume_partial("r.bin", 10).await.unwrap();
+        assert_eq!(
+            std::fs::read_dir(&outside).unwrap().count(),
+            0,
+            "nothing made outside"
+        );
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "r.bin".to_string(),
+                total_size: 10,
+                mtime_seconds: 0,
+                permissions: 0o600,
+                windows_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert!(outcome.file_failed("r.bin"), "{outcome:?}");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
     /// cr-ecm24-3: a wire resume into a destination that is one file — a pull
     /// to an exact file path — holds a fresh partial in that file's place
     /// and completes. Its directory, above the destination, was judged
@@ -8674,7 +8726,7 @@ mod cr_win_1_tests {
             ));
             Hooked(fresh.clone())
         };
-        hold_partial_unfinished(&fresh, 10).unwrap();
+        hold_partial_unfinished(&fresh, 10, None).unwrap();
         let made_as = seen.lock().unwrap().expect("the seam ran");
         assert_eq!(made_as & 0o077, 0, "made as {made_as:o}");
         assert_eq!(mode_of(&fresh), 0o600);
@@ -8682,7 +8734,7 @@ mod cr_win_1_tests {
         let there = tmp.path().join("there");
         std::fs::write(&there, b"old").unwrap();
         std::fs::set_permissions(&there, std::fs::Permissions::from_mode(0o644)).unwrap();
-        hold_partial_unfinished(&there, 10).unwrap();
+        hold_partial_unfinished(&there, 10, None).unwrap();
         assert_eq!(mode_of(&there), 0o600);
 
         let by_a_block = tmp.path().join("by-a-block");

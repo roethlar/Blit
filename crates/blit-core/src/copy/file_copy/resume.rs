@@ -8,7 +8,9 @@
 //! where only hashes are exchanged over the network.
 
 use eyre::{Context, Result};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(not(unix))]
+use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -88,17 +90,22 @@ pub fn open_resume_partial(
     src_len: u64,
     within: Option<&Path>,
 ) -> Result<(File, u64)> {
-    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
-    let open = |options: &mut OpenOptions| options.read(true).write(true).mode(0o600).open(dst);
+    use std::os::unix::fs::MetadataExt as _;
+    // cr-ecm24-1: had where the chain of links at the name ends — checked
+    // against the destination, in the directory held — never by the name:
+    // opened by it to be made, a link to a name outside the destination
+    // was followed out and the file made there.
+    let resolved = resolve_destination(dst, within)?;
+    let first = resolved.open(libc::O_RDWR | libc::O_CREAT);
     // cr-ecm20-3: a partial there already that this run may read but not
     // write — left read-only by a copy of a read-only source that failed
     // after its mode was given, or by an older blit — is its owner's to
     // make writable again: it is had to be read, made private and
     // writable through that, and opened again to be written below.
-    let (file, writable) = match open(OpenOptions::new().create(true).truncate(false)) {
+    let (file, writable) = match first {
         Ok(file) => (file, true),
         Err(refused) if refused.kind() == std::io::ErrorKind::PermissionDenied => {
-            match File::open(dst) {
+            match resolved.open(libc::O_RDONLY) {
                 Ok(file) => (file, false),
                 Err(_) => {
                     return Err(refused)
@@ -130,7 +137,8 @@ pub fn open_resume_partial(
             file
         } else {
             // The same file, now writable, or nothing is had.
-            let again = open(&mut OpenOptions::new())
+            let again = resolved
+                .open(libc::O_RDWR)
                 .with_context(|| format!("opening destination: {}", dst.display()))?;
             let (was, now) = (file.metadata()?, again.metadata()?);
             if (was.dev(), was.ino()) != (now.dev(), now.ino()) {
@@ -145,7 +153,8 @@ pub fn open_resume_partial(
         return Ok((file, len));
     }
     drop(file);
-    Ok((fresh_partial(dst, src_len.saturating_add(1), within)?, 0))
+    let (file, ()) = resolved.fresh(dst, src_len.saturating_add(1), |_| Ok(()))?;
+    Ok((file, 0))
 }
 
 /// The user this run is to the system — its effective user id. Test seam
@@ -224,10 +233,28 @@ pub fn fresh_partial_ready<T>(
     within: Option<&Path>,
     ready: impl FnOnce(&File) -> Result<T>,
 ) -> Result<(File, T)> {
-    use std::os::unix::fs::PermissionsExt as _;
-    use std::os::unix::io::{AsRawFd as _, FromRawFd as _, OwnedFd};
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
+    resolve_destination(dst, within)?.fresh(dst, unfinished, ready)
+}
+
+/// cr-ecm24-1: where a resume's partial is had — ONE resolution for every
+/// way one is had, opened where it stands or made fresh, locally and by
+/// the wire: the chain of links at the name followed to its end
+/// (cr-ecm22-2), a name written as a directory's refused (cr-ecm24-6), the
+/// end's directory within the destination when a root is given (cr-ecm23-3,
+/// cr-ecm24-3) and HELD to be searched (cr-ecm24-7), and the partial opened
+/// or made by its name in that directory, never through a link. Opened by
+/// its name to be made, a link to a name outside the destination was
+/// followed out and the file made there.
+#[cfg(unix)]
+pub(crate) struct Resolved {
+    directory: std::os::unix::io::OwnedFd,
+    name: std::ffi::CString,
+}
+
+/// [`Resolved`]: the place `dst` names, `within` the destination's root
+/// (canonical) when one is given.
+#[cfg(unix)]
+pub(crate) fn resolve_destination(dst: &Path, within: Option<&Path>) -> Result<Resolved> {
     // cr-ecm24-6: a name typed as a directory — with a `/` or `/.` after it,
     // as typed or as a link of the chain names it — is no place for a file:
     // its last name taken, `absent/` was made a regular file `absent`.
@@ -259,7 +286,7 @@ pub fn fresh_partial_ready<T>(
     let Some(name) = target.file_name().map(std::ffi::OsStr::to_os_string) else {
         eyre::bail!("{} names no file", dst.display());
     };
-    // cr-ecm23-3: the partial is made in the directory the chain ends in,
+    // cr-ecm23-3: the partial is had in the directory the chain ends in,
     // HELD: found by its path with no link in it, that directory lies
     // within the destination — a link there to a name outside it made the
     // file outside — and it is opened from `/` one name at a time, never
@@ -285,69 +312,128 @@ pub fn fresh_partial_ready<T>(
     }
     let held = crate::held::directory_unlinked(&directory)
         .with_context(|| format!("holding the directory {}", directory.display()))?;
-    before_a_fresh_partial_is_made(dst);
-    let in_held = held.as_raw_fd();
-    let named = c_string(&name)?;
-    // cr-ecm22-6: by a short name of blit's own beside it, whatever the
-    // destination is called — the destination's name in it made a name too
-    // long for a destination whose own name was the longest a name can be
-    // — and another is tried when that one is taken.
-    let mut tries = 0;
-    let (staged, file) = loop {
-        let staged = c_string(std::ffi::OsStr::new(&format!(
-            ".blit-partial-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        )))?;
-        // SAFETY: `in_held` is an open directory for the length of the
-        // call, and `staged` is a NUL-terminated name that outlives it.
-        let made = unsafe {
-            libc::openat(
-                in_held,
-                staged.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600 as libc::c_uint,
-            )
-        };
-        if made >= 0 {
-            // SAFETY: `made` is an open descriptor nothing else owns.
-            break (staged, File::from(unsafe { OwnedFd::from_raw_fd(made) }));
-        }
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::AlreadyExists && tries < 16 {
-            tries += 1;
-            continue;
-        }
-        return Err(error).with_context(|| format!("making a fresh partial for {}", dst.display()));
-    };
-    let unmade = || {
-        // SAFETY: as for `openat` above.
-        unsafe { libc::unlinkat(in_held, staged.as_ptr(), 0) };
-    };
-    let prepared = file
-        .set_permissions(std::fs::Permissions::from_mode(0o600))
-        .and_then(|()| file.set_len(unfinished))
-        .map_err(eyre::Report::new)
-        .and_then(|()| ready(&file));
-    let readied = match prepared {
-        Ok(readied) => readied,
-        Err(error) => {
-            unmade();
-            return Err(error.wrap_err(format!(
-                "making a fresh partial ready for {}",
-                dst.display()
-            )));
-        }
-    };
-    // SAFETY: `in_held` is open for the length of the call, and both names
-    // are NUL-terminated and outlive it.
-    if unsafe { libc::renameat(in_held, staged.as_ptr(), in_held, named.as_ptr()) } != 0 {
-        let error = std::io::Error::last_os_error();
-        unmade();
-        return Err(error)
-            .with_context(|| format!("putting a fresh partial in place of {}", dst.display()));
+    Ok(Resolved {
+        directory: held,
+        name: c_string(&name)?,
+    })
+}
+
+#[cfg(unix)]
+impl Resolved {
+    /// The file at the name, opened with `flags` in the held directory and
+    /// never through a link; one made is private (600).
+    pub(crate) fn open(&self, flags: libc::c_int) -> std::io::Result<File> {
+        use std::os::unix::io::AsRawFd as _;
+        open_in(self.directory.as_raw_fd(), &self.name, flags)
     }
-    Ok((file, readied))
+
+    /// cr-ecm21-3: a FRESH private partial at the name, made without
+    /// destroying what stands there first — staged beside it in the held
+    /// directory, private and writable by its owner (600) from the moment it
+    /// exists, made READY (cr-ecm22-1: its length; cr-ecm23-1: what `ready`
+    /// learns of it), and only then renamed over it. If it cannot be, what
+    /// stands there is as it was.
+    pub(crate) fn fresh<T>(
+        &self,
+        dst: &Path,
+        unfinished: u64,
+        ready: impl FnOnce(&File) -> Result<T>,
+    ) -> Result<(File, T)> {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::io::AsRawFd as _;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        before_a_fresh_partial_is_made(dst);
+        // cr-ecm22-6: by a short name of blit's own beside it, whatever the
+        // destination is called — the destination's name in it made a name too
+        // long for a destination whose own name was the longest a name can be
+        // — and another is tried when that one is taken.
+        let mut tries = 0;
+        let (staged, file) = loop {
+            let staged = c_string(std::ffi::OsStr::new(&format!(
+                ".blit-partial-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            )))?;
+            let error = match open_in(
+                self.directory.as_raw_fd(),
+                &staged,
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+            ) {
+                Ok(made) => break (staged, made),
+                Err(error) => error,
+            };
+            if error.kind() == std::io::ErrorKind::AlreadyExists && tries < 16 {
+                tries += 1;
+                continue;
+            }
+            return Err(error)
+                .with_context(|| format!("making a fresh partial for {}", dst.display()));
+        };
+        let unmade = || {
+            // SAFETY: the held directory is open for the length of the call,
+            // and `staged` is a NUL-terminated name that outlives it.
+            unsafe { libc::unlinkat(self.directory.as_raw_fd(), staged.as_ptr(), 0) };
+        };
+        let prepared = file
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .and_then(|()| file.set_len(unfinished))
+            .map_err(eyre::Report::new)
+            .and_then(|()| ready(&file));
+        let readied = match prepared {
+            Ok(readied) => readied,
+            Err(error) => {
+                unmade();
+                return Err(error.wrap_err(format!(
+                    "making a fresh partial ready for {}",
+                    dst.display()
+                )));
+            }
+        };
+        // SAFETY: the held directory is open for the length of the call, and
+        // both names are NUL-terminated and outlive it.
+        if unsafe {
+            libc::renameat(
+                self.directory.as_raw_fd(),
+                staged.as_ptr(),
+                self.directory.as_raw_fd(),
+                self.name.as_ptr(),
+            )
+        } != 0
+        {
+            let error = std::io::Error::last_os_error();
+            unmade();
+            return Err(error)
+                .with_context(|| format!("putting a fresh partial in place of {}", dst.display()));
+        }
+        Ok((file, readied))
+    }
+}
+
+/// The file called `name` in the directory `directory`, opened with `flags`
+/// and never through a link; one made is private (600).
+#[cfg(unix)]
+fn open_in(
+    directory: std::os::unix::io::RawFd,
+    name: &std::ffi::CStr,
+    flags: libc::c_int,
+) -> std::io::Result<File> {
+    use std::os::unix::io::{FromRawFd as _, OwnedFd};
+    // SAFETY: `directory` is open for the length of the call, and `name` is
+    // a NUL-terminated string that outlives it.
+    let opened = unsafe {
+        libc::openat(
+            directory,
+            name.as_ptr(),
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600 as libc::c_uint,
+        )
+    };
+    if opened < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `opened` is an open descriptor nothing else owns.
+    Ok(File::from(unsafe { OwnedFd::from_raw_fd(opened) }))
 }
 
 /// Whether `path` is written as a directory's: a `/` or `/.` after its last
@@ -822,6 +908,31 @@ mod tests {
             std::fs::read_dir(&elsewhere)?.count(),
             0,
             "nothing elsewhere"
+        );
+        Ok(())
+    }
+
+    /// cr-ecm24-1: a local resume through a link to a name outside the
+    /// destination, not there yet, makes nothing there: the partial is had
+    /// where the chain ends, checked against the destination first. Opened
+    /// by its name to be made, the link was followed out and the file made
+    /// outside.
+    #[cfg(unix)]
+    #[test]
+    fn a_local_resume_makes_nothing_outside_the_destination() -> Result<()> {
+        let tmp = tempdir()?;
+        let root = tmp.path().join("dst");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&root)?;
+        std::fs::create_dir(&outside)?;
+        let at = root.join("r.bin");
+        std::os::unix::fs::symlink("../outside/new", &at)?;
+        let within = std::fs::canonicalize(&root)?;
+        assert!(open_resume_partial(&at, Some(0o100600), 10, Some(&within)).is_err());
+        assert_eq!(
+            std::fs::read_dir(&outside)?.count(),
+            0,
+            "nothing made outside"
         );
         Ok(())
     }
