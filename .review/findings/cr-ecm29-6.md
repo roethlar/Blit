@@ -1,9 +1,9 @@
 # cr-ecm29-6: the staging directory was removed by its name, whatever stood there
 
 **Severity**: MEDIUM — the staging directory was let go by its name: moved, an unrelated empty directory put at its old name was removed; and one refused when it was opened was removed by its name too
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r31` (Codex openreview, 2026-11-22) reviewed `fd603571..93ecf7b2` — the six `combined-r30` fixes — with `guard_confirmed: true`: "I would keep the descriptor-relative inspection after exchange, the nonblocking checksum open, and the per-file refusal when safe replacement is unavailable." "Checking a stage's identity and then removing its name leaves a window in which an unrelated empty directory can be removed. Moving the stage or its parent also makes the recorded recovery path stale. After a successful exchange, an unlink failure is silently reported as success. Restrict destructive cleanup to names Blit controls, propagate cleanup errors, and verify the location reported for retained data." The remaining work is cr-ecm30-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm29-6`)
+**Commit**: `c46d9bdd`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r30` over `e3ea9517..fd603571` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r30.codex.md`. It completes cr-ecm28-3 (`d3c390f8`).
 
 ## Evidence

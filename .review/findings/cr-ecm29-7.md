@@ -1,9 +1,9 @@
 # cr-ecm29-7: what an exchange swapped out was looked at through /proc
 
 **Severity**: MEDIUM — the entry the exchange swapped out was looked at through `/proc/self/fd`, so a Linux daemon with no procfs put back an otherwise valid replacement as a conflict, and the file failed
-**Status**: Fixed on Linux, awaiting review
+**Status**: Verified on Linux — `combined-r31` (Codex openreview, 2026-11-22) reviewed `fd603571..93ecf7b2` — the six `combined-r30` fixes — with `guard_confirmed: true`: "I would keep the descriptor-relative inspection after exchange, the nonblocking checksum open, and the per-file refusal when safe replacement is unavailable."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm29-7`)
+**Commit**: `80ec4afc`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r30` over `e3ea9517..fd603571` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r30.codex.md`. It completes cr-ecm28-2 (`3c25cd73`).
 
 ## Evidence

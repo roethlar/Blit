@@ -1,9 +1,9 @@
 # cr-ecm29-2: the occupant to replace was looked up twice, and an unchecked rename stood where there is no exchange
 
 **Severity**: HIGH — a regular file that came to the name between the caller's decision to replace and `fresh_as`'s own second look became the expected occupant, and was replaced; and where there is no exchange (off Linux, or a Linux filesystem without one) the fallback `renameat` replaced whatever had come to stand there during staging
-**Status**: Fixed on Linux, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r31` (Codex openreview, 2026-11-22) reviewed `fd603571..93ecf7b2` — the six `combined-r30` fixes — with `guard_confirmed: true`: "I would keep the descriptor-relative inspection after exchange, the nonblocking checksum open, and the per-file refusal when safe replacement is unavailable." "The wire's `Whole` baseline discards which file prompted whole-file transfer. A replacement arriving before the first block becomes the expected occupant. Within publication, a saved device/inode pair can also match a recycled inode after the original is released. Even when Blit detects a conflict correctly, its default retry carries only the pathname and can overwrite a different-length newcomer on the next pass. Retain the original observation, including absence, and keep detected conflicts failed across automatic retries." "On macOS, every occupied destination requiring a fresh partial reaches the unsupported branch, while the new Unix CLI test requires that copy to succeed. Use macOS's native exchange on supporting volumes and retain the safe fallback elsewhere. On Windows, the previously admitted NTFS hard-link issue remains open. Local and wire resume need a handle-based link-count check before patching." The remaining work is cr-ecm30-1 and -6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm29-2`)
+**Commit**: `72729f85`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r30` over `e3ea9517..fd603571` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r30.codex.md`. It completes cr-ecm28-2 (`3c25cd73`).
 
 ## Evidence

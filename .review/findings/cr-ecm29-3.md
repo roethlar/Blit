@@ -9,6 +9,9 @@
 ## Evidence
 "The wire hash decision accepts every non-Unix file, and local resume opens the existing file for writing. On NTFS, resuming one name can therefore change another backup snapshot. Check the link count through the Windows file handle and give a multiply linked destination a fresh file." (`crates/blit-core/src/transfer_session/mod.rs`, the wire's hash decision: off Unix every opened regular file is reusable; `crates/blit-core/src/copy/file_copy/resume.rs`, the local acquisition: off Unix the existing file is opened for writing.)
 
+## Restated
+`combined-r31` (Codex openreview, 2026-11-22) reviewed `fd603571..93ecf7b2` — the six `combined-r30` fixes — with `guard_confirmed: true` restated it within cr-ecm30-6: "On Windows, the previously admitted NTFS hard-link issue remains open. Local and wire resume need a handle-based link-count check before patching." It stays blocked: `10.1.10.77` timed out, `.222` and `.173` had no route (2026-11-22).
+
 ## What it needs (not done)
 - Off Unix (Windows), read the link count through the opened handle (`GetFileInformationByHandle`, `nNumberOfLinks`) in both places, and treat a destination with more than one name as not reusable: the wire hashes nothing for it, and the local resume makes it a fresh partial.
 - Guards that run on Windows: a hard-linked destination (`std::fs::hard_link`) resumed locally and over the wire leaves the other name's bytes as they were.

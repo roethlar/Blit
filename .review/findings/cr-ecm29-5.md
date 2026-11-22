@@ -1,9 +1,9 @@
 # cr-ecm29-5: a staging directory made under a narrow umask was refused
 
 **Severity**: MEDIUM — brought in by cr-ecm28-3: under a umask of 0200 the private staging directory was made 0500, the exact 0700 check refused it, and `copy --resume` exited 2 where the base copied the file
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r31` (Codex openreview, 2026-11-22) reviewed `fd603571..93ecf7b2` — the six `combined-r30` fixes — with `guard_confirmed: true`: "I would keep the descriptor-relative inspection after exchange, the nonblocking checksum open, and the per-file refusal when safe replacement is unavailable." "I copied the same `0640` source over a `0644` partial in a setgid directory. Both revisions exited successfully. The base retained the directory's group, while the head assigned the process's primary group. Setting the stage to `0700` clears its inherited setgid bit, so group-read permission on the finished file can go to the wrong group. Preserve that bit when repairing owner permissions." "With umask `0400`, the head exited 2 and left two `0300` staging directories, one per attempt. `open_stage` requests read access before it can repair the mode. Acquire the directory through a handle that works under this mask and repair it through that handle." The remaining work is cr-ecm30-2 and -3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm29-5`)
+**Commit**: `68c46840`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r30` over `e3ea9517..fd603571` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r30.codex.md`. It completes cr-ecm28-3 (`d3c390f8`).
 
 ## Evidence

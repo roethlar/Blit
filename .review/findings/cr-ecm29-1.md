@@ -1,9 +1,9 @@
 # cr-ecm29-1: a failed swap-back could unlink the entry it said it kept
 
 **Severity**: HIGH — after an exchange found an unexpected occupant, the cleanup removed the stage's entry even when the exchange back failed, unlinking the displaced file the error said was kept; and what came to the name during the putting back landed in the cleanup's path and was removed too
-**Status**: Fixed on Linux, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r31` (Codex openreview, 2026-11-22) reviewed `fd603571..93ecf7b2` — the six `combined-r30` fixes — with `guard_confirmed: true`: "I would keep the descriptor-relative inspection after exchange, the nonblocking checksum open, and the per-file refusal when safe replacement is unavailable." "Checking a stage's identity and then removing its name leaves a window in which an unrelated empty directory can be removed. Moving the stage or its parent also makes the recorded recovery path stale. After a successful exchange, an unlink failure is silently reported as success. Restrict destructive cleanup to names Blit controls, propagate cleanup errors, and verify the location reported for retained data." The remaining work is cr-ecm30-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm29-1`)
+**Commit**: `2940c3a0`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r30` over `e3ea9517..fd603571` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r30.codex.md`. It completes cr-ecm28-2 (`3c25cd73`).
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-ecm29-4: the checksum comparison's open could wait on a FIFO
 
 **Severity**: HIGH — with `--checksum`, a same-size destination is opened for its checksum (before any resume hashing). If a FIFO took its place after the diff's look, that open waited for a writer, and the transfer with it, indefinitely
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r31` (Codex openreview, 2026-11-22) reviewed `fd603571..93ecf7b2` — the six `combined-r30` fixes — with `guard_confirmed: true`: "I would keep the descriptor-relative inspection after exchange, the nonblocking checksum open, and the per-file refusal when safe replacement is unavailable." "A local `--checksum` copy without `--resume` can compare the destination again in the sink. That path still calls blocking `File::open`, so a FIFO appearing after its metadata check can stall the command. Share the opener across both comparisons." The remaining work is cr-ecm30-5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm29-4`)
+**Commit**: `0971c1f9`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r30` over `e3ea9517..fd603571` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r30.codex.md`. It completes cr-ecm28-1 (`8c696dc9`).
 
 ## Evidence
