@@ -126,7 +126,23 @@ fn open_resume_partial_with(
     // opened by it to be made, a link to a name outside the destination
     // was followed out and the file made there.
     let resolved = resolve_destination(dst, within)?;
-    let first = resolved.open(libc::O_RDWR | libc::O_CREAT);
+    let keep = |file: &File| cleanup.then(|| keep_handle(file, dst)).transpose();
+    // cr-ecm25-4: where nothing stands, the partial is made staged —
+    // private, at its length, its cleanup's handle had — and takes the name
+    // only while nothing does. Opened by the name to be made, an empty file
+    // stood there before its cleanup's handle was had, and stayed when that
+    // was refused.
+    let first = match resolved.open(libc::O_RDWR) {
+        Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {
+            let (file, kept) =
+                resolved.fresh_exclusive(dst, src_len.saturating_add(1), |file| {
+                    keep(file).map_err(eyre::Report::new)
+                })?;
+            while_a_partial_is_opened(dst);
+            return Ok((file, kept, 0));
+        }
+        opened => opened,
+    };
     // cr-ecm20-3: a partial there already that this run may read but not
     // write — left read-only by a copy of a read-only source that failed
     // after its mode was given, or by an older blit — is its owner's to
@@ -158,40 +174,53 @@ fn open_resume_partial_with(
     // what lands in it would be theirs to read. A run as root may set any
     // file's mode, so that was no test of it.
     let foreign = found.uid() != effective_user(dst);
-    if !wider
-        && !foreign
-        && make_partial_private(&file)
-            .with_context(|| format!("making the partial {} private", dst.display()))?
-    {
-        let file = if writable {
-            file
+    if !wider && !foreign {
+        // cr-ecm25-4: the cleanup's handle is had before the file is changed:
+        // had after it was made private, a refusal left a file others could
+        // read made 600.
+        let kept_early = if writable {
+            keep(&file).with_context(|| format!("holding the partial {}", dst.display()))?
         } else {
-            // The same file, now writable, or nothing is had.
-            let again = resolved
-                .open(libc::O_RDWR)
-                .with_context(|| format!("opening destination: {}", dst.display()))?;
-            let (was, now) = (file.metadata()?, again.metadata()?);
-            if (was.dev(), was.ino()) != (now.dev(), now.ino()) {
-                eyre::bail!(
-                    "the partial {} changed while it was made writable",
-                    dst.display()
-                );
-            }
-            again
+            None
         };
-        let len = file.metadata()?.len();
-        let kept = cleanup
-            .then(|| keep_handle(&file, dst))
-            .transpose()
-            .with_context(|| format!("holding the partial {}", dst.display()))?;
-        return Ok((file, kept, len));
+        if make_partial_private(&file)
+            .with_context(|| format!("making the partial {} private", dst.display()))?
+        {
+            let (file, kept) = if writable {
+                (file, kept_early)
+            } else {
+                // The same file, now writable, or nothing is had.
+                let again = resolved
+                    .open(libc::O_RDWR)
+                    .with_context(|| format!("opening destination: {}", dst.display()))?;
+                let (was, now) = (file.metadata()?, again.metadata()?);
+                if (was.dev(), was.ino()) != (now.dev(), now.ino()) {
+                    eyre::bail!(
+                        "the partial {} changed while it was made writable",
+                        dst.display()
+                    );
+                }
+                // Made writable to be had, and not had: its mode goes back.
+                let kept = match keep(&again) {
+                    Ok(kept) => kept,
+                    Err(error) => {
+                        use std::os::unix::fs::PermissionsExt as _;
+                        let _ = again.set_permissions(std::fs::Permissions::from_mode(
+                            found.mode() & 0o7777,
+                        ));
+                        return Err(error)
+                            .with_context(|| format!("holding the partial {}", dst.display()));
+                    }
+                };
+                (again, kept)
+            };
+            let len = file.metadata()?.len();
+            return Ok((file, kept, len));
+        }
     }
     drop(file);
     let (file, kept) = resolved.fresh(dst, src_len.saturating_add(1), |file| {
-        cleanup
-            .then(|| keep_handle(file, dst))
-            .transpose()
-            .map_err(eyre::Report::new)
+        keep(file).map_err(eyre::Report::new)
     })?;
     Ok((file, kept, 0))
 }
@@ -627,9 +656,10 @@ fn before_a_fresh_partial_is_made(_dst: &Path) {
     }
 }
 
-/// Test seam (cr-ecm19-4): runs once a resume's partial is open and before
-/// its mode is set — when a reader could open a file made with the usual
-/// mask. Keyed by path. Production never sets it.
+/// Test seam (cr-ecm19-4): runs once a resume's partial is open at its name —
+/// one there opened, before its mode is set; one made now, once it takes
+/// the name (cr-ecm25-4) — when a reader could open it. Keyed by path.
+/// Production never sets it.
 #[cfg(all(test, unix))]
 pub(crate) type PartialOpenedHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
 
@@ -1088,6 +1118,37 @@ mod tests {
             0,
             "nothing elsewhere"
         );
+        Ok(())
+    }
+
+    /// cr-ecm25-4: a resume refused its cleanup's handle leaves the
+    /// destination as it stood — a file it would reuse keeps its mode, and
+    /// where nothing stood nothing is made. Had after the file was made
+    /// private, a refusal left a 644 file 600; made by the name, it left an
+    /// empty file.
+    #[cfg(unix)]
+    #[test]
+    fn a_resume_refused_its_cleanup_handle_changes_nothing() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir()?;
+        let reused = tmp.path().join("reused");
+        std::fs::write(&reused, b"8 bytes!")?;
+        std::fs::set_permissions(&reused, std::fs::Permissions::from_mode(0o644))?;
+        let absent = tmp.path().join("absent");
+        for at in [&reused, &absent] {
+            KEEP_FAULTS.lock().unwrap().push(at.clone());
+            let had = open_resume_partial_held(at, Some(0o100644), 8, None);
+            KEEP_FAULTS.lock().unwrap().retain(|fault| fault != at);
+            assert!(had.is_err(), "{}", at.display());
+        }
+        assert_eq!(
+            std::fs::metadata(&reused)?.permissions().mode() & 0o777,
+            0o644,
+            "its mode as it was"
+        );
+        assert_eq!(std::fs::read(&reused)?, b"8 bytes!");
+        assert!(!absent.exists(), "nothing made where nothing stood");
+        assert_eq!(std::fs::read_dir(tmp.path())?.count(), 1);
         Ok(())
     }
 
