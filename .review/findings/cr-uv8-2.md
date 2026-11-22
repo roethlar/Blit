@@ -1,9 +1,9 @@
 # cr-uv8-2: a missing module root was let through to a second look-up
 
 **Severity**: HIGH — `ls`, `du` or `find` of a module whose folder is gone looks its path up again, and can read outside the module if a link has been put there by then
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r20` (Codex openreview, 2026-11-22) reviewed `17f4eb97..c15ebf5a` — the six `combined-r19` fixes — with `guard_confirmed: true`: "returning the original missing-root error [is a] sound choice", but "A missing `missing/child` below an existing module returned `Readable::At` with the full pathname. The verb resolves that name again, so a concurrent path change can take the read outside the checked module. I also observed a module whose parent became a regular file turn `ENOTDIR` into gRPC `PermissionDenied`. Carry observed operand errors to the verb and anchor successful reads to the verified directory." The remaining work is cr-uv9-1
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv8-2`)
+**Commit**: `31e8a0c6`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r19` over `ca377805..17f4eb97` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r19.codex.md`. It completes cr-uv7-2 (`cde61b9e`).
 
 ## Evidence

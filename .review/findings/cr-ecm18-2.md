@@ -1,9 +1,9 @@
 # cr-ecm18-2: a resume partial's working mode
 
 **Severity**: HIGH — a reader who opens a fresh partial before it is narrowed keeps its bytes; a read-only source's partial cannot be written by the retry
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r20` (Codex openreview, 2026-11-22) reviewed `17f4eb97..c15ebf5a` — the six `combined-r19` fixes — with `guard_confirmed: true`. "I ran `copy --resume` with a three-byte source and a writable `0644` destination in a `0555` directory. Replacement failed with `Permission denied` and exit 2, yet cleanup truncated the existing 29-byte file to `prev`. Mark an acquired file through its handle. An acquisition failure must preserve the existing contents." And: "The wire block writer left a `0644` destination at `0644` after patching it. A fresh local partial under umask `0200` was `0400`. The local symlink arm also bypasses the working-mode check, and a previously supported dangling destination link now fails with `ENOENT`. Select the reusable file before computing block hashes, establish its working permissions through the handle, and preserve contained-link behavior." The remaining work is cr-ecm19-1 and cr-ecm19-4. Seen in intake: replacing every existing partial others could read also replaced every ordinary destination, which `--resume` exists to patch in place
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm18-2`)
+**Commit**: `7413b6c6`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r19` over `ca377805..17f4eb97` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r19.codex.md`. It completes cr-ecm17-3 (`f2bbdb96`).
 
 ## Evidence

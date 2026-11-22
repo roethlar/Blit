@@ -1,9 +1,9 @@
 # cr-ecm18-3: the check before a failed write's second removal was two-way
 
 **Severity**: MEDIUM — a link put at the name between a failed write's two removals, to the partial itself, leaves the partial reachable there, reported removed
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r20` (Codex openreview, 2026-11-22) reviewed `17f4eb97..c15ebf5a` — the six `combined-r19` fixes — with `guard_confirmed: true`; no change required of it
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm18-3`)
+**Commit**: `30ce1994`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r19` over `ca377805..17f4eb97` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r19.codex.md`. It completes cr-ecm17-2 (`6c1cc68d`).
 
 ## Evidence

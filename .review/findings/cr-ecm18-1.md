@@ -1,9 +1,9 @@
 # cr-ecm18-1: a record's file was not owned from inside the step that made it, nor through commit's last await
 
 **Severity**: HIGH — a cancelled transfer leaves an empty file at the destination, which every later run keeping what exists skips as somebody's; a record cancelled in commit is settled by its name alone
-**Status**: Fixed on Unix, awaiting review; the Windows half (cr-ecm16-2's) stays open
+**Status**: Reviewed, found incomplete — `combined-r20` (Codex openreview, 2026-11-22) reviewed `17f4eb97..c15ebf5a` — the six `combined-r19` fixes — with `guard_confirmed: true`: "Arming cleanup inside file creation … [is a] sound choice", but "I replaced the destination during a stream. Commit reported one file written and zero failures, although the destination contained the replacement. The writer records identity for every stream but uses it for delivery only under `--ignore-existing`. A move can consequently authorize removal of an undelivered source. Use the recorded identity at commit, accounting for supported writes through links." and "I cancelled a one-byte record after open in a directory that allowed writing the file but prevented unlinking it. `Made::drop` supplied zero as the source length, so cleanup left one zero byte. The default comparison then skipped the file. Carry the header size into `Made` so an unremovable partial remains distinguishable from a complete copy." The remaining work is cr-ecm19-2 and cr-ecm19-3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm18-1`)
+**Commit**: `ba0191ee`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r19` over `ca377805..17f4eb97` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r19.codex.md`. It completes cr-ecm17-1 (`8b984864`).
 
 ## Evidence

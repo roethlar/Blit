@@ -1,9 +1,9 @@
 # cr-uv8-1: neither read of what a file holds was tied to the file it was read for
 
 **Severity**: HIGH — a move's removal can take the last name of a file holding bytes that were never sent, or somebody else's file put at the name
-**Status**: Fixed on Unix, awaiting review; the Windows half stays cr-uv6-3's
+**Status**: Reviewed, found incomplete — `combined-r20` (Codex openreview, 2026-11-22) reviewed `17f4eb97..c15ebf5a` — the six `combined-r19` fixes — with `guard_confirmed: true`: "checking a move digest against the observed version … [is a] sound choice", but "A mismatched regular-file descriptor advanced by all 65,536 bytes in my probe before Blit rejected it. The final check protects the receipt. An initial check also avoids reading an unrelated file for the length of a potentially large source." The remaining work is cr-uv9-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv8-1`)
+**Commit**: `81b6c829`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r19` over `ca377805..17f4eb97` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r19.codex.md`. It completes cr-uv7-1 (`16379d85`).
 
 ## Evidence
