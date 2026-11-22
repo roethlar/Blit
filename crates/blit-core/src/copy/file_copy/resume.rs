@@ -78,10 +78,28 @@ pub fn resume_copy_file(src: &Path, dst: &Path, block_size: usize) -> Result<Res
 /// this resume's: a caller arms its cleanup only once it has the file.
 #[cfg(unix)]
 pub fn open_resume_partial(dst: &Path) -> Result<(File, u64)> {
-    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     let open = |options: &mut OpenOptions| options.read(true).write(true).mode(0o600).open(dst);
-    let file = open(OpenOptions::new().create(true).truncate(false))
-        .with_context(|| format!("opening destination: {}", dst.display()))?;
+    // cr-ecm20-3: a partial there already that this run may read but not
+    // write — left read-only by a copy of a read-only source that failed
+    // after its mode was given, or by an older blit — is its owner's to
+    // make writable again: it is had to be read, made private and
+    // writable through that, and opened again to be written below.
+    let (file, writable) = match open(OpenOptions::new().create(true).truncate(false)) {
+        Ok(file) => (file, true),
+        Err(refused) if refused.kind() == std::io::ErrorKind::PermissionDenied => {
+            match File::open(dst) {
+                Ok(file) => (file, false),
+                Err(_) => {
+                    return Err(refused)
+                        .with_context(|| format!("opening destination: {}", dst.display()))
+                }
+            }
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("opening destination: {}", dst.display()))
+        }
+    };
     while_a_partial_is_opened(dst);
     if make_partial_private(&file, dst).with_context(|| {
         format!(
@@ -89,6 +107,21 @@ pub fn open_resume_partial(dst: &Path) -> Result<(File, u64)> {
             dst.display()
         )
     })? {
+        let file = if writable {
+            file
+        } else {
+            // The same file, now writable, or nothing is had.
+            let again = open(&mut OpenOptions::new())
+                .with_context(|| format!("opening destination: {}", dst.display()))?;
+            let (was, now) = (file.metadata()?, again.metadata()?);
+            if (was.dev(), was.ino()) != (now.dev(), now.ino()) {
+                eyre::bail!(
+                    "the partial {} changed while it was made writable",
+                    dst.display()
+                );
+            }
+            again
+        };
         let len = file.metadata()?.len();
         return Ok((file, len));
     }
@@ -437,6 +470,32 @@ mod tests {
             0o644,
             "its source's mode once done"
         );
+        Ok(())
+    }
+
+    /// cr-ecm20-3: a partial left read-only — by a copy of a read-only
+    /// source that failed once its mode was given, or by an older blit —
+    /// is its owner's: it is made writable again, through what holds it,
+    /// and resumed in place. Its retry failed with `Permission denied`.
+    #[cfg(unix)]
+    #[test]
+    fn a_partial_left_read_only_is_made_writable_and_resumed() -> Result<()> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let data: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&src, &data)?;
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644))?;
+        let dst = tmp.path().join("dst");
+        std::fs::write(&dst, &data[..4096])?;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o444))?;
+        let before = std::fs::metadata(&dst)?.ino();
+        let outcome = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024)?;
+        assert!(outcome.blocks_skipped > 0, "{outcome:?}");
+        let meta = std::fs::metadata(&dst)?;
+        assert_eq!(meta.ino(), before, "resumed in place");
+        assert_eq!(std::fs::read(&dst)?, data);
+        assert_eq!(meta.permissions().mode() & 0o777, 0o644);
         Ok(())
     }
 

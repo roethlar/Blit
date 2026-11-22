@@ -2673,7 +2673,23 @@ fn settle_failed_target_known(
             }
         }
         OnFailure::KeepUnfinished { created } => {
-            let note = match mark(handle.as_ref()) {
+            let marked = mark(handle.as_ref());
+            // cr-ecm20-3: a partial kept for the next run is private and
+            // writable by its owner again (600), through the handle it was
+            // written through: a failure after the copy gave it its
+            // source's mode — read-only, say — left it so, and the retry
+            // could not write to it.
+            #[cfg(unix)]
+            if let Some(file) = handle.as_ref() {
+                use std::os::unix::fs::PermissionsExt as _;
+                if let Err(error) = file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
+                    log::warn!(
+                        "could not make the resume partial {} writable again: {error}",
+                        dst.display()
+                    );
+                }
+            }
+            let note = match marked {
                 Ok(()) => created.then(|| {
                     format!(
                         "{INCOMPLETE_LEFT_IN_PLACE}, one byte longer than the source, for the \
@@ -7530,6 +7546,60 @@ mod cr_win_1_tests {
             .await
             .unwrap();
         assert_eq!(mode_of(&by_a_block) & 0o077, 0);
+    }
+
+    /// cr-ecm20-3: a local resume of a read-only source whose metadata
+    /// tail fails keeps a partial its retry can write: private and
+    /// writable by its owner (600), one byte longer than the source. It
+    /// kept the source's mode, read-only, and the retry was refused.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_local_resume_leaves_its_partial_writable() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("ro.bin"), b"sixby!").unwrap();
+        std::fs::set_permissions(src.join("ro.bin"), std::fs::Permissions::from_mode(0o444))
+            .unwrap();
+        let sink = FsTransferSink::new(
+            src.clone(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let fault = TailFaultGuard::install(&dst);
+        let outcome = sink
+            .write_payload(PreparedPayload::File(make_file_header("ro.bin", 6)))
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        let left = std::fs::metadata(dst.join("ro.bin")).unwrap();
+        assert_eq!(left.len(), 7, "one byte longer than the source");
+        assert_eq!(
+            left.permissions().mode() & 0o777,
+            0o600,
+            "writable for the retry"
+        );
+        drop(fault);
+        let outcome = sink
+            .write_payload(PreparedPayload::File(make_file_header("ro.bin", 6)))
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_failed_total, 0, "{outcome:?}");
+        assert_eq!(std::fs::read(dst.join("ro.bin")).unwrap(), b"sixby!");
+        assert_eq!(
+            std::fs::metadata(dst.join("ro.bin"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o444
+        );
     }
 
     /// cr-ecm13-1: under `--ignore-existing` the local route's resume copy
