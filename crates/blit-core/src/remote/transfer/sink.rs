@@ -2696,6 +2696,25 @@ impl HeldPartial {
     }
 }
 
+/// Test seam (cr-ecm24-5): a hold's making its partial private is refused,
+/// by its path — a file this run may not set the mode of, which no test can
+/// make without another user. Production never sets it.
+#[cfg(all(test, unix))]
+pub(crate) static PRIVATE_FAULTS: std::sync::Mutex<Vec<PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn private_fault(_dst: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if PRIVATE_FAULTS
+        .lock()
+        .is_ok_and(|faults| faults.iter().any(|at| at == _dst))
+    {
+        return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+    }
+    Ok(())
+}
+
 /// Test seam (cr-ecm22-3): a hold's look at which file it holds fails, by
 /// its path — an `fstat` that fails, which no test can make for real.
 /// Production never sets it.
@@ -2911,15 +2930,14 @@ fn hold_partial_unfinished(
         #[cfg(unix)]
         identity_fault(dst)?;
         let meta = file.metadata()?;
+        // cr-ecm24-5: a partial that cannot be made private is not written:
+        // the hold fails, and the file with it. The refusal was logged, and
+        // the file patched with whatever mode it had.
         #[cfg(unix)]
         if meta.is_file() {
             use std::os::unix::fs::PermissionsExt as _;
-            if let Err(error) = file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
-                log::warn!(
-                    "the resume partial {} could not be made private: {error}",
-                    dst.display()
-                );
-            }
+            private_fault(dst)?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
         if meta.is_file() && meta.len() <= total_size {
             mark_unfinished(&file, total_size)?;
@@ -8003,6 +8021,46 @@ mod cr_win_1_tests {
             .unwrap();
         assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
         assert_eq!(std::fs::read(&at).unwrap(), b"somebody's", "not marked");
+    }
+
+    /// cr-ecm24-5: a hold with no word of the hashes that cannot make its
+    /// partial private fails the file: nothing is written to it, its mode is
+    /// as it was. The refusal was logged, and the file patched and reported
+    /// written with the mode it had.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hold_that_cannot_make_its_partial_private_fails_the_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let at = dst.join("r.bin");
+        std::fs::write(&at, b"0123456789").unwrap();
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o644)).unwrap();
+        PRIVATE_FAULTS.lock().unwrap().push(at.clone());
+        let held = sink.hold_resume_partial("r.bin", 10).await;
+        PRIVATE_FAULTS.lock().unwrap().retain(|fault| fault != &at);
+        held.unwrap();
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "r.bin".to_string(),
+                total_size: 10,
+                mtime_seconds: 0,
+                permissions: 0o600,
+                windows_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert!(outcome.file_failed("r.bin"), "{outcome:?}");
+        assert_eq!(outcome.files_written, 0, "{outcome:?}");
     }
 
     /// cr-ecm24-1: a wire hold with no word of the hashes, through a link to a
