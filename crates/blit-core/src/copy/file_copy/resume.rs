@@ -645,6 +645,22 @@ pub fn resume_copy_into(
     dst: &Path,
     block_size: usize,
 ) -> Result<ResumeCopyOutcome> {
+    resume_copy_through(src_file, src_len, &mut dst_file, dst_len, dst, block_size)
+}
+
+/// cr-ecm25-1: [`resume_copy_into`] through a partial the caller keeps — to
+/// give it its time and mode through the same handle afterwards, with no
+/// other taken once it is had. Duplicated after a fresh partial had replaced
+/// the destination, a handle the system refused left the destination's bytes
+/// gone.
+pub fn resume_copy_through(
+    src_file: &mut File,
+    src_len: u64,
+    dst_file: &mut File,
+    dst_len: u64,
+    dst: &Path,
+    block_size: usize,
+) -> Result<ResumeCopyOutcome> {
     src_file.seek(SeekFrom::Start(0))?;
 
     // cr-win-1: while blocks are patched in place the destination must

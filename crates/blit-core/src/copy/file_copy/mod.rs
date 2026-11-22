@@ -8,7 +8,7 @@ pub use mmap::mmap_copy_file;
 pub use resume::{fresh_partial, fresh_partial_ready, make_partial_private};
 pub use resume::{
     open_resume_partial, open_resume_partial_held, resume_copy_file, resume_copy_from,
-    resume_copy_into, ResumeCopyOutcome,
+    resume_copy_into, resume_copy_through, ResumeCopyOutcome,
 };
 
 use crate::buffer::BufferSizer;

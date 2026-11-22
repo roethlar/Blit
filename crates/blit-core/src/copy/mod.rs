@@ -15,7 +15,7 @@ pub use file_copy::resume::{DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE};
 pub use file_copy::{
     copy_file, copy_opened, copy_opened_into, mmap_copy_file, open_resume_partial,
     open_resume_partial_held, resume_copy_file, resume_copy_from, resume_copy_into,
-    ResumeCopyOutcome,
+    resume_copy_through, ResumeCopyOutcome,
 };
 #[cfg(unix)]
 pub use file_copy::{fresh_partial, fresh_partial_ready, make_partial_private};

@@ -3485,7 +3485,7 @@ fn copy_and_stamp_opened(
         // could write but not take was cut to one byte longer than the
         // source. From here a failure marks the partial through a handle to
         // it, not whatever stands at the name.
-        let (held, cleanup, held_len) = crate::copy::open_resume_partial_held(
+        let (mut held, cleanup, held_len) = crate::copy::open_resume_partial_held(
             dst,
             Some(crate::wire_metadata::permissions_mode(src_meta)),
             header.size,
@@ -3495,14 +3495,15 @@ fn copy_and_stamp_opened(
         partial.arm_held(cleanup, OnFailure::KeepUnfinished { created });
         // cr-ecm20-4: and the handle it is written through is kept for the
         // tail: its time is given through it, and it is delivered only
-        // while it is what the name holds.
-        resumed = Some(
-            held.try_clone()
-                .with_context(|| format!("holding the resume partial {}", dst.display()))?,
-        );
+        // while it is what the name holds. cr-ecm25-1: that same handle,
+        // carried through the copy — none is taken once the partial is had:
+        // one duplicated here, after a fresh partial had replaced the
+        // destination, could be refused with the destination's bytes gone.
         run_after_claim_hook(dst);
-        let outcome = crate::copy::resume_copy_into(src_file, header.size, held, held_len, dst, 0)
-            .with_context(|| format!("resume copy {}", header.relative_path))?;
+        let outcome =
+            crate::copy::resume_copy_through(src_file, header.size, &mut held, held_len, dst, 0)
+                .with_context(|| format!("resume copy {}", header.relative_path))?;
+        resumed = Some(held);
         did_copy = outcome.bytes_transferred > 0;
         run_after_claim_hook(dst);
     } else if crate::copy::file_needs_copy_with_mode_opened(
@@ -8999,6 +9000,73 @@ mod cr_win_1_tests {
             FileTime::from_last_modification_time(&std::fs::metadata(dst.join("r.bin")).unwrap()),
             FileTime::from_unix_time(1_500_000_000, 0),
             "not given the copy's time"
+        );
+    }
+
+    /// cr-ecm25-1: a local resume takes no handle to its partial once the
+    /// partial is had — two are open while it is copied into: the one it is
+    /// written through, carried to its metadata, and the one its cleanup
+    /// took while the partial was staged. A third, duplicated once a fresh
+    /// partial had replaced the destination, could be refused with the
+    /// destination's bytes gone.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_local_resume_takes_no_handle_once_its_partial_is_had() {
+        use std::os::unix::fs::PermissionsExt as _;
+        struct Hooked(PathBuf);
+        impl Drop for Hooked {
+            fn drop(&mut self) {
+                if let Ok(mut hooks) = AFTER_CLAIM_HOOKS.lock() {
+                    hooks.retain(|(prefix, _)| prefix != &self.0);
+                }
+            }
+        }
+        fn handles_to(path: &Path) -> usize {
+            std::fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| std::fs::read_link(entry.path()).is_ok_and(|to| to == path))
+                .count()
+        }
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("r.bin"), b"0123456789").unwrap();
+        std::fs::set_permissions(src.join("r.bin"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        std::fs::write(dst.join("r.bin"), b"01234").unwrap();
+        std::fs::set_permissions(dst.join("r.bin"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let at = std::fs::canonicalize(dst.join("r.bin")).unwrap();
+        let counted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _hooked = {
+            let (at, counted) = (at.clone(), Arc::clone(&counted));
+            AFTER_CLAIM_HOOKS.lock().unwrap().push((
+                dst.join("r.bin"),
+                Arc::new(move |_: &Path| counted.lock().unwrap().push(handles_to(&at))),
+            ));
+            Hooked(dst.join("r.bin"))
+        };
+        let sink = FsTransferSink::new(
+            src.clone(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let outcome = sink
+            .write_payload(PreparedPayload::File(make_file_header("r.bin", 10)))
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_failed_total, 0, "{outcome:?}");
+        assert_eq!(std::fs::read(dst.join("r.bin")).unwrap(), b"0123456789");
+        assert_eq!(
+            counted.lock().unwrap().first(),
+            Some(&2),
+            "the partial written, and its cleanup's"
         );
     }
 
