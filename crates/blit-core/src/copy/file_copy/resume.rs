@@ -222,29 +222,35 @@ fn open_resume_partial_with(
             let (file, kept) = if writable {
                 (file, kept_early)
             } else {
+                // cr-ecm26-4: made writable to be had, and until it is had,
+                // any failure puts its mode back through the handle that
+                // changed it. A writable reopen refused (`EMFILE`) left a
+                // 0444 file 0600.
+                let undo = |error: eyre::Report| {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    let _ = file
+                        .set_permissions(std::fs::Permissions::from_mode(found.mode() & 0o7777));
+                    error
+                };
                 // The same file, now writable, or nothing is had.
-                let again = resolved
-                    .open(libc::O_RDWR)
-                    .with_context(|| format!("opening destination: {}", dst.display()))?;
-                let (was, now) = (file.metadata()?, again.metadata()?);
-                if (was.dev(), was.ino()) != (now.dev(), now.ino()) {
-                    eyre::bail!(
+                let reopened = reopen_fault(dst)
+                    .and_then(|()| resolved.open(libc::O_RDWR))
+                    .with_context(|| format!("opening destination: {}", dst.display()));
+                let again = reopened.map_err(undo)?;
+                let same = file.metadata().and_then(|was| {
+                    again
+                        .metadata()
+                        .map(|now| (was.dev(), was.ino()) == (now.dev(), now.ino()))
+                });
+                if !matches!(same, Ok(true)) {
+                    return Err(undo(eyre::eyre!(
                         "the partial {} changed while it was made writable",
                         dst.display()
-                    );
+                    )));
                 }
-                // Made writable to be had, and not had: its mode goes back.
-                let kept = match keep(&again) {
-                    Ok(kept) => kept,
-                    Err(error) => {
-                        use std::os::unix::fs::PermissionsExt as _;
-                        let _ = again.set_permissions(std::fs::Permissions::from_mode(
-                            found.mode() & 0o7777,
-                        ));
-                        return Err(error)
-                            .with_context(|| format!("holding the partial {}", dst.display()));
-                    }
-                };
+                let kept = keep(&again)
+                    .with_context(|| format!("holding the partial {}", dst.display()))
+                    .map_err(undo)?;
                 (again, kept)
             };
             let len = file.metadata()?.len();
@@ -277,6 +283,26 @@ fn keep_handle(file: &File, _dst: &Path) -> std::io::Result<File> {
     }
     file.try_clone()
 }
+
+/// Test seam (cr-ecm26-4): a read-only partial's writable reopen refused,
+/// by path — a process out of descriptors (`EMFILE`). Production never
+/// sets it.
+#[cfg(unix)]
+fn reopen_fault(_dst: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if REOPEN_FAULTS
+        .lock()
+        .is_ok_and(|faults| faults.iter().any(|at| at == _dst))
+    {
+        return Err(std::io::Error::from_raw_os_error(libc::EMFILE));
+    }
+    Ok(())
+}
+
+/// The paths a test has [`reopen_fault`] refuse.
+#[cfg(all(test, unix))]
+pub(crate) static REOPEN_FAULTS: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// The paths a test has [`keep_handle`] refused for.
 #[cfg(all(test, unix))]
@@ -1172,6 +1198,34 @@ mod tests {
             0,
             "nothing elsewhere"
         );
+        Ok(())
+    }
+
+    /// cr-ecm26-4: a read-only partial made writable to be had gets its mode
+    /// back when its writable reopen is refused: the file stands as it did.
+    /// Left made writable, a 0444 file became 0600.
+    #[cfg(unix)]
+    #[test]
+    fn a_partial_made_writable_and_not_had_gets_its_mode_back() -> Result<()> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let tmp = tempdir()?;
+        let dst = tmp.path().join("dst");
+        std::fs::write(&dst, b"8 bytes!")?;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o444))?;
+        if std::fs::metadata(&dst)?.uid() == 0 {
+            // Root writes any file: nothing to show.
+            return Ok(());
+        }
+        REOPEN_FAULTS.lock().unwrap().push(dst.clone());
+        let had = open_resume_partial_held(&dst, Some(0o100444), 8, None);
+        REOPEN_FAULTS.lock().unwrap().retain(|at| at != &dst);
+        assert!(had.is_err());
+        assert_eq!(
+            std::fs::metadata(&dst)?.permissions().mode() & 0o777,
+            0o444,
+            "its mode as it was"
+        );
+        assert_eq!(std::fs::read(&dst)?, b"8 bytes!");
         Ok(())
     }
 
