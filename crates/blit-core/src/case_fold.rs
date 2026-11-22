@@ -1169,7 +1169,12 @@ const MOST_EXAMPLES: usize = 2;
 /// - a `*` crosses separators (`*/Cache/*` matches `x/Cache/cache/saved`,
 ///   and so does `*/cache/*`);
 /// - a pattern with a separator in it (a trailing one aside) starts where
-///   the path starts — it is anchored at the root;
+///   the path starts — it is anchored at the root — for no entry's own
+///   name holds one. cr-ecm19-5: a separator it MUST match, that is — a
+///   `/` itself; a class that may hold one (`[x/]`) may hold another
+///   character instead, and the pattern then matches an entry's own name
+///   at any depth (`a[x/]*1` matches `A/ax1` by its name, as `A[X/]*1`
+///   matches it by its whole path);
 /// - a pattern of one component matches an entry's own name at any depth,
 ///   AND the whole path from the root (`IMG_*.jpg` matches `d/IMG_x.jpg`
 ///   and `IMG_a/b.jpg`) — so where it starts is not fixed.
@@ -1187,11 +1192,11 @@ fn cannot_share_a_name(typed: &str, spelling: &str, windows: bool) -> bool {
     if ours.len() != theirs.len() {
         return false;
     }
-    let separator = |c: char| c == '/' || (windows && c == '\\');
-    let anchored = typed
-        .strip_suffix(separator)
-        .unwrap_or(typed)
-        .contains(separator);
+    let body = match ours.last() {
+        Some(Place::Char('/')) => &ours[..ours.len() - 1],
+        _ => &ours[..],
+    };
+    let anchored = body.iter().any(|place| matches!(place, Place::Char('/')));
     let apart_here = |pairs: &mut dyn Iterator<Item = (&Place, &Place)>| {
         pairs
             .take_while(|(x, y)| !matches!(x, Place::Varies) && !matches!(y, Place::Varies))
@@ -2447,6 +2452,21 @@ mod tests {
         // cr-ecm18-4: and one holding `/` holds it in both: `1[a/]2` and
         // `1[A/]2` both match the path `1/2`.
         assert_eq!(others("1[a/]2"), ["1A2"]);
+        // cr-ecm19-5: and a `/` a class may hold anchors nothing — the
+        // class may hold another character, and the pattern match an
+        // entry's own name: `a[x/]*1` matches `A/ax1` by its name, and
+        // `A[X/]*1` matches it by its whole path. The name checked is
+        // shown, not that spelling.
+        assert_eq!(others("a[x/]*1"), ["AXx1"]);
+        for (name, as_typed, with_the_option) in [("AXx1", false, true), ("A/ax1", true, true)] {
+            let taken = |ignore_case: bool| {
+                let filter = crate::fs_enum::FileFilter::probing("a[x/]*1", false, ignore_case)
+                    .expect("a pattern");
+                Asked::named(Role::Include, &filter, name).0
+            };
+            assert_eq!(taken(false), as_typed, "{name} as typed");
+            assert_eq!(taken(true), with_the_option, "{name} with --ignore-case");
+        }
         assert_eq!(others("[a\t]x"), ["[A\t]X"]);
 
         // And what is printed is true of the run: the name shown is taken
