@@ -1158,46 +1158,52 @@ const MOST_SPELLINGS: usize = 1024;
 /// The most names it gives back as examples.
 const MOST_EXAMPLES: usize = 2;
 
-/// cr-ecm16-4: whether `typed` and `spelling` — one pattern, and that
-/// pattern with the case of its letters changed — can be shown to name no
-/// path in common. `false` where it cannot be shown: the caller then
-/// prints a name it checked, which is true whatever the answer.
+/// cr-ecm16-4, cr-ecm17-4: whether `typed` and `spelling` — one pattern,
+/// and that pattern with the case of its letters changed — can be shown
+/// to MATCH no path in common. `false` where it cannot be shown: the
+/// caller then prints a name it checked, which is true whatever the
+/// answer.
 ///
-/// What a run's filter does, measured: a pattern with no separator names
-/// an entry by its own name, at any depth; one with a separator is
-/// anchored at the root and names whatever lies below what it matches. So
-/// a pattern of ONE component is compared as a name, and a path pattern
-/// component by component from the root, up to its first `**` — beyond
-/// that, one path can be named by the two through ancestors of different
-/// depths (`a/Cache/cache` by `**/Cache` and by `**/cache`).
+/// What a run's filter matches, measured through the filter itself:
+/// - every pattern ends where the path ends;
+/// - a `*` crosses separators (`*/Cache/*` matches `x/Cache/cache/saved`,
+///   and so does `*/cache/*`);
+/// - a pattern with a separator in it (a trailing one aside) starts where
+///   the path starts — it is anchored at the root;
+/// - a pattern of one component matches an entry's own name at any depth,
+///   AND the whole path from the root (`IMG_*.jpg` matches `d/IMG_x.jpg`
+///   and `IMG_a/b.jpg`) — so where it starts is not fixed.
 ///
-/// Two components cannot name one name when at some place a fixed way
-/// from either end — before the first `*` or alternation, or after the
-/// last — one holds a character the other's does not: a letter of the
-/// other case, or a class that does not hold it.
+/// So the two can be told apart a fixed way from the END — after the last
+/// place whose width varies — and, for a pattern anchored at the root, a
+/// fixed way from the START: at such a place one holds a character the
+/// other's does not (a letter of the other case, or a class that does not
+/// hold it). A separator is a place like any other. (What an EXCLUDE takes
+/// with a folder — everything below it — is the folder's doing, not what
+/// the pattern matches, and is no part of the claim, as it is not for a
+/// pattern of plain text.)
 fn cannot_share_a_name(typed: &str, spelling: &str, windows: bool) -> bool {
-    let components = |pattern: &'_ str| -> Vec<String> {
-        pattern
-            .split(|c| c == '/' || (windows && c == '\\'))
-            .map(str::to_string)
-            .collect()
-    };
-    let (ours, theirs) = (components(typed), components(spelling));
+    let (ours, theirs) = (places(typed, windows), places(spelling, windows));
     if ours.len() != theirs.len() {
         return false;
     }
-    if ours.len() == 1 {
-        return components_apart(&ours[0], &theirs[0], windows);
-    }
-    ours.iter()
-        .zip(&theirs)
-        .take_while(|(a, b)| a.as_str() != "**" && b.as_str() != "**")
-        .any(|(a, b)| components_apart(a, b, windows))
+    let separator = |c: char| c == '/' || (windows && c == '\\');
+    let anchored = typed
+        .strip_suffix(separator)
+        .unwrap_or(typed)
+        .contains(separator);
+    let apart_here = |pairs: &mut dyn Iterator<Item = (&Place, &Place)>| {
+        pairs
+            .take_while(|(x, y)| !matches!(x, Place::Varies) && !matches!(y, Place::Varies))
+            .any(|(x, y)| places_apart(x, y))
+    };
+    apart_here(&mut ours.iter().rev().zip(theirs.iter().rev()))
+        || (anchored && apart_here(&mut ours.iter().zip(&theirs)))
 }
 
-/// One place of a pattern's component, as [`cannot_share_a_name`] reads
-/// it: a character, a class, any one character, or a place whose distance
-/// from the component's ends is not fixed.
+/// One place of a pattern, as [`cannot_share_a_name`] reads it: a
+/// character (a separator among them), a class, any one character, or a
+/// place whose width varies.
 #[derive(Debug)]
 enum Place<'a> {
     Char(char),
@@ -1206,9 +1212,9 @@ enum Place<'a> {
     Varies,
 }
 
-fn places(component: &str, windows: bool) -> Vec<Place<'_>> {
+fn places(pattern: &str, windows: bool) -> Vec<Place<'_>> {
     let mut out = Vec::new();
-    let mut rest = component;
+    let mut rest = pattern;
     while let Some(c) = rest.chars().next() {
         let (place, len) = match c {
             '*' | '{' | '}' | ',' => (Place::Varies, 1),
@@ -1221,6 +1227,8 @@ fn places(component: &str, windows: bool) -> Vec<Place<'_>> {
                 Some(next) => (Place::Char(next), 1 + next.len_utf8()),
                 None => (Place::Char('\\'), 1),
             },
+            // Either separator is the one place a path has there.
+            '\\' => (Place::Char('/'), 1),
             c => (Place::Char(c), c.len_utf8()),
         };
         out.push(place);
@@ -1229,25 +1237,17 @@ fn places(component: &str, windows: bool) -> Vec<Place<'_>> {
     out
 }
 
-/// Two components that cannot name one name ([`cannot_share_a_name`]).
-fn components_apart(a: &str, b: &str, windows: bool) -> bool {
-    let (a, b) = (places(a, windows), places(b, windows));
-    if a.len() != b.len() {
-        return false;
-    }
-    let apart_here = |pairs: &mut dyn Iterator<Item = (&Place, &Place)>| {
-        pairs
-            .take_while(|(x, y)| !matches!(x, Place::Varies) && !matches!(y, Place::Varies))
-            .any(|(x, y)| places_apart(x, y))
-    };
-    apart_here(&mut a.iter().zip(&b)) || apart_here(&mut a.iter().rev().zip(b.iter().rev()))
+/// The characters two classes are tried on: every one a name can hold
+/// below 128 — control characters too (cr-ecm17-4: a class holding a tab
+/// shared it with its other spelling, and the tab was never tried) — and
+/// one beyond (a class holding a letter beyond ASCII is refused, but a
+/// negated class holds them all).
+fn class_trials() -> impl Iterator<Item = char> {
+    (1u8..=0x7f)
+        .map(char::from)
+        .filter(|c| *c != '/')
+        .chain(std::iter::once('é'))
 }
-
-/// The characters two classes are tried on: every one a name can hold in
-/// the printable ASCII range, and one beyond it (a class holding a letter
-/// beyond ASCII is refused, but a negated class holds them all).
-const CLASS_TRIALS: &str =
-    " !\"#$%&'()*+,-.0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]^_`abcdefghijklmnopqrstuvwxyz{|}~é";
 
 fn places_apart(a: &Place, b: &Place) -> bool {
     let holds = |class: &str| {
@@ -1261,7 +1261,7 @@ fn places_apart(a: &Place, b: &Place) -> bool {
             holds(class).is_some_and(|class| !class.is_match(x.to_string()))
         }
         (Place::Class(one), Place::Class(other)) => match (holds(one), holds(other)) {
-            (Some(one), Some(other)) => !CLASS_TRIALS.chars().any(|c| {
+            (Some(one), Some(other)) => !class_trials().any(|c| {
                 let c = c.to_string();
                 one.is_match(&c) && other.is_match(&c)
             }),
@@ -2325,12 +2325,15 @@ mod tests {
             note(&["Cache/**"]),
             line("\"Cache/**\" matches Cache/**", "", "cache/**, CACHE/**")
         );
+        // cr-ecm17-4: `img_*.jpg` and `IMG_*.jpg` both match
+        // `IMG_a/img_b.jpg` (a pattern of one component also matches the
+        // whole path, its `*` crossing the separator): the name checked is
+        // printed for the one, and nothing said of what is matched "only".
         assert_eq!(
-            note(&["IMG_*.jpg"]),
-            line(
-                "\"IMG_*.jpg\" matches IMG_*.jpg",
-                "",
-                "img_*.jpg, IMG_*.JPG"
+            note(&["IMG_*.jpg"]).as_deref(),
+            Some(
+                "\"IMG_*.jpg\" matches exactly as typed; capital letters matter \
+                 (--ignore-case would also match img_x.jpg, IMG_*.JPG)."
             )
         );
         assert_eq!(
@@ -2416,7 +2419,7 @@ mod tests {
         assert_eq!(others("*a*b*"), ["AxB"]);
         // Letters that begin the name, end it, or do both: no name is had
         // both ways, and the spelling stands.
-        assert_eq!(others("IMG_*.jpg"), ["img_*.jpg", "IMG_*.JPG"]);
+        assert_eq!(others("IMG_*.jpg"), ["img_x.jpg", "IMG_*.JPG"]);
         assert_eq!(others("a*b"), ["A*B"]);
         assert_eq!(others("x*{a,b}*y"), ["X*{A,B}*Y"]);
         assert_eq!(others("dir/*a*"), ["DIR/*A"]);
@@ -2427,11 +2430,23 @@ mod tests {
         // the name checked is printed; `[A-C_]X` is apart by its `X`.
         assert_eq!(others("[abc]"), ["[ABC]"]);
         assert_eq!(others("[A-C_]x"), ["ax", "[A-C_]X"]);
-        // A path pattern is anchored at the root: its first component
-        // keeps two spellings apart. Past a `**` nothing does —
-        // `a/Cache/cache` is named by `**/Cache` and by `**/cache`.
+        // A path pattern is anchored at the root: its start keeps two
+        // spellings apart, and so does its end. cr-ecm17-4: a `*` crosses
+        // separators, so between two `*` nothing does — `*/cache/*` and
+        // `*/Cache/*` both match `x/Cache/cache/saved`, and the name
+        // checked is shown.
         assert_eq!(others("Cache/*"), ["cache/*", "CACHE/*"]);
-        assert_eq!(others("**/*/Cache"), ["x/cache", "x/CACHE"]);
+        assert_eq!(others("**/*/Cache"), ["*/cache", "*/CACHE"]);
+        assert_eq!(others("*/Cache/*"), ["x/cache/x", "x/CACHE/x"]);
+        // A pattern of one component also matches the whole path from the
+        // root, so only its end tells two spellings apart: `img_*.jpg`
+        // and `IMG_*.jpg` both match `IMG_a/img_b.jpg`.
+        assert_eq!(others("IMG_*.jpg"), ["img_x.jpg", "IMG_*.JPG"]);
+        // A class holding a tab holds it in both spellings: alone, the
+        // two classes share it, and the name checked is shown; beside a
+        // letter, the letter tells them apart.
+        assert_eq!(others("[a\t]"), ["A"]);
+        assert_eq!(others("[a\t]x"), ["[A\t]X"]);
 
         // And what is printed is true of the run: the name shown is taken
         // with the option and not without, and the name the spelling
@@ -2493,10 +2508,15 @@ mod tests {
         for (pattern, windows, typed, spellings) in [
             ("*/Cache", false, "*/Cache", &["*/cache", "*/CACHE"][..]),
             ("Cache/*", false, "Cache/*", &["cache/*", "CACHE/*"]),
-            ("*/Cache/*", false, "*/Cache/*", &["*/cache/*", "*/CACHE/*"]),
-            // cr-ecm16-4: past a `**` two spellings share paths
-            // (`x/Cache/cache`): the names checked are shown.
-            ("**/*/Cache", false, "*/Cache", &["x/cache", "x/CACHE"]),
+            // cr-ecm17-4: a `*` crosses separators, and both spellings
+            // match `x/Cache/cache/x`: the names checked are shown.
+            ("*/Cache/*", false, "*/Cache/*", &["x/cache/x", "x/CACHE/x"]),
+            // (cr-ecm16-4 showed names here, on the belief that two
+            // spellings share `x/Cache/cache` through its folder. What a
+            // pattern itself matches ends where the path ends — measured,
+            // cr-ecm17-4 — so these two match nothing in common, and the
+            // spellings stand.)
+            ("**/*/Cache", false, "*/Cache", &["*/cache", "*/CACHE"]),
             // cr-ecm15-2: `cache*/**` reads as `cacheCache/x`, which the
             // pattern has as typed — so the names that were checked are
             // what is shown beside it.

@@ -163,7 +163,11 @@ part, and a job you can list, read, re-run and retry.
   which reads as `1aA2` — a file that is copied either way; for
   `--include '{a?,?b}'` it shows `Ax`, not `{A?,?B}`, which reads as
   `Ab`. A spelling is printed only where it is shown to share no name
-  with the pattern as typed. A pattern that reads the same both ways, such as
+  with the pattern as typed — which follows what the filter matches: a
+  `*` crosses separators, and a pattern with none also matches the whole
+  path from the root (`--include 'IMG_*.jpg'` shows `img_x.jpg` beside
+  `IMG_*.JPG`; both `IMG_*.jpg` and `img_*.jpg` match
+  `IMG_a/img_b.jpg`). A pattern that reads the same both ways, such as
   `{a,A}`, is never the one shown; the count beside it is of every other
   pattern with a letter in it, whatever their order. Nothing concrete is
   said of `--ignore-case` unless the command could run with it: where
