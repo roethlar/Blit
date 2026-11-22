@@ -228,6 +228,16 @@ pub fn fresh_partial_ready<T>(
     use std::os::unix::io::{AsRawFd as _, FromRawFd as _, OwnedFd};
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    // cr-ecm24-6: a name typed as a directory — with a `/` or `/.` after it,
+    // as typed or as a link of the chain names it — is no place for a file:
+    // its last name taken, `absent/` was made a regular file `absent`.
+    let not_a_file = || {
+        Err(std::io::Error::from_raw_os_error(libc::ENOTDIR))
+            .with_context(|| format!("putting a fresh partial in place of {}", dst.display()))
+    };
+    if typed_as_directory(dst) {
+        return not_a_file();
+    }
     let mut target = dst.to_path_buf();
     let mut links = 0;
     while std::fs::symlink_metadata(&target).is_ok_and(|there| there.file_type().is_symlink()) {
@@ -238,6 +248,9 @@ pub fn fresh_partial_ready<T>(
         }
         let named = std::fs::read_link(&target)
             .with_context(|| format!("reading the link {}", target.display()))?;
+        if typed_as_directory(&named) {
+            return not_a_file();
+        }
         target = match target.parent() {
             Some(parent) if named.is_relative() => parent.join(named),
             _ => named,
@@ -335,6 +348,14 @@ pub fn fresh_partial_ready<T>(
             .with_context(|| format!("putting a fresh partial in place of {}", dst.display()));
     }
     Ok((file, readied))
+}
+
+/// Whether `path` is written as a directory's: a `/` or `/.` after its last
+/// name, which the system then resolves as a directory.
+#[cfg(unix)]
+fn typed_as_directory(path: &Path) -> bool {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    bytes.ends_with(b"/") || bytes.ends_with(b"/.")
 }
 
 #[cfg(unix)]
@@ -802,6 +823,30 @@ mod tests {
             0,
             "nothing elsewhere"
         );
+        Ok(())
+    }
+
+    /// cr-ecm24-6: a name typed as a directory — `absent/`, or a link whose
+    /// target ends in `/` or `/.` — takes no fresh partial, and nothing is
+    /// made. Its last name taken, `absent/` was made a regular file.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_typed_as_a_directory_takes_no_fresh_partial() -> Result<()> {
+        let tmp = tempdir()?;
+        let absent = tmp.path().join("absent/");
+        assert!(fresh_partial(&absent, 11, None).is_err());
+        for (link, named) in [("slashed", "gone/"), ("dotted", "gone/.")] {
+            std::os::unix::fs::symlink(named, tmp.path().join(link))?;
+            assert!(
+                fresh_partial(&tmp.path().join(link), 11, None).is_err(),
+                "{named}"
+            );
+        }
+        let mut left: Vec<_> = std::fs::read_dir(tmp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<_>>()?;
+        left.sort();
+        assert_eq!(left, ["dotted", "slashed"], "nothing made");
         Ok(())
     }
 
