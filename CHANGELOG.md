@@ -160,7 +160,10 @@ part, and a job you can list, read, re-run and retry.
   match xA).`, beside `--exclude '[Aa]'`, which leaves `A` out either
   way). The same where the spelling reads as a name the pattern has as
   typed: for `--include '1*a*2'` the line shows `1xAx2`, not `1*A*2`,
-  which reads as `1aA2` — a file that is copied either way. A pattern that reads the same both ways, such as
+  which reads as `1aA2` — a file that is copied either way; for
+  `--include '{a?,?b}'` it shows `Ax`, not `{A?,?B}`, which reads as
+  `Ab`. A spelling is printed only where it is shown to share no name
+  with the pattern as typed. A pattern that reads the same both ways, such as
   `{a,A}`, is never the one shown; the count beside it is of every other
   pattern with a letter in it, whatever their order. Nothing concrete is
   said of `--ignore-case` unless the command could run with it: where

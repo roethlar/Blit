@@ -769,7 +769,10 @@ fn the_line_keeps_a_directory_level_the_pattern_requires() {
 /// and say `--ignore-case` would also match `cache`; the mirror run that
 /// way deleted the destination's own FILE `cache`. Now it shows `cache/**`
 /// — and with the option the file is deleted as before (the pattern never
-/// named it) while what is under a folder `cache` is kept.
+/// named it) while what is under a folder `cache` is kept. (cr-ecm16-4:
+/// for `**/Cache/**` the line shows `cache/x`, a name under such a folder
+/// that the option changes: past the `**` the two spellings share paths,
+/// such as `Cache/cache/x`, and the spelling is not printed.)
 #[test]
 fn the_line_keeps_what_is_under_a_folder_apart_from_the_folder() {
     let tmp = tempdir().unwrap();
@@ -784,8 +787,8 @@ fn the_line_keeps_what_is_under_a_folder_apart_from_the_folder() {
         &["mirror", "--exclude", "**/Cache/**", &from, &to],
         Some("n\n"),
     );
-    let line = "\"**/Cache/**\" matches Cache/** only; capital letters matter \
-                (--ignore-case would also match cache/**, CACHE/**).";
+    let line = "\"**/Cache/**\" matches exactly as typed; capital letters matter \
+                (--ignore-case would also match cache/x, CACHE/x).";
     assert!(
         asked.stdout.contains(&format!("{line}\n{QUESTION}")),
         "{}",
