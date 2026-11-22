@@ -3058,16 +3058,23 @@ fn write_tar_shard_payload(
                     .write_all(&f.contents)
                     .with_context(|| format!("write {}", f.dest_path.display()));
                 let write = write_started.elapsed();
-                let close_started = std::time::Instant::now();
-                let held = keep_for_the_tail(file);
-                let close = close_started.elapsed();
+                // cr-ecm17-5: the close is timed where it happens — before
+                // the tail where the handle is not kept for it, after the
+                // tail where it is (Unix). Timing the hand-over alone read
+                // as a close of nothing.
+                let closing_started = std::time::Instant::now();
+                let mut held = keep_for_the_tail(file);
+                let closing = closing_started.elapsed();
                 let metadata_started = std::time::Instant::now();
                 let landed = wrote
                     .and_then(|()| stamp_shard_member_metadata(&f, held.as_ref()))
                     .and_then(|bytes| still_its_own(&f.dest_path, made).map(|()| bytes));
                 let metadata = metadata_started.elapsed();
                 let windows_bytes =
-                    landed.map_err(|error| discard_failed_member(&f, error, held, made))?;
+                    landed.map_err(|error| discard_failed_member(&f, error, held.take(), made))?;
+                let close_started = std::time::Instant::now();
+                drop(held);
+                let close = closing + close_started.elapsed();
                 Ok((
                     f.size.saturating_add(windows_bytes),
                     (mkdir, open, write, close, metadata, total_started.elapsed()),
