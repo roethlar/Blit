@@ -1,9 +1,9 @@
 # cr-ecm28-3: the staged name itself could be replaced before it was published
 
 **Severity**: HIGH — the staged partial stood beside the destination, so another directory operation could replace the staged name, and the exclusive rename then published an inode other than the verified one the caller held; the error cleanup could likewise unlink the replacement
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r30` (Codex openreview, 2026-11-22) reviewed `e3ea9517..fd603571` — the five `combined-r29` fixes — with `guard_confirmed: true`: "I would keep the nonblocking opens for resume hashing, the Unix hard-link check, private staging, and permission rollback through the unfinished-length update." "I ran `copy --resume` with a `0600` source, a `0644` destination, and umask `0200`. The head exited 2 because its newly created `0500` staging directory failed the exact `0700` check. The same CLI with the base `resume.rs` copied all 300 KiB and exited 0." "If the staging directory moves, cleanup can remove an unrelated empty directory at its old name. This also happens on the path that rejects a directory during opening. Leave the entry in place when cleanup cannot establish ownership." The remaining work is cr-ecm29-5 and -6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm28-3`)
+**Commit**: `d3c390f8`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r29` over `10145127..e3ea9517` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r29.codex.md`. It completes cr-ecm27-1 (`0a70800e`).
 
 ## Evidence

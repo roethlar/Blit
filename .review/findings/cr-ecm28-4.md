@@ -1,9 +1,9 @@
 # cr-ecm28-4: the hashed hold kept the new mode when marking the partial failed
 
 **Severity**: MEDIUM — under a 4,096-byte file-size limit, marking an eight-byte partial unfinished (4,097 bytes) failed with `EFBIG`: its bytes were kept, but its mode went from `0644` to `0600`
-**Status**: Fixed on Unix, awaiting review
+**Status**: Verified on Unix — `combined-r30` (Codex openreview, 2026-11-22) reviewed `e3ea9517..fd603571` — the five `combined-r29` fixes — with `guard_confirmed: true`: "I would keep the nonblocking opens for resume hashing, the Unix hard-link check, private staging, and permission rollback through the unfinished-length update."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm28-4`)
+**Commit**: `090fd2d4`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r29` over `10145127..e3ea9517` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r29.codex.md`. It completes cr-ecm27-4 (`50c6b3be`).
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-ecm28-1: the wire's opens of a destination could wait on a FIFO
 
 **Severity**: HIGH — a regular destination that became a FIFO after the look, or after the hashing, could hold the hash reader or the sink's hold indefinitely before either checked the descriptor; the writable reopen could wait too
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r30` (Codex openreview, 2026-11-22) reviewed `e3ea9517..fd603571` — the five `combined-r29` fixes — with `guard_confirmed: true`: "I would keep the nonblocking opens for resume hashing, the Unix hard-link check, private staging, and permission rollback through the unfinished-length update." "With `--checksum --resume`, a same-size destination is opened for checksum comparison before resume hashing. If it becomes a FIFO, that earlier open can still stall the transfer indefinitely." The remaining work is cr-ecm29-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm28-1`)
+**Commit**: `8c696dc9`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r29` over `10145127..e3ea9517` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r29.codex.md`. It completes cr-ecm27-3 (`fa9e1dcf`) for the wire.
 
 ## Evidence

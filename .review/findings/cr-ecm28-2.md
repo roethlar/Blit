@@ -1,9 +1,9 @@
 # cr-ecm28-2: a link that took an occupied name during staging was overwritten
 
 **Severity**: HIGH — the check catches a link present at the look, but a link that took an occupied entry's place after that check was overwritten by the final rename, locally and in the wire's whole-file path
-**Status**: Fixed on Linux, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r30` (Codex openreview, 2026-11-22) reviewed `e3ea9517..fd603571` — the five `combined-r29` fixes — with `guard_confirmed: true`: "I would keep the nonblocking opens for resume hashing, the Unix hard-link check, private staging, and permission rollback through the unfinished-length update." "After an exchange finds an unexpected occupant, `unmade()` runs even if the reverse exchange fails. It can unlink the displaced file while the error says it was retained. A concurrent replacement during rollback can also put a different file in cleanup's path. Preserve the entry on an ambiguous restore and report its exact recovery path." "A regular file arriving between the decision to replace and the second lookup becomes the new expected occupant. On macOS and Linux filesystems without exchange support, the fallback `renameat` can also overwrite an entry that arrived during staging. Pin the original identity and fail the individual file wherever safe replacement is unavailable." "The `/proc/self/fd` lookup makes a Linux daemon without procfs roll back an otherwise valid replacement as a conflict. The directory descriptor needed for the lookup is already open." The remaining work is cr-ecm29-1, -2 and -7
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm28-2`)
+**Commit**: `3c25cd73`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r29` over `10145127..e3ea9517` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r29.codex.md`. It completes cr-ecm27-3 (`fa9e1dcf`).
 
 ## Evidence

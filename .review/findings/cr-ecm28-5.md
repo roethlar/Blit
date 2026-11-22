@@ -1,9 +1,9 @@
 # cr-ecm28-5: a partial left with a second name was patched in place on retry
 
 **Severity**: MEDIUM — after a failed publication left its staged name beside the destination, a retry patched the destination in place, and both names held the finished bytes, the same inode
-**Status**: Fixed on Unix, awaiting review
+**Status**: Verified on Unix — `combined-r30` (Codex openreview, 2026-11-22) reviewed `e3ea9517..fd603571` — the five `combined-r29` fixes — with `guard_confirmed: true`: "I would keep the nonblocking opens for resume hashing, the Unix hard-link check, private staging, and permission rollback through the unfinished-length update." Its Windows half is cr-ecm29-3's, blocked: "The wire hash decision accepts every non-Unix file, and local resume opens the existing file for writing. On NTFS, resuming one name can therefore change another backup snapshot. Check the link count through the Windows file handle and give a multiply linked destination a fresh file."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm28-5`)
+**Commit**: `6d7be846`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r29` over `10145127..e3ea9517` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r29.codex.md`. It completes cr-ecm27-1 (`0a70800e`).
 
 ## Evidence
