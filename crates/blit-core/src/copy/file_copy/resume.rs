@@ -251,19 +251,20 @@ fn open_resume_partial_with(
         if make_partial_private(&file)
             .with_context(|| format!("making the partial {} private", dst.display()))?
         {
-            let (file, kept) = if writable {
-                (file, kept_early)
+            // cr-ecm26-4, cr-ecm27-4: made private (and writable) to be had,
+            // and until it is had — to its last look — any failure puts its
+            // mode back through the handle that changed it. A writable reopen
+            // refused left a 0444 file 0600, and so did a last look that
+            // failed.
+            let undo = |error: eyre::Report| {
+                use std::os::unix::fs::PermissionsExt as _;
+                let _ =
+                    file.set_permissions(std::fs::Permissions::from_mode(found.mode() & 0o7777));
+                error
+            };
+            let (again, kept) = if writable {
+                (None, kept_early)
             } else {
-                // cr-ecm26-4: made writable to be had, and until it is had,
-                // any failure puts its mode back through the handle that
-                // changed it. A writable reopen refused (`EMFILE`) left a
-                // 0444 file 0600.
-                let undo = |error: eyre::Report| {
-                    use std::os::unix::fs::PermissionsExt as _;
-                    let _ = file
-                        .set_permissions(std::fs::Permissions::from_mode(found.mode() & 0o7777));
-                    error
-                };
                 // The same file, now writable, or nothing is had.
                 let reopened = reopen_fault(dst)
                     .and_then(|()| resolved.open(libc::O_RDWR))
@@ -283,10 +284,14 @@ fn open_resume_partial_with(
                 let kept = keep(&again)
                     .with_context(|| format!("holding the partial {}", dst.display()))
                     .map_err(undo)?;
-                (again, kept)
+                (Some(again), kept)
             };
-            let len = file.metadata()?.len();
-            return Ok((file, kept, len));
+            let len = len_fault(dst)
+                .and_then(|()| again.as_ref().unwrap_or(&file).metadata())
+                .map(|meta| meta.len())
+                .with_context(|| format!("looking at the partial {}", dst.display()))
+                .map_err(undo)?;
+            return Ok((again.unwrap_or(file), kept, len));
         }
     }
     drop(file);
@@ -387,6 +392,25 @@ fn reopen_fault(_dst: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+/// Test seam (cr-ecm27-4): the last look at a partial being had fails, by
+/// path — an `ESTALE`. Production never sets it.
+#[cfg(unix)]
+fn len_fault(_dst: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if LEN_FAULTS
+        .lock()
+        .is_ok_and(|faults| faults.iter().any(|at| at == _dst))
+    {
+        return Err(std::io::Error::from_raw_os_error(libc::ESTALE));
+    }
+    Ok(())
+}
+
+/// The paths a test has [`len_fault`] fail.
+#[cfg(all(test, unix))]
+pub(crate) static LEN_FAULTS: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// The paths a test has [`reopen_fault`] refuse.
 #[cfg(all(test, unix))]
@@ -1427,6 +1451,35 @@ mod tests {
             .collect::<std::io::Result<_>>()?;
         left.sort();
         assert_eq!(left, ["linked", "unlinked"], "no staged name left");
+        Ok(())
+    }
+
+    /// cr-ecm27-4: a partial made private to be had gets its mode back when
+    /// its last look fails — one reused where it stood (0644) and one made
+    /// writable first (0444). Left so, each became 0600.
+    #[cfg(unix)]
+    #[test]
+    fn a_partial_whose_last_look_fails_gets_its_mode_back() -> Result<()> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let tmp = tempdir()?;
+        for (name, mode) in [("reused", 0o644), ("readonly", 0o444)] {
+            let dst = tmp.path().join(name);
+            std::fs::write(&dst, b"8 bytes!")?;
+            std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(mode))?;
+            if std::fs::metadata(&dst)?.uid() == 0 {
+                // Root writes any file: nothing to show.
+                return Ok(());
+            }
+            LEN_FAULTS.lock().unwrap().push(dst.clone());
+            let had = open_resume_partial_held(&dst, Some(0o100000 | mode), 8, None);
+            LEN_FAULTS.lock().unwrap().retain(|at| at != &dst);
+            assert!(had.is_err(), "{name}");
+            assert_eq!(
+                std::fs::metadata(&dst)?.permissions().mode() & 0o777,
+                mode,
+                "{name}: its mode as it was"
+            );
+        }
         Ok(())
     }
 

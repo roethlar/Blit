@@ -2896,7 +2896,8 @@ fn hold_hashed(
     // cr-ecm20-1: and the file hashed, unchanged since: blocks that match
     // what was hashed are not sent, and another file, or this one written
     // since, would be patched into the wrong bytes and reported complete.
-    if crate::moved::Version::of(&held.metadata()?) != *hashed {
+    let seen = held.metadata()?;
+    if crate::moved::Version::of(&seen) != *hashed {
         eyre::bail!(
             "{} is not the file whose blocks were hashed: it changed, or was replaced, since",
             dst.display()
@@ -2909,22 +2910,51 @@ fn hold_hashed(
                 dst.display()
             )
         })?;
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(dst)
-        .with_context(|| format!("opening the resume partial {}", dst.display()))?;
-    let (was, now) = (held.metadata()?, file.metadata()?);
-    if (was.dev(), was.ino()) != (now.dev(), now.ino()) {
-        eyre::bail!(
+    // cr-ecm27-4: made private to be had, and until it is had any failure
+    // puts its mode back through the handle that changed it. A writable
+    // reopen that failed left it 0600.
+    let undo = |error: eyre::Report| {
+        let _ = held.set_permissions(std::fs::Permissions::from_mode(seen.mode() & 0o7777));
+        error
+    };
+    let file = hashed_reopen_fault(dst)
+        .and_then(|()| std::fs::OpenOptions::new().write(true).open(dst))
+        .with_context(|| format!("opening the resume partial {}", dst.display()))
+        .map_err(undo)?;
+    let same = held.metadata().and_then(|was| {
+        file.metadata()
+            .map(|now| (was.dev(), was.ino()) == (now.dev(), now.ino()))
+    });
+    if !matches!(same, Ok(true)) {
+        return Err(undo(eyre::eyre!(
             "the resume partial {} changed while it was made private",
             dst.display()
-        );
+        )));
     }
+    let now = file.metadata()?;
     if now.is_file() && now.len() <= total_size {
         mark_unfinished(&file, total_size)
             .with_context(|| format!("marking {} unfinished", dst.display()))?;
     }
     HeldPartial::of(file, dst).map(Some)
+}
+
+/// Test seam (cr-ecm27-4): the hashed hold's writable reopen refused, by
+/// path. Production never sets it.
+#[cfg(all(test, unix))]
+pub(crate) static HASHED_REOPEN_FAULTS: std::sync::Mutex<Vec<PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn hashed_reopen_fault(_dst: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if HASHED_REOPEN_FAULTS
+        .lock()
+        .is_ok_and(|faults| faults.iter().any(|at| at == _dst))
+    {
+        return Err(std::io::Error::from_raw_os_error(libc::EMFILE));
+    }
+    Ok(())
 }
 
 /// Test seam (cr-ecm21-5): a hold that fails with this kind of error, by
@@ -8102,6 +8132,56 @@ mod cr_win_1_tests {
             .unwrap();
         assert!(outcome.file_failed("r.bin"), "{outcome:?}");
         assert_eq!(sink.baselines_noted(), 0, "its baseline gone");
+    }
+
+    /// cr-ecm27-4: a wire resume's hashed hold whose writable reopen is
+    /// refused gets the partial's mode back: it stands as it did, and the
+    /// file fails. Left made private, a 0644 file became 0600.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hashed_hold_refused_its_reopen_gets_the_mode_back() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let at = dst.join("r.bin");
+        std::fs::write(&at, b"0123456789").unwrap();
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o644)).unwrap();
+        sink.note_resume_baseline(
+            "r.bin",
+            ResumeBaseline::Hashed(crate::moved::Version::of(&std::fs::metadata(&at).unwrap())),
+        );
+        HASHED_REOPEN_FAULTS.lock().unwrap().push(at.clone());
+        let held = sink.hold_resume_partial("r.bin", 10).await;
+        HASHED_REOPEN_FAULTS
+            .lock()
+            .unwrap()
+            .retain(|fault| fault != &at);
+        held.unwrap();
+        assert_eq!(
+            std::fs::metadata(&at).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "its mode as it was"
+        );
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "r.bin".to_string(),
+                total_size: 10,
+                mtime_seconds: 0,
+                permissions: 0o600,
+                windows_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert!(outcome.file_failed("r.bin"), "{outcome:?}");
     }
 
     /// cr-ecm25-6: a file the source skips leaves nothing noted for it: its
