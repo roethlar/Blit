@@ -3012,9 +3012,14 @@ impl<'a> PartialTarget<'a> {
 
     /// Armed for a file this write HAS (cr-ecm19-1): a failure settles it
     /// through a handle to it.
-    fn arm_held(&mut self, held: &std::fs::File, on_failure: OnFailure) {
-        self.held = held.try_clone().ok();
+    ///
+    /// cr-ecm20-4: a handle that cannot be held for it is an error, before
+    /// anything is written — it was let go quietly, and the failure was
+    /// settled by name after all.
+    fn arm_held(&mut self, held: &std::fs::File, on_failure: OnFailure) -> std::io::Result<()> {
+        self.held = Some(held.try_clone()?);
         self.armed = Some(on_failure);
+        Ok(())
     }
 
     /// Armed to remove on failure the file this write made and holds
@@ -3185,6 +3190,7 @@ fn copy_and_stamp_opened(
 ) -> Result<SinkOutcome> {
     use eyre::eyre;
     let mut did_copy = false;
+    let mut resumed: Option<std::fs::File> = None;
     // cr-ecm14-2: a run that keeps what exists makes the name first, by
     // a creation that fails if anything has it — and what it made is its
     // own from here: removed, should the copy fail (cr-ecm13-1: with
@@ -3222,11 +3228,21 @@ fn copy_and_stamp_opened(
         // it, not whatever stands at the name.
         let (held, held_len) = crate::copy::open_resume_partial(dst)
             .with_context(|| format!("resume copy {}", header.relative_path))?;
-        partial.arm_held(&held, OnFailure::KeepUnfinished { created });
+        partial
+            .arm_held(&held, OnFailure::KeepUnfinished { created })
+            .with_context(|| format!("holding the resume partial {}", dst.display()))?;
+        // cr-ecm20-4: and the handle it is written through is kept for the
+        // tail: its time is given through it, and it is delivered only
+        // while it is what the name holds.
+        resumed = Some(
+            held.try_clone()
+                .with_context(|| format!("holding the resume partial {}", dst.display()))?,
+        );
         run_after_claim_hook(dst);
         let outcome = crate::copy::resume_copy_into(src_file, header.size, held, held_len, dst, 0)
             .with_context(|| format!("resume copy {}", header.relative_path))?;
         did_copy = outcome.bytes_transferred > 0;
+        run_after_claim_hook(dst);
     } else if crate::copy::file_needs_copy_with_mode_opened(
         src_file,
         src_meta,
@@ -3287,8 +3303,8 @@ fn copy_and_stamp_opened(
             .ok()
             .or(fallback);
         if let Some(ft) = ft {
-            let stamped = match &made {
-                Some(made) => filetime::set_file_handle_times(made, None, Some(ft)),
+            let stamped = match made.as_ref().or(resumed.as_ref()) {
+                Some(written) => filetime::set_file_handle_times(written, None, Some(ft)),
                 None => filetime::set_file_mtime(dst, ft),
             };
             if let Err(e) = stamped {
@@ -3303,6 +3319,14 @@ fn copy_and_stamp_opened(
     // written is kept, and this file did not land.
     if partial.no_longer_its_own() {
         return Err(eyre!(THE_NAME_IS_TAKEN));
+    }
+    // cr-ecm20-4: and a resume is delivered only while what it wrote is
+    // what the name holds, or a link there leads to it: a file renamed over
+    // the name was given the copy's time, and the copy reported done — a
+    // move's source then went.
+    if let Some(written) = &resumed {
+        let own = written.metadata().ok().as_ref().and_then(file_identity);
+        still_its_own(dst, own, config.ignore_existing)?;
     }
     partial.disarm();
     Ok(SinkOutcome::written(
@@ -7715,7 +7739,10 @@ mod cr_win_1_tests {
         let at = dst.join("moved.bin");
         AFTER_CLAIM_HOOKS.lock().unwrap().push((
             at.clone(),
-            Arc::new(move |name: &Path| std::fs::rename(&theirs, name).unwrap()),
+            // Once: the seam is passed again once the blocks are written.
+            Arc::new(move |name: &Path| {
+                let _ = std::fs::rename(&theirs, name);
+            }),
         ));
         let _fault = TailFaultGuard::install(&dst);
         let outcome = sink
@@ -7989,6 +8016,79 @@ mod cr_win_1_tests {
             .await
             .unwrap();
         assert_eq!(mode_of(&by_a_block) & 0o077, 0);
+    }
+
+    /// cr-ecm20-4: a local resume is delivered only while what it wrote is
+    /// what the name holds. A file renamed over the name once the blocks
+    /// are written is not given the copy's time, and the copy says it did
+    /// not land; it was stamped by name, and reported done.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_local_resume_lands_only_where_its_own_file_stands() {
+        use std::os::unix::fs::PermissionsExt as _;
+        struct Hooked(PathBuf);
+        impl Drop for Hooked {
+            fn drop(&mut self) {
+                if let Ok(mut hooks) = AFTER_CLAIM_HOOKS.lock() {
+                    hooks.retain(|(prefix, _)| prefix != &self.0);
+                }
+            }
+        }
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("r.bin"), b"0123456789").unwrap();
+        filetime::set_file_mtime(
+            src.join("r.bin"),
+            FileTime::from_unix_time(1_600_000_000, 0),
+        )
+        .unwrap();
+        std::fs::write(dst.join("r.bin"), b"01234abcde").unwrap();
+        std::fs::set_permissions(dst.join("r.bin"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let theirs = tmp.path().join("theirs");
+        std::fs::write(&theirs, b"somebody's").unwrap();
+        filetime::set_file_mtime(&theirs, FileTime::from_unix_time(1_500_000_000, 0)).unwrap();
+        let _hooked = {
+            let (theirs, at) = (theirs.clone(), dst.join("r.bin"));
+            let seen = std::sync::atomic::AtomicUsize::new(0);
+            AFTER_CLAIM_HOOKS.lock().unwrap().push((
+                at.clone(),
+                Arc::new(move |_: &Path| {
+                    // The second moment: the blocks are written.
+                    if seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                        std::fs::rename(&theirs, &at).unwrap();
+                    }
+                }),
+            ));
+            Hooked(dst.join("r.bin"))
+        };
+        let sink = FsTransferSink::new(
+            src.clone(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let outcome = sink
+            .write_payload(PreparedPayload::File(make_file_header("r.bin", 10)))
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        assert!(
+            outcome.failures[0].reason.contains(REPLACED_WHILE_WRITTEN),
+            "{:?}",
+            outcome.failures
+        );
+        assert_eq!(std::fs::read(dst.join("r.bin")).unwrap(), b"somebody's");
+        assert_eq!(
+            FileTime::from_last_modification_time(&std::fs::metadata(dst.join("r.bin")).unwrap()),
+            FileTime::from_unix_time(1_500_000_000, 0),
+            "not given the copy's time"
+        );
     }
 
     /// cr-ecm20-3: a local resume of a read-only source whose metadata
