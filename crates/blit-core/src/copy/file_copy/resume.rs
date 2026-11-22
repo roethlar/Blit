@@ -326,15 +326,6 @@ fn is_directory(mode: u32) -> bool {
     mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32
 }
 
-/// The path of the entry `name` in the stage `stage` holds, through the
-/// descriptor itself (Linux's `/proc/self/fd`), for a look at it.
-#[cfg(target_os = "linux")]
-fn stage_path(stage: std::os::unix::io::RawFd, name: &std::ffi::CStr) -> std::path::PathBuf {
-    use std::os::unix::ffi::OsStrExt as _;
-    std::path::Path::new(&format!("/proc/self/fd/{stage}"))
-        .join(std::ffi::OsStr::from_bytes(name.to_bytes()))
-}
-
 /// Whether `mode` (type bits included) is a link's.
 #[cfg(unix)]
 #[allow(clippy::unnecessary_cast)]
@@ -940,14 +931,11 @@ impl Resolved {
             };
             match swap() {
                 Ok(()) => {
-                    let out = std::fs::symlink_metadata(stage_path(stage, staged));
-                    let theirs = out
-                        .as_ref()
-                        .map(|meta| {
-                            use std::os::unix::fs::MetadataExt as _;
-                            Some((meta.dev(), meta.ino())) != expected
-                        })
-                        .unwrap_or(true);
+                    // cr-ecm29-7: looked at in the stage through its own
+                    // descriptor. Looked at through `/proc`, a daemon with
+                    // none put back what it was to replace, and failed.
+                    let out = entry_at(stage, staged);
+                    let theirs = !matches!(out, Ok(Some(out)) if Some(out.identity) == expected);
                     if theirs {
                         // Not what was to be replaced: it goes back.
                         let back = swap();

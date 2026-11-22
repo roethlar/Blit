@@ -88,6 +88,57 @@ fn a_local_copy_gives_every_file_its_sources_mode() {
     }
 }
 
+/// cr-ecm29-7: a resume where there is no `/proc` — as for a daemon in a
+/// namespace without one — still replaces a destination it may not reuse.
+/// What the exchange swapped out was looked at through `/proc/self/fd`;
+/// with nothing there it was taken for something else, put back, and the
+/// copy failed. Run in a user and mount namespace with an empty `/proc`;
+/// where the system grants none (`unshare` refused), there is nothing to
+/// run, and the test says so.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_resume_without_proc_replaces_what_it_may_not_reuse() {
+    let probe = Command::new("unshare")
+        .args(["--user", "--map-root-user", "--mount", "sh", "-c"])
+        .arg("mount -t tmpfs none /proc && test ! -e /proc/self")
+        .output();
+    if !probe.as_ref().is_ok_and(|probe| probe.status.success()) {
+        eprintln!("SKIPPED: no user and mount namespace here to hide /proc in: {probe:?}");
+        return;
+    }
+    let ctx = TestContext::new();
+    let source = ctx.workspace.join("source");
+    let target = ctx.workspace.join("target");
+    fs::create_dir_all(&source).unwrap();
+    fs::create_dir_all(&target).unwrap();
+    let data: Vec<u8> = (0..300 * 1024).map(|at| (at % 251) as u8).collect();
+    fs::write(source.join("big.bin"), &data).unwrap();
+    fs::set_permissions(source.join("big.bin"), fs::Permissions::from_mode(0o600)).unwrap();
+    // Wider than its source: not reused, a fresh partial replaces it.
+    fs::write(target.join("big.bin"), &data[..1000]).unwrap();
+    fs::set_permissions(target.join("big.bin"), fs::Permissions::from_mode(0o644)).unwrap();
+    let mut cmd = Command::new("unshare");
+    cmd.args(["--user", "--map-root-user", "--mount", "sh", "-c"])
+        .arg("mount -t tmpfs none /proc && exec \"$@\"")
+        .arg("sh")
+        .arg(&ctx.cli_bin)
+        .arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .arg("copy")
+        .arg("--resume")
+        .arg(format!("{}/", source.display()))
+        .arg(format!("{}/", target.display()));
+    let output = run_with_timeout(cmd, Duration::from_secs(120));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(target.join("big.bin")).unwrap(), data);
+    let left: Vec<_> = fs::read_dir(&target).unwrap().collect();
+    assert_eq!(left.len(), 1, "nothing left beside it");
+}
+
 /// cr-ecm29-5: a resume under a narrow mask (0200) still makes its fresh
 /// partial: its private staging directory, made 0500 by the mask, is given
 /// its mode through its handle. Checked for exactly 0700, it was refused and
