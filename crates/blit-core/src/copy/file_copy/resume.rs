@@ -802,6 +802,35 @@ mod tests {
         Ok(())
     }
 
+    /// cr-ecm24-7: a fresh partial is made in a directory this run may write
+    /// and search but not list (0300): its directory is held to be searched.
+    /// Held to be read, it was refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_fresh_partial_is_made_in_a_directory_that_cannot_be_listed() -> Result<()> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let data = vec![7u8; 4096];
+        std::fs::write(&src, &data)?;
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))?;
+        let folder = tmp.path().join("folder");
+        std::fs::create_dir(&folder)?;
+        let dst = folder.join("dst");
+        std::fs::write(&dst, &data[..1000])?;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o644))?;
+        if std::fs::metadata(&dst)?.uid() == 0 {
+            // Root lists any directory: nothing to show.
+            return Ok(());
+        }
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o300))?;
+        let copied = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024);
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700))?;
+        copied?;
+        assert_eq!(std::fs::read(&dst)?, data);
+        Ok(())
+    }
+
     /// cr-ecm23-4: a destination another user owns is not reused, even by a
     /// run that may set its mode (root): its owner can read what lands in
     /// it. Made private and patched in place, it was.

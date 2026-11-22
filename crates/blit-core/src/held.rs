@@ -300,9 +300,12 @@ mod imp {
 
     /// cr-ecm23-3: the directory at an absolute path with no link in it,
     /// held — opened from `/` one name at a time, never through a link —
-    /// for a file to be made and named in it.
+    /// for a file to be made and named in it. cr-ecm24-7: held to be
+    /// searched, as the passages on the way are: making and naming a file
+    /// in it asks only that it be written and searched. Held to be read, a
+    /// directory that could not be listed (0300) was refused.
     pub(crate) fn directory_unlinked(path: &Path) -> io::Result<OwnedFd> {
-        open_unlinked(path, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC)
+        open_unlinked(path, TO_SEARCH | libc::O_DIRECTORY | libc::O_CLOEXEC)
     }
 
     /// cr-uv10-1: the entry at an absolute path with no link in it, itself:
