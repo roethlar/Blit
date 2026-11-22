@@ -2851,34 +2851,31 @@ fn hold_partial(
 
 #[cfg(unix)]
 fn hold_whole(dst: &Path, total_size: u64, within: Option<&Path>) -> Result<Option<HeldPartial>> {
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     // cr-ecm21-3: something there — a file, or a link to one — is replaced
     // by a fresh private partial made beside it, and nothing of it is
     // touched until that exists: it was removed, or cut to nothing through
     // the link, before a permission failure could leave its bytes gone.
-    if std::fs::symlink_metadata(dst).is_ok() {
-        // cr-ecm23-1: ready — private, at its length, and which file it is
-        // known — before it takes the name. Learned after, a look that
-        // failed left the destination replaced, and nothing held.
-        let (file, identity) =
-            crate::copy::fresh_partial_ready(dst, total_size.saturating_add(1), within, |file| {
-                HeldPartial::identity_of(file, dst)
-            })?;
-        while_a_file_is_made(dst);
-        return Ok(Some(HeldPartial { file, identity }));
-    }
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(dst)
-        .with_context(|| format!("making the resume partial {}", dst.display()))?;
+    // cr-ecm23-1: ready — private, at its length, and which file it is
+    // known — before it takes the name. Learned after, a look that failed
+    // left the destination replaced, and nothing held.
+    // cr-ecm25-2: and where NOTHING stands, the same: made in the directory
+    // held (cr-ecm24-1), ready, and taking the name only while nothing does.
+    // Made by the name, it was there before which file it is was known — a
+    // look that failed left it — and a folder replaced on its way could move
+    // where it was made.
+    let resolved = crate::copy::resolve_destination(dst, within)?;
+    let ready = |file: &std::fs::File| HeldPartial::identity_of(file, dst);
+    let unfinished = total_size.saturating_add(1);
+    let stands = resolved
+        .stands()
+        .with_context(|| format!("looking at {}", dst.display()))?;
+    let (file, identity) = if stands {
+        resolved.fresh(dst, unfinished, ready)?
+    } else {
+        resolved.fresh_exclusive(dst, unfinished, ready)?
+    };
     while_a_file_is_made(dst);
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("making the resume partial {} private", dst.display()))?;
-    mark_unfinished(&file, total_size)
-        .with_context(|| format!("marking {} unfinished", dst.display()))?;
-    HeldPartial::of(file, dst).map(Some)
+    Ok(Some(HeldPartial { file, identity }))
 }
 
 #[cfg(unix)]
@@ -8344,6 +8341,70 @@ mod cr_win_1_tests {
             .unwrap();
         assert!(outcome.file_failed("r.bin"), "{outcome:?}");
         assert_eq!(outcome.files_written, 0, "{outcome:?}");
+    }
+
+    /// cr-ecm25-2: where nothing stands, a wire resume's partial is made in
+    /// the directory held and ready before it takes the name — a look that
+    /// fails leaves nothing there — and it takes the name only while nothing
+    /// does: what comes to stand there first is left as it is. Made by the
+    /// name, a nine-byte file was left where the look failed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_partial_where_nothing_stands_is_ready_before_it_takes_the_name() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let at = dst.join("gone.bin");
+        sink.note_resume_baseline("gone.bin", ResumeBaseline::Whole);
+        IDENTITY_FAULTS.lock().unwrap().push(at.clone());
+        let held = sink.hold_resume_partial("gone.bin", 8).await;
+        IDENTITY_FAULTS.lock().unwrap().retain(|fault| fault != &at);
+        held.unwrap();
+        assert_eq!(
+            std::fs::read_dir(&dst).unwrap().count(),
+            0,
+            "nothing left where the look failed"
+        );
+
+        let late = dst.join("late.bin");
+        {
+            let late = late.clone();
+            crate::copy::BEFORE_A_FRESH_PARTIAL_IS_MADE_HOOKS
+                .lock()
+                .unwrap()
+                .push((
+                    late.clone(),
+                    Arc::new(move |_: &Path| std::fs::write(&late, b"theirs").unwrap()),
+                ));
+        }
+        sink.note_resume_baseline("late.bin", ResumeBaseline::Whole);
+        let held = sink.hold_resume_partial("late.bin", 8).await;
+        crate::copy::BEFORE_A_FRESH_PARTIAL_IS_MADE_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(path, _)| path != &late);
+        held.unwrap();
+        assert_eq!(std::fs::read(&late).unwrap(), b"theirs", "left as it is");
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "late.bin".to_string(),
+                total_size: 8,
+                mtime_seconds: 0,
+                permissions: 0o600,
+                windows_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert!(outcome.file_failed("late.bin"), "{outcome:?}");
+        assert_eq!(std::fs::read(&late).unwrap(), b"theirs");
     }
 
     /// cr-ecm23-1: a fresh partial for the wire is known — which file it is

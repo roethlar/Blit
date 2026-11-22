@@ -399,6 +399,55 @@ impl Resolved {
         unfinished: u64,
         ready: impl FnOnce(&File) -> Result<T>,
     ) -> Result<(File, T)> {
+        self.fresh_as(dst, unfinished, ready, false)
+    }
+
+    /// cr-ecm25-2: [`Self::fresh`] where nothing stands at the name: it takes
+    /// the name only while nothing does — what comes to stand there first is
+    /// left as it is and the partial goes, as a creation that fails if the
+    /// name is taken would.
+    pub(crate) fn fresh_exclusive<T>(
+        &self,
+        dst: &Path,
+        unfinished: u64,
+        ready: impl FnOnce(&File) -> Result<T>,
+    ) -> Result<(File, T)> {
+        self.fresh_as(dst, unfinished, ready, true)
+    }
+
+    /// Whether anything stands at the name in the held directory — itself,
+    /// a link being a link.
+    pub(crate) fn stands(&self) -> std::io::Result<bool> {
+        use std::os::unix::io::AsRawFd as _;
+        let mut found = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: the held directory is open for the length of the call, the
+        // name is NUL-terminated and outlives it, and `found` is a writable
+        // record the call fills on success.
+        let looked = unsafe {
+            libc::fstatat(
+                self.directory.as_raw_fd(),
+                self.name.as_ptr(),
+                found.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if looked == 0 {
+            return Ok(true);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(false);
+        }
+        Err(error)
+    }
+
+    fn fresh_as<T>(
+        &self,
+        dst: &Path,
+        unfinished: u64,
+        ready: impl FnOnce(&File) -> Result<T>,
+        exclusive: bool,
+    ) -> Result<(File, T)> {
         use std::os::unix::fs::PermissionsExt as _;
         use std::os::unix::io::AsRawFd as _;
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -450,6 +499,44 @@ impl Resolved {
                 )));
             }
         };
+        if exclusive {
+            // A second name for the staged file, made only while nothing has
+            // it, and the staged name let go.
+            // SAFETY: the held directory is open for the length of the call,
+            // and both names are NUL-terminated and outlive it.
+            let linked = unsafe {
+                libc::linkat(
+                    self.directory.as_raw_fd(),
+                    staged.as_ptr(),
+                    self.directory.as_raw_fd(),
+                    self.name.as_ptr(),
+                    0,
+                )
+            };
+            if linked == 0 {
+                unmade();
+                return Ok((file, readied));
+            }
+            let error = std::io::Error::last_os_error();
+            // A filesystem with no second names (FAT) refuses the link: there
+            // the staged file is renamed in only while nothing stands at the
+            // name, looked at just before — the one window it leaves.
+            let no_links = matches!(error.raw_os_error(), Some(libc::EPERM | libc::EOPNOTSUPP));
+            if !no_links || self.stands().unwrap_or(true) {
+                unmade();
+                let error = if no_links {
+                    std::io::Error::from(std::io::ErrorKind::AlreadyExists)
+                } else {
+                    error
+                };
+                return Err(error).with_context(|| {
+                    format!(
+                        "putting a fresh partial where nothing stood, {}",
+                        dst.display()
+                    )
+                });
+            }
+        }
         // SAFETY: the held directory is open for the length of the call, and
         // both names are NUL-terminated and outlive it.
         if unsafe {
