@@ -6642,6 +6642,24 @@ fn hash_file_abortable(path: &Path, abort: &AtomicBool) -> Result<Vec<u8>> {
 /// that vanished (or emptied) between the diff and this read yields an
 /// empty/short list — the implicit full-transfer fallback (plan D1): the
 /// source sends every block a hash does not vouch for.
+/// Test seam (cr-ecm25-3): a read of a destination being hashed fails, by
+/// its path and at the block given — an `EIO` no test can make for real.
+/// Production never sets it.
+#[cfg(test)]
+pub(crate) static HASH_READ_FAULTS: StdMutex<Vec<(PathBuf, usize)>> = StdMutex::new(Vec::new());
+
+fn hash_read_fault(_dst: &Path, _block: usize) -> std::io::Result<()> {
+    #[cfg(test)]
+    if HASH_READ_FAULTS.lock().is_ok_and(|faults| {
+        faults
+            .iter()
+            .any(|(at, block)| at == _dst && *block == _block)
+    }) {
+        return Err(std::io::Error::other("an input/output error (a test's)"));
+    }
+    Ok(())
+}
+
 async fn compute_resume_block_hashes(
     dst_root: &Path,
     canonical_dst_root: Option<&Path>,
@@ -6743,9 +6761,14 @@ async fn compute_resume_block_hashes(
         loop {
             let mut filled = 0usize;
             while filled < block_size {
-                let got = bounded
-                    .read(&mut buf[filled..])
-                    .map_err(|e| eyre::eyre!("hashing {}: {e}", dst.display()))?;
+                // cr-ecm25-3: a read that fails is that one file's matter:
+                // its hashes, unfinished, are dropped and it comes whole. It
+                // ended the transfer, every other file with it.
+                let read = hash_read_fault(&dst, hashes.len())
+                    .and_then(|()| bounded.read(&mut buf[filled..]));
+                let Ok(got) = read else {
+                    return whole();
+                };
                 if got == 0 {
                     break;
                 }
@@ -11168,6 +11191,33 @@ mod own_incomplete_copy_tests {
             .unwrap();
         assert_eq!(hashes.len(), 5, "no mode to ask");
         unchanged();
+    }
+
+    /// cr-ecm25-3: a read that fails while a destination is hashed — on its
+    /// second block — sends that file whole, and nothing ends: its unfinished
+    /// hashes are dropped. The error ended the transfer.
+    #[tokio::test]
+    async fn a_read_that_fails_while_hashing_sends_the_file_whole() {
+        use crate::remote::transfer::sink::ResumeBaseline;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let at = root.join("r.bin");
+        std::fs::write(&at, vec![3u8; 5000]).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        HASH_READ_FAULTS.lock().unwrap().push((at.clone(), 1));
+        let hashed =
+            compute_resume_block_hashes(&root, None, "r.bin", None, Some(0o100600), 1024).await;
+        HASH_READ_FAULTS
+            .lock()
+            .unwrap()
+            .retain(|(path, _)| path != &at);
+        let (hashes, baseline) = hashed.unwrap();
+        assert!(hashes.is_empty(), "its unfinished hashes dropped");
+        assert_eq!(baseline, ResumeBaseline::Whole);
     }
 
     /// cr-ecm24-4: a destination this run cannot read is sent whole and the
