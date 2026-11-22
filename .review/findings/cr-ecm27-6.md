@@ -9,6 +9,9 @@
 ## Evidence
 "An absent-name resume fails on a macOS volume that refuses hard links even when the volume supports `renameatx_np(RENAME_EXCL)`. Use that operation and cover both vacant and occupied destinations." (`crates/blit-core/src/copy/file_copy/resume.rs`, `Resolved::publish_exclusive`: off Linux, a second name, and failing where there is none; `scripts/bench_ldt4_rigw.sh` already uses `renameatx_np`.)
 
+## Restated
+`combined-r29` (Codex openreview, 2026-11-22) reviewed `10145127..e3ea9517` — the five `combined-r28` fixes — with `guard_confirmed: true` restated it: "A vacant-name resume fails on a macOS volume that refuses hard links even when it supports `renameatx_np(RENAME_EXCL)`. Try that operation first and test both vacant and occupied destinations on such a volume." It stays blocked.
+
 ## What it needs (not done)
 - In `Resolved::publish_exclusive`, on Apple targets, try `libc::renameatx_np(held, staged, held, name, libc::RENAME_EXCL)` first, as Linux tries `renameat2(RENAME_NOREPLACE)`. Treat `ENOTSUP`/`EINVAL` as "no such rename", which falls to the second name. Treat `EEXIST` as the file failing, with what stands there left as it is.
 - Guards that run on macOS: a vacant name takes the partial, and an occupied one is left as it is and the resume fails. A volume that refuses hard links (an exFAT or FAT32 disk image) should take the partial through the exclusive rename.

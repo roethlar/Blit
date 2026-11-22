@@ -1,9 +1,9 @@
 # cr-ecm27-4: a partial made private kept its new mode on a late failure, locally and on the wire
 
 **Severity**: MEDIUM — an `ESTALE` on the last length lookup left an owned `0444` file `0600`; the wire's hashed hold left a file `0600` when its writable reopen failed after the mode change
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r29` (Codex openreview, 2026-11-22) reviewed `10145127..e3ea9517` — the five `combined-r28` fixes — with `guard_confirmed: true`: "I would keep the whole-file fallback for failed metadata reads, cleanup in the default `skip_record`, and Linux's atomic no-replace rename." "With a 4,096-byte file-size limit, the public sink failed to mark an eight-byte partial unfinished at 4,097 bytes. It reported `EFBIG` and preserved all eight bytes, but changed the mode from `0644` to `0600`. Collect the required identity before changing the length and restore the mode on acquisition failure." The remaining work is cr-ecm28-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm27-4`)
+**Commit**: `50c6b3be`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r28` over `e025a3e2..10145127` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r28.codex.md`. It completes cr-ecm26-4 (`c9942b72`).
 
 ## Evidence

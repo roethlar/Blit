@@ -1,9 +1,9 @@
 # cr-ecm27-3: a FIFO or a link that took the name during acquisition blocked it or was overwritten
 
 **Severity**: HIGH — a read-only FIFO put in a regular file's place after the look could block the open indefinitely, before the descriptor check; a link put at the resolved name took the replacement branch and was overwritten
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r29` (Codex openreview, 2026-11-22) reviewed `10145127..e3ea9517` — the five `combined-r28` fixes — with `guard_confirmed: true`: "I would keep the whole-file fallback for failed metadata reads, cleanup in the default `skip_record`, and Linux's atomic no-replace rename." "If a regular destination becomes a FIFO after lookup or after hashing, the hash reader or the sink can wait indefinitely before either validates the descriptor. The writable reopen can also wait. Open nonblocking and verify that the descriptor is regular at each acquisition point." "The new check catches a link present at lookup. If a link takes the place of an occupied entry after that check, the final `renameat` overwrites it. Carry the expected occupant through publication and fail the file on a conflict. This affects both local replacement and the wire whole-file path." The remaining work is cr-ecm28-1 and -2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm27-3`)
+**Commit**: `fa9e1dcf`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r28` over `e025a3e2..10145127` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r28.codex.md`. It completes cr-ecm26-5 (`1435ba23`).
 
 ## Evidence

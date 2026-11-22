@@ -1,0 +1,23 @@
+I would give local and wire `--resume` one rule for acquiring a partial. Reuse blocks only after verifying the open file against the comparison. If the destination cannot be compared, send that file in full. If a partial cannot be acquired safely, preserve the existing entry and its permissions, report the file failure, and let the batch continue.
+
+**Verdict — `acceptable_with_changes`.** I would keep the whole-file fallback for failed metadata reads, cleanup in the default `skip_record`, and Linux’s atomic no-replace rename. The following changes are still required.
+
+| Severity | Required change |
+|---|---|
+| High | **Use nonblocking opens throughout wire resume.** If a regular destination becomes a FIFO after lookup or after hashing, the hash reader or the sink can wait indefinitely before either validates the descriptor. The writable reopen can also wait. Open nonblocking and verify that the descriptor is regular at each acquisition point. [Hash reader](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/transfer_session/mod.rs:6735) · [Hashed hold](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:2902) · [Writable reopen](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:2930) |
+| High | **Preserve a destination link that arrives during staging.** The new check catches a link present at lookup. If a link takes the place of an occupied entry after that check, the final `renameat` overwrites it. Carry the expected occupant through publication and fail the file on a conflict. This affects both local replacement and the wire whole-file path. [Local lookup](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/copy/file_copy/resume.rs:195) · [Wire lookup](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:2884) · [Replacement](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/copy/file_copy/resume.rs:775) |
+| High | **Protect the staging entry itself.** If another directory operation replaces the staged name, the exclusive rename can publish a different inode from the verified one the caller still holds. Error cleanup can likewise unlink the replacement. Use handle-based publication or a private staging directory held by descriptor. [Publication](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/copy/file_copy/resume.rs:828) · [Cleanup](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/copy/file_copy/resume.rs:752) |
+| Medium | **Keep permission rollback armed until the hashed hold succeeds.** With a 4,096-byte file-size limit, the public sink failed to mark an eight-byte partial unfinished at 4,097 bytes. It reported `EFBIG` and preserved all eight bytes, but changed the mode from `0644` to `0600`. Collect the required identity before changing the length and restore the mode on acquisition failure. [Hashed hold](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:2943) |
+| Medium | **Make the hard-link fallback recoverable on retry.** After an injected staging-unlink failure, I retried the copy successfully. The destination and `.blit-partial-*` both contained `finished` and still named the same inode. Recover the staging alias safely or give the retry a fresh inode before writing payload bytes. [Fallback cleanup](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/copy/file_copy/resume.rs:870) · [Partial reuse](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/copy/file_copy/resume.rs:253) |
+| Medium | **Use macOS’s exclusive rename.** A vacant-name resume fails on a macOS volume that refuses hard links even when it supports `renameatx_np(RENAME_EXCL)`. Try that operation first and test both vacant and occupied destinations on such a volume. [Platform branch](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/copy/file_copy/resume.rs:820) |
+
+I read `AGENTS.md` and resolved the requested head with `git rev-parse`. For the independent guard, I removed the default sink cleanup call. `a_skip_reaches_the_sink_it_wraps` observed zero calls instead of one and failed. I restored the source, verified its Git blob against the pin, and the same test passed.
+
+Linux formatting and strict Clippy passed. The Linux workspace suite had **2,030 passed, 0 failed, 2 ignored**. Windows GNU cross-target Clippy passed. macOS cross-target Clippy stopped in BLAKE3’s C build on incompatible headers. Runtime verification was Linux-only, and GitHub listed no CI run for this head. I removed the disposable export.
+
+```text
+base: 101451278c8e9bc50933710c3045a48c4c3b3ce0
+head: e3ea9517efac7df68aad9a621c65cf50fdc072dc
+capability_ok: true
+guard_confirmed: true
+```

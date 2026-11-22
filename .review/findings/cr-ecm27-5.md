@@ -1,9 +1,9 @@
 # cr-ecm27-5: a sink that only forgets was no longer told of a skip
 
 **Severity**: MEDIUM — a sink that implements `forget_resume` and inherits `skip_record` kept its state on the data plane: the base revision's skip test, run at head, saw no cleanup call
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r29` (Codex openreview, 2026-11-22) reviewed `10145127..e3ea9517` — the five `combined-r28` fixes — with `guard_confirmed: true`: "I would keep the whole-file fallback for failed metadata reads, cleanup in the default `skip_record`, and Linux's atomic no-replace rename."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm27-5`)
+**Commit**: `25ecc388`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r28` over `e025a3e2..10145127` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r28.codex.md`. It completes cr-ecm26-6 (`1cf8782c`).
 
 ## Evidence
