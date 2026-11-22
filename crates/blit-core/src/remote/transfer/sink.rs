@@ -1688,8 +1688,15 @@ impl TransferSink for FsTransferSink {
         let prepared = self
             .create_stream_destination(&dst, header.windows_metadata.as_ref())
             .await;
+        // cr-ecm16-2: which file a run that keeps what exists made.
+        let mut made = None;
         let mode = match prepared {
-            Ok(file) => FsRecordMode::Real { file: Some(file) },
+            Ok(file) => {
+                if self.config.ignore_existing {
+                    made = file.metadata().await.ok().as_ref().and_then(file_identity);
+                }
+                FsRecordMode::Real { file: Some(file) }
+            }
             Err(error)
                 if !failure_is_containable(&self.dst_root, &header.relative_path, &error) =>
             {
@@ -1697,12 +1704,9 @@ impl TransferSink for FsTransferSink {
             }
             Err(error) => FsRecordMode::Discard(error),
         };
-        Ok(Box::new(FsRecordWriter::new(
-            self,
-            header.clone(),
-            dst,
-            mode,
-        )))
+        let mut writer = FsRecordWriter::new(self, header.clone(), dst, mode);
+        writer.made = made;
+        Ok(Box::new(writer))
     }
 
     fn root(&self) -> &Path {
@@ -1740,6 +1744,10 @@ struct FsRecordWriter<'a> {
     /// `abort_on_drop.rs`, which would otherwise leave a truncated file
     /// that looks finished).
     guard_armed: bool,
+    /// cr-ecm16-2: which file a run that keeps what exists made at the
+    /// name. The record lands, and its target is settled, only while that
+    /// file stands there.
+    made: Option<(u64, u64)>,
 }
 
 impl<'a> FsRecordWriter<'a> {
@@ -1753,6 +1761,7 @@ impl<'a> FsRecordWriter<'a> {
             written: 0,
             reported: 0,
             guard_armed,
+            made: None,
         }
     }
 
@@ -1765,7 +1774,7 @@ impl<'a> FsRecordWriter<'a> {
             FsRecordMode::Real { file } => file.take().and_then(|file| file.try_into_std().ok()),
             _ => None,
         };
-        let settled = settle_failed_target(&self.dst, handle, self.header.size, OnFailure::Remove);
+        let settled = settle_own_target(&self.dst, handle, self.header.size, self.made);
         if let Some(note) = &settled.note {
             log::warn!("{}: {note}", self.dst.display());
         }
@@ -1925,16 +1934,22 @@ impl RecordWriter for FsRecordWriter<'_> {
                 // failed flush has nothing to stamp, so its handle is
                 // dropped immediately.
                 let std_file = file.into_std().await;
-                let stamped = written.and_then(|()| {
-                    #[cfg(test)]
-                    sink.handle_metadata_stamps
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    stamp_streamed_metadata_via_handle(&std_file, &dst, &header, &sink.config)
-                });
+                let made = self.made;
+                let stamped = written
+                    .and_then(|()| {
+                        #[cfg(test)]
+                        sink.handle_metadata_stamps
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        stamp_streamed_metadata_via_handle(&std_file, &dst, &header, &sink.config)
+                    })
+                    // cr-ecm16-2: delivered only if what was written is
+                    // what stands at the name. A file moved over it while
+                    // the record arrived is kept, and this one did not land.
+                    .and_then(|windows_bytes| still_its_own(&dst, made).map(|()| windows_bytes));
                 let stamped = stamped.map_err(|error| {
                     FailedWrite::settled(
                         error,
-                        settle_failed_target(&dst, Some(std_file), header.size, OnFailure::Remove),
+                        settle_own_target(&dst, Some(std_file), header.size, made),
                     )
                 });
                 match stamped {
@@ -1959,6 +1974,13 @@ impl RecordWriter for FsRecordWriter<'_> {
 
     async fn abort(mut self: Box<Self>, reason: &str) -> Result<SinkOutcome> {
         let path = self.header.relative_path.clone();
+        // cr-ecm16-2: a write still in flight keeps the file from being
+        // handed back as the writer's own handle, and settling it then
+        // cannot say which file it made. Let it finish first.
+        if let FsRecordMode::Real { file: Some(file) } = &mut self.mode {
+            use tokio::io::AsyncWriteExt as _;
+            let _ = file.flush().await;
+        }
         let settled = if matches!(self.mode, FsRecordMode::Real { .. }) {
             self.remove_partial()
         } else {
@@ -2216,6 +2238,55 @@ fn identity_at(path: &Path) -> Option<(u64, u64)> {
         .and_then(file_identity)
 }
 
+/// cr-ecm16-2: which file a run that keeps what exists made at a name —
+/// `None` for any other run, and where the system does not say.
+fn claimed_identity(made: &std::fs::File, new_only: bool) -> Option<(u64, u64)> {
+    new_only
+        .then(|| made.metadata().ok().as_ref().and_then(file_identity))
+        .flatten()
+}
+
+/// cr-ecm16-2: the file this write made, `made`, still stands at `dst` —
+/// or nothing said it was made. Another file there now is somebody's: the
+/// write has not landed, and [`THE_NAME_IS_TAKEN`] says why.
+fn still_its_own(dst: &Path, made: Option<(u64, u64)>) -> Result<()> {
+    if made.is_some_and(|made| identity_at(dst) != Some(made)) {
+        eyre::bail!(THE_NAME_IS_TAKEN);
+    }
+    Ok(())
+}
+
+/// [`settle_failed_target`] for a write that made `dst` (cr-ecm16-2): the
+/// target is settled only while the file it made stands there. Another
+/// file there now is somebody's, and is left alone; nothing of this
+/// write's is at the name.
+fn settle_own_target(
+    dst: &Path,
+    handle: Option<std::fs::File>,
+    source_size: u64,
+    made: Option<(u64, u64)>,
+) -> Settled {
+    if made.is_some_and(|made| identity_at(dst) != Some(made)) {
+        return REMOVED;
+    }
+    settle_failed_target(dst, handle, source_size, OnFailure::Remove)
+}
+
+/// cr-ecm16-2: the handle a shard member was written through, kept for
+/// its metadata tail where the tail can go through it (Unix: its time and
+/// mode). Elsewhere it is closed first, as it always was.
+fn keep_for_the_tail(file: std::fs::File) -> Option<std::fs::File> {
+    #[cfg(unix)]
+    {
+        Some(file)
+    }
+    #[cfg(not(unix))]
+    {
+        drop(file);
+        None
+    }
+}
+
 /// Test seam (cr-ecm15-1): runs once a run that keeps what exists has
 /// made a destination's name and before it writes — where another hand
 /// can put its own file under that name. Prefix-keyed like the copy
@@ -2345,6 +2416,20 @@ fn settle_failed_target(
     };
     match on_failure {
         OnFailure::Remove => {
+            // cr-ecm15-1: a write that still holds its file removes the
+            // destination only while THAT file stands at the name. One
+            // put there since — moved over the name while a record was
+            // arriving — is somebody's: the write's own copy is gone from
+            // the name already, and nothing there is removed. (Where the
+            // system does not say which file is which, as before.)
+            let held = handle
+                .as_ref()
+                .and_then(|file| file.metadata().ok())
+                .as_ref()
+                .and_then(file_identity);
+            if held.is_some_and(|held| identity_at(dst) != Some(held)) {
+                return REMOVED;
+            }
             if remove().is_ok() {
                 return REMOVED;
             }
@@ -2964,25 +3049,25 @@ fn write_tar_shard_payload(
                 let open_started = std::time::Instant::now();
                 let mut file = create_to_write(&f.dest_path, new_only)
                     .map_err(|error| creation_failed(&f.dest_path, error, new_only))?;
+                let made = claimed_identity(&file, new_only);
                 let open = open_started.elapsed();
                 // cr-win-1: the target is overwritten from here; any
                 // failure settles it (same as `write_shard_member`).
-                let landed = (|| -> Result<_> {
-                    let write_started = std::time::Instant::now();
-                    file.write_all(&f.contents)
-                        .with_context(|| format!("write {}", f.dest_path.display()))?;
-                    let write = write_started.elapsed();
-                    let close_started = std::time::Instant::now();
-                    drop(file);
-                    let close = close_started.elapsed();
-
-                    let metadata_started = std::time::Instant::now();
-                    let windows_bytes = stamp_shard_member_metadata(&f)?;
-                    let metadata = metadata_started.elapsed();
-                    Ok((windows_bytes, write, close, metadata))
-                })()
-                .map_err(|error| discard_failed_member(&f, error))?;
-                let (windows_bytes, write, close, metadata) = landed;
+                let write_started = std::time::Instant::now();
+                let wrote = file
+                    .write_all(&f.contents)
+                    .with_context(|| format!("write {}", f.dest_path.display()));
+                let write = write_started.elapsed();
+                let close_started = std::time::Instant::now();
+                let held = keep_for_the_tail(file);
+                let close = close_started.elapsed();
+                let metadata_started = std::time::Instant::now();
+                let landed = wrote
+                    .and_then(|()| stamp_shard_member_metadata(&f, held.as_ref()))
+                    .and_then(|bytes| still_its_own(&f.dest_path, made).map(|()| bytes));
+                let metadata = metadata_started.elapsed();
+                let windows_bytes =
+                    landed.map_err(|error| discard_failed_member(&f, error, held, made))?;
                 Ok((
                     f.size.saturating_add(windows_bytes),
                     (mkdir, open, write, close, metadata, total_started.elapsed()),
@@ -3035,56 +3120,79 @@ fn write_shard_member(
     prepare_to_write(&file.dest_path, file.windows_metadata.as_ref(), new_only)?;
     // cr-ecm14-2: a run that keeps what exists creates, or fails — and a
     // name it could not take is not its to settle.
-    let target = create_to_write(&file.dest_path, new_only)
+    let mut target = create_to_write(&file.dest_path, new_only)
         .map_err(|error| creation_failed(&file.dest_path, error, new_only))?;
+    let made = claimed_identity(&target, new_only);
+    if new_only {
+        run_after_claim_hook(&file.dest_path);
+    }
     // cr-win-1: the target is overwritten from here, so any failure
     // settles it — a member whose bytes landed but whose tail failed must
     // not pass for a finished copy.
-    let landed = (|| -> Result<u64> {
-        use std::io::Write as _;
-        let mut target = target;
-        target
-            .write_all(&file.contents)
-            .with_context(|| format!("write {}", file.dest_path.display()))?;
-        drop(target);
-        stamp_shard_member_metadata(file)
-    })();
-    landed
+    //
+    // cr-ecm16-2: its time and mode go through the handle it was written
+    // through, and it lands only while the file this write made stands at
+    // its name. They were set by the name, after the handle was closed: a
+    // file moved over it meanwhile took this member's mode, and a failure
+    // removed it.
+    use std::io::Write as _;
+    let wrote = target
+        .write_all(&file.contents)
+        .with_context(|| format!("write {}", file.dest_path.display()));
+    let held = keep_for_the_tail(target);
+    wrote
+        .and_then(|()| stamp_shard_member_metadata(file, held.as_ref()))
+        .and_then(|bytes| still_its_own(&file.dest_path, made).map(|()| bytes))
         .map(|windows_bytes| file.size.saturating_add(windows_bytes))
-        .map_err(|error| discard_failed_member(file, error))
+        .map_err(|error| discard_failed_member(file, error, held, made))
 }
 
 /// Settle a shard member that failed after its target was created
-/// (cr-win-1).
+/// (cr-win-1) — only while the file this write made stands there
+/// (cr-ecm16-2).
 fn discard_failed_member(
     file: &super::tar_safety::ExtractedFile,
     error: eyre::Report,
+    held: Option<std::fs::File>,
+    made: Option<(u64, u64)>,
 ) -> FailedWrite {
     FailedWrite::settled(
         error,
-        settle_failed_target(&file.dest_path, None, file.size, OnFailure::Remove),
+        settle_own_target(&file.dest_path, held, file.size, made),
     )
 }
 
 /// Stamp a written shard member's metadata tail: named streams, mtime,
 /// Unix permissions, attributes. Returns the named-stream bytes applied.
 /// Shared by both rayon writers so the probed path measures exactly the
-/// work the probe-less path does.
-fn stamp_shard_member_metadata(file: &super::tar_safety::ExtractedFile) -> Result<u64> {
+/// work the probe-less path does. The time and mode go through `held`,
+/// the handle the member was written through, when there is one
+/// (cr-ecm16-2); by the name otherwise.
+fn stamp_shard_member_metadata(
+    file: &super::tar_safety::ExtractedFile,
+    held: Option<&std::fs::File>,
+) -> Result<u64> {
     run_metadata_tail_fault_hook(&file.dest_path)?;
     let windows_bytes =
         crate::windows_metadata::replace_streams(&file.dest_path, file.windows_metadata.as_ref())?;
     if let Some(ft) = file.mtime {
-        if let Err(e) = filetime::set_file_mtime(&file.dest_path, ft) {
+        let stamped = match held {
+            Some(held) => filetime::set_file_handle_times(held, None, Some(ft)),
+            None => filetime::set_file_mtime(&file.dest_path, ft),
+        };
+        if let Err(e) = stamped {
             log::warn!("set mtime on {}: {}", file.dest_path.display(), e);
         }
     }
     #[cfg(unix)]
     if let Some(perms) = file.permissions {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) =
-            std::fs::set_permissions(&file.dest_path, std::fs::Permissions::from_mode(perms))
-        {
+        let mode = std::fs::Permissions::from_mode(perms);
+        let set = match held {
+            Some(held) => held.set_permissions(mode),
+            None => std::fs::set_permissions(&file.dest_path, mode),
+        };
+        if let Err(e) = set {
             log::warn!("set permissions on {}: {}", file.dest_path.display(), e);
         }
     }
@@ -7282,6 +7390,222 @@ mod cr_win_1_tests {
                 FileTime::from_unix_time(1_600_000_000, 0)
             );
         }
+    }
+
+    /// cr-ecm15-1: a record that fails removes its destination only while
+    /// the file IT made stands there. A stream arriving over the wire is
+    /// written through one handle; a file moved over its name while it
+    /// arrived was removed when the record was given up — whatever the
+    /// run's options. That file is whole now, and nothing of the record's
+    /// is left; a record nobody interferes with is removed as ever.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_record_given_up_removes_only_the_file_it_made() {
+        for ignore_existing in [false, true] {
+            let tmp = tempdir().unwrap();
+            let dst = tmp.path().join("dst");
+            std::fs::create_dir_all(&dst).unwrap();
+            let sink = FsTransferSink::new(
+                tmp.path().to_path_buf(),
+                dst.clone(),
+                FsSinkConfig {
+                    ignore_existing,
+                    ..FsSinkConfig::default()
+                },
+            );
+            // Somebody's file, moved over the name once the record has
+            // made it and written to it.
+            let mut record = sink
+                .begin_record(&make_file_header("taken.bin", 10))
+                .await
+                .expect("a free name");
+            record.write(b"01234").await.unwrap();
+            let theirs = tmp.path().join("theirs");
+            std::fs::write(&theirs, b"somebody's file").unwrap();
+            std::fs::rename(&theirs, dst.join("taken.bin")).unwrap();
+            let outcome = record.abort("source: read error: injected").await.unwrap();
+            assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+            assert_eq!(
+                std::fs::read(dst.join("taken.bin")).unwrap(),
+                b"somebody's file",
+                "ignore_existing={ignore_existing}: the file put there is whole"
+            );
+
+            // And a record nobody interferes with leaves nothing.
+            let mut record = sink
+                .begin_record(&make_file_header("alone.bin", 10))
+                .await
+                .expect("a free name");
+            record.write(b"01234").await.unwrap();
+            record.abort("source: read error: injected").await.unwrap();
+            assert!(
+                !dst.join("alone.bin").exists(),
+                "ignore_existing={ignore_existing}: its own partial is removed"
+            );
+        }
+    }
+
+    /// cr-ecm16-2: a shard member written by a run that keeps what exists
+    /// lands only while the file it made stands at its name, and gives
+    /// its time and mode to that file alone. Another file moved over the
+    /// name before the tail — at the seam where a tail can fail — is
+    /// whole afterwards, keeps its own mode, and is not removed; the
+    /// member says the name is taken. A run that keeps nothing writes its
+    /// member as ever.
+    #[cfg(unix)]
+    #[test]
+    fn a_shard_member_lands_only_where_its_own_file_stands() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Hooked(PathBuf);
+        impl Drop for Hooked {
+            fn drop(&mut self) {
+                if let Ok(mut hooks) = AFTER_CLAIM_HOOKS.lock() {
+                    hooks.retain(|(prefix, _)| prefix != &self.0);
+                }
+                if let Ok(mut prefixes) = METADATA_TAIL_FAULT_PREFIXES.lock() {
+                    prefixes.retain(|prefix| prefix != &self.0);
+                }
+            }
+        }
+        let tmp = tempdir().unwrap();
+        let member = |name: &str| crate::remote::transfer::tar_safety::ExtractedFile {
+            rel: name.to_string(),
+            dest_path: tmp.path().join(name),
+            raw: None,
+            contents: b"new".to_vec(),
+            mtime: Some(FileTime::from_unix_time(1_600_000_000, 0)),
+            permissions: Some(0o600),
+            size: 3,
+            windows_metadata: None,
+        };
+        // Free: written, with its time and mode.
+        assert_eq!(write_shard_member(&member("free"), true).ok(), Some(3));
+        let landed = std::fs::metadata(tmp.path().join("free")).unwrap();
+        assert_eq!(landed.permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            FileTime::from_last_modification_time(&landed),
+            FileTime::from_unix_time(1_600_000_000, 0)
+        );
+
+        // Another file moved over the name once the member has made it;
+        // and the same with a tail that fails, which is the failure
+        // cleanup's turn.
+        for (name, tail_fails) in [("replaced", false), ("replaced-and-failed", true)] {
+            let theirs = tmp.path().join(format!("theirs-{name}"));
+            std::fs::write(&theirs, b"somebody's").unwrap();
+            std::fs::set_permissions(&theirs, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let dest = tmp.path().join(name);
+            let _hooked = {
+                let (theirs, at) = (theirs.clone(), dest.clone());
+                AFTER_CLAIM_HOOKS.lock().unwrap().push((
+                    dest.clone(),
+                    Arc::new(move |_: &Path| std::fs::rename(&theirs, &at).unwrap()),
+                ));
+                if tail_fails {
+                    METADATA_TAIL_FAULT_PREFIXES
+                        .lock()
+                        .unwrap()
+                        .push(dest.clone());
+                }
+                Hooked(dest.clone())
+            };
+            let failed = write_shard_member(&member(name), true).expect_err("the name is taken");
+            if !tail_fails {
+                assert!(
+                    format!("{:#}", failed.error).contains(THE_NAME_IS_TAKEN),
+                    "{:#}",
+                    failed.error
+                );
+            }
+            assert_eq!(
+                std::fs::read(&dest).unwrap(),
+                b"somebody's",
+                "{name}: whole"
+            );
+            let theirs_now = std::fs::metadata(&dest).unwrap();
+            assert_eq!(
+                theirs_now.permissions().mode() & 0o777,
+                0o644,
+                "{name}: its own mode"
+            );
+        }
+        // A run that keeps nothing: as ever.
+        assert_eq!(write_shard_member(&member("plain"), false).ok(), Some(3));
+        assert_eq!(std::fs::read(tmp.path().join("plain")).unwrap(), b"new");
+    }
+
+    /// cr-ecm16-2: a target settled WITHOUT its writer's handle — a record
+    /// dropped while a write was still in flight cannot have it back — is
+    /// removed only while the file the write noted it made stands there.
+    /// Another file at the name is left whole; with nothing noted, the
+    /// target is settled as it always was.
+    #[cfg(unix)]
+    #[test]
+    fn a_target_settled_without_its_handle_is_removed_only_if_it_is_its_own() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("made");
+        let made = std::fs::File::create(&dest).unwrap();
+        let noted = claimed_identity(&made, true);
+        assert!(noted.is_some());
+        assert!(
+            claimed_identity(&made, false).is_none(),
+            "noted only when kept"
+        );
+        drop(made);
+        let theirs = tmp.path().join("theirs");
+        std::fs::write(&theirs, b"somebody's").unwrap();
+        std::fs::rename(&theirs, &dest).unwrap();
+        let settled = settle_own_target(&dest, None, 10, noted);
+        assert!(settled.removed, "nothing of the write's is at the name");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"somebody's");
+
+        // Its own file: removed.
+        let own = tmp.path().join("own");
+        let made = std::fs::File::create(&own).unwrap();
+        let noted = claimed_identity(&made, true);
+        drop(made);
+        assert!(settle_own_target(&own, None, 10, noted).removed);
+        assert!(!own.exists());
+    }
+
+    /// cr-ecm16-2: a record — a file streamed in — written by a run that
+    /// keeps what exists counts as delivered only if what it wrote stands
+    /// at its name. A file moved over the name while the record arrived
+    /// was written to as if it were the record's, and the record reported
+    /// delivered. Now it is whole, and the record says the name is taken.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_record_counts_as_delivered_only_where_its_own_file_stands() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                ignore_existing: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let mut record = sink
+            .begin_record(&make_file_header("taken.bin", 10))
+            .await
+            .expect("a free name");
+        record.write(b"01234").await.unwrap();
+        let theirs = tmp.path().join("theirs");
+        std::fs::write(&theirs, b"somebody's file").unwrap();
+        std::fs::rename(&theirs, dst.join("taken.bin")).unwrap();
+        record.write(b"56789").await.unwrap();
+        let said = match record.commit().await {
+            Ok(outcome) => format!("{outcome:?}"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(said.contains(THE_NAME_IS_TAKEN), "{said}");
+        assert_eq!(
+            std::fs::read(dst.join("taken.bin")).unwrap(),
+            b"somebody's file"
+        );
     }
 
     /// cr-ecm14-2: a whole shard written by a run that keeps what exists:
