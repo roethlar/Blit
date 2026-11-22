@@ -20,6 +20,7 @@ pub mod find;
 pub mod find_name;
 pub mod fs_capability;
 pub mod fs_enum;
+pub(crate) mod held;
 pub mod job_log;
 pub mod job_record;
 pub mod listing;

@@ -18,7 +18,6 @@
 //!   `du` and `df` print them.
 
 use std::collections::HashSet;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -74,11 +73,27 @@ pub fn disk_usage(
     options: UsageOptions,
     emit: &mut dyn FnMut(UsageEvent) -> Result<(), Stopped>,
 ) -> Result<(), UsageEnd> {
-    let metadata = fs::symlink_metadata(start).map_err(UsageEnd::Start)?;
+    disk_usage_in(start, None, options, emit)
+}
+
+/// [`disk_usage`] in `root` — a daemon's module — and never out of it
+/// (cr-uv9-1): the start is reached from `root` one name at a time, and
+/// every directory below it is read through what holds it
+/// ([`crate::held`]), never by a path looked up again.
+pub fn disk_usage_in(
+    start: &Path,
+    root: Option<&Path>,
+    options: UsageOptions,
+    emit: &mut dyn FnMut(UsageEvent) -> Result<(), Stopped>,
+) -> Result<(), UsageEnd> {
+    let start = crate::held::Start::at(start, root).map_err(UsageEnd::Start)?;
+    let metadata = start.look().map_err(UsageEnd::Start)?;
     let mut links = HardLinks::default();
     if !metadata.is_dir() {
         // A file, or a link, given as the start: its own line, always.
-        let allocated_bytes = links.count(start, &metadata).unwrap_or(0);
+        let allocated_bytes = links
+            .count(start.several_names(&metadata), &metadata)
+            .unwrap_or(0);
         return emit(UsageEvent::Row(UsageRow {
             relative_path: PathBuf::new(),
             allocated_bytes,
@@ -87,11 +102,11 @@ pub fn disk_usage(
     }
     let within = |depth: u32| options.max_depth.is_none_or(|max| depth <= max);
     let mut frames: Vec<Frame> = Vec::new();
-    match fs::read_dir(start) {
+    match start.enter() {
         Ok(entries) => frames.push(Frame {
             relative_path: PathBuf::new(),
             entries,
-            total: allocated(&metadata),
+            total: metadata.allocated,
         }),
         Err(error) => {
             emit(UsageEvent::Failure(UsageFailure {
@@ -102,7 +117,7 @@ pub fn disk_usage(
             .map_err(UsageEnd::Stopped)?;
             return emit(UsageEvent::Row(UsageRow {
                 relative_path: PathBuf::new(),
-                allocated_bytes: allocated(&metadata),
+                allocated_bytes: metadata.allocated,
             }))
             .map_err(UsageEnd::Stopped);
         }
@@ -110,7 +125,7 @@ pub fn disk_usage(
     while let Some(frame) = frames.last_mut() {
         // The depth of this directory's ENTRIES below the start.
         let depth = frames_depth(frame);
-        let next = frame.entries.next();
+        let next = frame.entries.next_entry();
         let Some(entry) = next else {
             // Everything below this directory is counted: its line, then
             // its total into the directory above.
@@ -140,9 +155,10 @@ pub fn disk_usage(
                 continue;
             }
         };
-        let relative_path = frame.relative_path.join(entry.file_name());
-        // `DirEntry::metadata` never follows a link.
-        let metadata = match entry.metadata() {
+        let relative_path = frame.relative_path.join(entry.name());
+        // The entry itself, looked up in the directory that holds it:
+        // never through a link.
+        let metadata = match frame.entries.look(&entry) {
             Ok(metadata) => metadata,
             Err(error) => {
                 emit(UsageEvent::Failure(UsageFailure {
@@ -155,16 +171,16 @@ pub fn disk_usage(
             }
         };
         if metadata.is_dir() {
-            match fs::read_dir(entry.path()) {
+            match frame.entries.enter(&entry) {
                 Ok(entries) => frames.push(Frame {
                     relative_path,
                     entries,
-                    total: allocated(&metadata),
+                    total: metadata.allocated,
                 }),
                 Err(error) => {
                     // Its own space still counts and its line is still
                     // printed, as `du` does for a directory it cannot open.
-                    let own = allocated(&metadata);
+                    let own = metadata.allocated;
                     frame.total += own;
                     emit(UsageEvent::Failure(UsageFailure {
                         relative_path: relative_path.clone(),
@@ -185,7 +201,8 @@ pub fn disk_usage(
         }
         // A file, a link or anything else that is not a directory. One
         // already counted under another name adds nothing and has no line.
-        let Some(size) = links.count(&entry.path(), &metadata) else {
+        let several = frame.entries.several_names(&entry, &metadata);
+        let Some(size) = links.count(several, &metadata) else {
             continue;
         };
         frame.total += size;
@@ -212,7 +229,7 @@ pub enum UsageEnd {
 /// One directory being read.
 struct Frame {
     relative_path: PathBuf,
-    entries: fs::ReadDir,
+    entries: crate::held::Directory,
     /// Its own space and everything counted below it so far.
     total: u64,
 }
@@ -223,26 +240,6 @@ fn frames_depth(frame: &Frame) -> u32 {
     frame.relative_path.components().count() as u32 + 1
 }
 
-/// The space the operating system has allocated to one entry: its 512-byte
-/// blocks on Unix (what `du` counts — a sparse file's holes are not there,
-/// a directory's own blocks are); its length where the system does not
-/// report allocation, a directory counting nothing of its own.
-pub(crate) fn allocated(metadata: &fs::Metadata) -> u64 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        metadata.blocks() * 512
-    }
-    #[cfg(not(unix))]
-    {
-        if metadata.is_dir() {
-            0
-        } else {
-            metadata.len()
-        }
-    }
-}
-
 /// The files with several names that have been counted already, by
 /// identity. Only such files are remembered, as in `du`.
 #[derive(Default)]
@@ -251,38 +248,16 @@ struct HardLinks {
 }
 
 impl HardLinks {
-    /// The space to count for the entry at `path`: its allocation, or
-    /// `None` when it is a file with several names already counted under
-    /// another of them.
-    fn count(&mut self, path: &Path, metadata: &fs::Metadata) -> Option<u64> {
-        if let Some(identity) = several_names(path, metadata) {
+    /// The space to count for an entry looked at: its allocation, or
+    /// `None` when it is a file with several names (`several`, its
+    /// identity) already counted under another of them.
+    fn count(&mut self, several: Option<(u64, u64)>, looked: &crate::held::Looked) -> Option<u64> {
+        if let Some(identity) = several {
             if !self.seen.insert(identity) {
                 return None;
             }
         }
-        Some(allocated(metadata))
-    }
-}
-
-/// The identity of a file that has more than one name; `None` for a file
-/// with one name (the usual case, which costs nothing more to learn on
-/// Unix) and for a directory.
-fn several_names(path: &Path, metadata: &fs::Metadata) -> Option<(u64, u64)> {
-    if metadata.is_dir() {
-        return None;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        let _ = path;
-        (metadata.nlink() > 1).then(|| (metadata.dev(), metadata.ino()))
-    }
-    #[cfg(not(unix))]
-    {
-        // The directory listing does not say how many names a file has;
-        // the file has to be opened to learn it (and its identity).
-        let (identity, names) = crate::transfers::filter::entry_identity(path)?;
-        (names > 1).then_some(identity)
+        Some(looked.allocated)
     }
 }
 
@@ -433,9 +408,48 @@ pub fn use_percent(space: &FilesystemSpace) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::tempdir;
 
     /// Every line `du` gives for `start`, and every failure, in order.
+    /// cr-uv9-1: a directory replaced by a link as the walk reaches it is
+    /// not gone into: nothing outside is counted, and the entry is one the
+    /// walk could not read.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_replaced_by_a_link_as_the_walk_reaches_it_is_not_counted_into() {
+        let tmp = tempfile::tempdir().unwrap();
+        let start = tmp.path().join("start");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(start.join("a")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(start.join("a/inside"), b"x").unwrap();
+        fs::write(outside.join("leaked"), vec![1u8; 65536]).unwrap();
+        let (a, out) = (start.join("a"), outside.clone());
+        let moved = tmp.path().join("a-was-here");
+        let _hook = crate::held::before_each_entering(move |path| {
+            if path == a.as_path() && !moved.exists() {
+                fs::rename(&a, &moved).unwrap();
+                std::os::unix::fs::symlink(&out, &a).unwrap();
+            }
+        });
+        let (rows, failures) = walk(
+            &start,
+            UsageOptions {
+                all_files: true,
+                max_depth: None,
+            },
+        );
+        assert!(
+            !rows.iter().any(|(path, _)| path.contains("leaked")),
+            "{rows:?}"
+        );
+        assert_eq!(
+            failures,
+            [("a".to_string(), "cannot read directory".to_string())]
+        );
+    }
+
     fn walk(start: &Path, options: UsageOptions) -> (Vec<(String, u64)>, Vec<(String, String)>) {
         let (mut rows, mut failures) = (Vec::new(), Vec::new());
         let text = |path: &Path| path.to_string_lossy().replace('\\', "/");

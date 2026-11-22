@@ -196,43 +196,20 @@ fn counted() {
     LOOKUPS.with(|count| count.set(count.get() + 1));
 }
 
-/// Look `path` up: itself, or what a link there points to.
-fn look_up(path: &Path, through_a_link: bool) -> io::Result<fs::Metadata> {
-    counted();
-    if through_a_link {
-        fs::metadata(path)
-    } else {
-        fs::symlink_metadata(path)
-    }
-}
-
-fn facts(metadata: &fs::Metadata, at: &Path) -> Facts {
-    let kind = Kind::of(metadata.file_type());
+/// What the long form prints of an entry looked at; `link_target` is
+/// asked of a link alone.
+fn facts(looked: &crate::held::Looked, link_target: impl FnOnce() -> io::Result<PathBuf>) -> Facts {
     Facts {
-        kind,
-        size: metadata.len(),
-        mtime_seconds: crate::wire_metadata::mtime_seconds(metadata).unwrap_or(0),
-        allocated_bytes: crate::disk_usage::allocated(metadata),
-        link_target: if kind == Kind::Link {
-            fs::read_link(at).ok()
+        kind: looked.kind,
+        size: looked.len,
+        mtime_seconds: looked.mtime_seconds,
+        allocated_bytes: looked.allocated,
+        link_target: if looked.kind == Kind::Link {
+            link_target().ok()
         } else {
             None
         },
     }
-}
-
-/// The directory above the one at `directory`. Above `root` — a module's
-/// root, the whole of what its asker may see — there is nothing: its `..`
-/// is itself, as the `..` of `/` is `/`.
-fn above(directory: &Path, root: Option<&Path>) -> io::Result<PathBuf> {
-    let canonical = fs::canonicalize(directory)?;
-    if root == Some(canonical.as_path()) {
-        return Ok(canonical);
-    }
-    Ok(match canonical.parent() {
-        Some(parent) => parent.to_path_buf(),
-        None => canonical,
-    })
 }
 
 /// Whether `ls` hides a name unless all are asked for.
@@ -263,47 +240,63 @@ fn shown_as_the_link(error: &io::Error) -> bool {
 /// each entry. `start` is written for the system as it was typed: with a
 /// separator after it, the system looks through a link standing there and
 /// refuses what is no directory. `root`, when given, is the directory
-/// nothing above which is shown (a path with no link in it).
+/// nothing above which is shown (a path with no link in it) — and
+/// nothing out of which is read (cr-uv9-1): the start is reached from it
+/// one name at a time, and the directory listed is read through what
+/// holds it ([`crate::held`]), never by a path looked up again.
 pub fn list(
     start: &Path,
     root: Option<&Path>,
     options: ListOptions,
     emit: &mut dyn FnMut(ListEvent) -> Result<(), Stopped>,
 ) -> Result<(), ListEnd> {
-    let own = look_up(start, false).map_err(ListEnd::Access)?;
+    let held = crate::held::Start::at(start, root).map_err(ListEnd::Access)?;
+    counted();
+    let own = held.look().map_err(ListEnd::Access)?;
     let mut directory = own.is_dir();
-    if own.file_type().is_symlink() && !options.link_itself {
+    let mut through = false;
+    if own.kind == Kind::Link && !options.link_itself {
         // `ls link` lists the directory a link points to. A link to
         // anything else, or to nothing, is a line of its own — and one
         // that cannot be followed for another reason is an operand that
         // cannot be looked up (cr-uv5-5).
-        directory = match look_up(start, true) {
+        counted();
+        directory = match held.look_through() {
             Ok(target) => target.is_dir(),
             Err(error) if shown_as_the_link(&error) => false,
             Err(error) => return Err(ListEnd::Access(error)),
         };
+        through = directory;
     }
     if !directory {
         let itself = Entry {
             name: OsString::new(),
-            facts: options.facts.then(|| facts(&own, start)),
+            facts: options.facts.then(|| facts(&own, || held.link_target())),
         };
         return emit(ListEvent::Itself(itself)).map_err(ListEnd::Stopped);
     }
-    let entries = fs::read_dir(start).map_err(ListEnd::Open)?;
+    let opened = if through {
+        held.enter_through()
+    } else {
+        held.enter()
+    };
+    let mut entries = opened.map_err(ListEnd::Open)?;
     emit(ListEvent::Directory).map_err(ListEnd::Stopped)?;
     if options.all {
         for name in [".", ".."] {
             let name = OsString::from(name);
             let mut found = None;
             if options.facts {
+                counted();
                 let looked_up = if name == "." {
-                    look_up(start, true)
+                    entries.itself()
                 } else {
-                    above(start, root).and_then(|above| look_up(&above, true))
+                    entries.above()
                 };
                 match looked_up {
-                    Ok(metadata) => found = Some(facts(&metadata, start)),
+                    Ok(looked) => {
+                        found = Some(facts(&looked, || Err(io::ErrorKind::InvalidInput.into())))
+                    }
                     Err(error) => emit(ListEvent::Failure {
                         name: name.clone(),
                         error,
@@ -314,17 +307,17 @@ pub fn list(
             emit(ListEvent::Entry(Entry { name, facts: found })).map_err(ListEnd::Stopped)?;
         }
     }
-    for entry in entries {
+    while let Some(entry) = entries.next_entry() {
         let entry = entry.map_err(ListEnd::Read)?;
-        let name = entry.file_name();
+        let name = entry.name().to_os_string();
         if !options.all && hidden(&name) {
             continue;
         }
         let mut found = None;
         if options.facts {
             counted();
-            match entry.metadata() {
-                Ok(metadata) => found = Some(facts(&metadata, &entry.path())),
+            match entries.look(&entry) {
+                Ok(looked) => found = Some(facts(&looked, || entries.link_target(&entry))),
                 Err(error) => emit(ListEvent::Failure {
                     name: name.clone(),
                     error,
@@ -364,6 +357,79 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cr-uv9-1: what is listed, and how a listing ended.
+    #[cfg(unix)]
+    fn listed_in(start: &Path, root: &Path) -> (Vec<String>, Option<String>) {
+        let mut names = Vec::new();
+        let ended = list(start, Some(root), ListOptions::default(), &mut |event| {
+            if let ListEvent::Entry(entry) = event {
+                names.push(entry.name.to_string_lossy().into_owned());
+            }
+            Ok(())
+        });
+        names.sort();
+        (names, ended.err().map(|end| format!("{end:?}")))
+    }
+
+    /// cr-uv9-1: a listing reads what its root holds and nothing outside
+    /// it. A start replaced by a link as it is about to be read, or a
+    /// directory on the way to what a start links to, is an error — by
+    /// its path the listing went wherever the link pointed — and a start
+    /// whose link leads out of the root is one it cannot look up.
+    #[cfg(unix)]
+    #[test]
+    fn a_listing_reads_nothing_outside_its_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let top = tmp.path().canonicalize().unwrap();
+        let root = top.join("module");
+        let outside = top.join("outside");
+        fs::create_dir_all(root.join("dir")).unwrap();
+        fs::create_dir_all(root.join("real")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(root.join("dir/inside"), b"").unwrap();
+        fs::write(root.join("real/inside"), b"").unwrap();
+        fs::write(outside.join("leaked"), b"").unwrap();
+        std::os::unix::fs::symlink("real", root.join("link")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
+        assert_eq!(listed_in(&root.join("dir"), &root).0, ["inside"]);
+        assert_eq!(listed_in(&root.join("link/"), &root).0, ["inside"]);
+
+        // The start, replaced as it is about to be read.
+        let (dir, out) = (root.join("dir"), outside.clone());
+        let moved = top.join("dir-was-here");
+        let hook = crate::held::before_each_entering(move |path| {
+            if path == dir.as_path() && !moved.exists() {
+                fs::rename(&dir, &moved).unwrap();
+                std::os::unix::fs::symlink(&out, &dir).unwrap();
+            }
+        });
+        let (names, ended) = listed_in(&root.join("dir"), &root);
+        drop(hook);
+        assert!(names.is_empty() && ended.is_some(), "{names:?} {ended:?}");
+
+        // A directory on the way to what a start links to, replaced once
+        // the link has been followed and the listing goes there.
+        let (real, out) = (root.join("real"), outside.clone());
+        let moved = top.join("real-was-here");
+        let mut seen = 0;
+        let hook = crate::held::before_each_entering(move |path| {
+            if path == real.as_path() {
+                seen += 1;
+                if seen == 2 {
+                    fs::rename(&real, &moved).unwrap();
+                    std::os::unix::fs::symlink(&out, &real).unwrap();
+                }
+            }
+        });
+        let (names, ended) = listed_in(&root.join("link/"), &root);
+        drop(hook);
+        assert!(names.is_empty() && ended.is_some(), "{names:?} {ended:?}");
+
+        // A link out of the root.
+        let (names, ended) = listed_in(&root.join("out/"), &root);
+        assert!(names.is_empty() && ended.is_some(), "{names:?} {ended:?}");
+    }
 
     /// A directory with every kind of entry the rules turn on.
     fn tree() -> tempfile::TempDir {

@@ -22,7 +22,6 @@
 //! itself ([`lookups`] counts, for the guard).
 
 use crate::find_name::NamePattern;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -40,16 +39,13 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn of(kind: fs::FileType) -> Option<Self> {
-        if kind.is_symlink() {
-            Some(Self::Link)
-        } else if kind.is_dir() {
-            Some(Self::Directory)
-        } else if kind.is_file() {
-            Some(Self::File)
-        } else {
+    fn of(kind: crate::listing::Kind) -> Option<Self> {
+        match kind {
+            crate::listing::Kind::Link => Some(Self::Link),
+            crate::listing::Kind::Directory => Some(Self::Directory),
+            crate::listing::Kind::File => Some(Self::File),
             // A socket, a device, a pipe: an entry, and none of the three.
-            None
+            _ => None,
         }
     }
 }
@@ -168,11 +164,11 @@ impl FindOptions {
     }
 
     /// The tests the entry itself answers — a link as the link it is.
-    fn facts_hold(&self, metadata: &fs::Metadata) -> bool {
-        self.sizes.iter().all(|test| test.holds(metadata.len()))
+    fn facts_hold(&self, metadata: &crate::held::Looked) -> bool {
+        self.sizes.iter().all(|test| test.holds(metadata.len))
             && (self.ages.is_empty() || {
                 // The time as the filesystem keeps it, every digit.
-                let written = metadata.modified().map_or(0, nanos_of);
+                let written = metadata.mtime_nanos;
                 self.ages
                     .iter()
                     .all(|test| test.holds(self.now_nanos, written))
@@ -237,15 +233,10 @@ pub fn name_bytes(name: &std::ffi::OsStr) -> std::borrow::Cow<'_, [u8]> {
 /// [`FindEvent::Walking`].
 pub const ENTRIES_BETWEEN_WORDS: usize = 1024;
 
-/// The one place the walk asks the filesystem about a single entry.
-fn look_up(path: &Path, follow: bool) -> io::Result<fs::Metadata> {
+/// Each time the walk asks the filesystem about a single entry.
+fn counted() {
     #[cfg(test)]
     LOOKUPS.with(|count| count.set(count.get() + 1));
-    if follow {
-        fs::metadata(path)
-    } else {
-        fs::symlink_metadata(path)
-    }
 }
 
 /// `find` from `start`, whose base name for the name tests is
@@ -258,11 +249,29 @@ pub fn find(
     options: &FindOptions,
     emit: &mut dyn FnMut(FindEvent) -> Result<(), Stopped>,
 ) -> Result<(), FindEnd> {
-    let mut metadata = look_up(start, false).map_err(FindEnd::Start)?;
-    if options.follow_start && metadata.file_type().is_symlink() {
-        metadata = look_up(start, true).map_err(FindEnd::Start)?;
+    find_in(start, None, start_name, options, emit)
+}
+
+/// [`find`] in `root` — a daemon's module — and never out of it
+/// (cr-uv9-1): the start is reached from `root` one name at a time, and
+/// every directory below it is read through what holds it
+/// ([`crate::held`]), never by a path looked up again.
+pub fn find_in(
+    start: &Path,
+    root: Option<&Path>,
+    start_name: &[u8],
+    options: &FindOptions,
+    emit: &mut dyn FnMut(FindEvent) -> Result<(), Stopped>,
+) -> Result<(), FindEnd> {
+    let start = crate::held::Start::at(start, root).map_err(FindEnd::Start)?;
+    counted();
+    let mut metadata = start.look().map_err(FindEnd::Start)?;
+    let through = options.follow_start && metadata.kind == crate::listing::Kind::Link;
+    if through {
+        counted();
+        metadata = start.look_through().map_err(FindEnd::Start)?;
     }
-    let kind = Kind::of(metadata.file_type());
+    let kind = Kind::of(metadata.kind);
     let start_holds = options.holds(start_name, kind) && options.facts_hold(&metadata);
     let entered = kind == Some(Kind::Directory) && options.max_depth != Some(0);
     // Contents first: a start that is entered is given last.
@@ -277,7 +286,7 @@ pub fn find(
     /// One directory being read.
     struct Frame {
         relative_path: PathBuf,
-        entries: fs::ReadDir,
+        entries: crate::held::Directory,
         /// The directory is itself found, and is given once everything
         /// in it has been (`contents_first`).
         found_last: bool,
@@ -286,7 +295,12 @@ pub fn find(
     }
     let mut frames: Vec<Frame> = Vec::new();
     emit(FindEvent::Walking).map_err(FindEnd::Stopped)?;
-    match fs::read_dir(start) {
+    let opened = if through {
+        start.enter_through()
+    } else {
+        start.enter()
+    };
+    match opened {
         Ok(entries) => frames.push(Frame {
             relative_path: PathBuf::new(),
             entries,
@@ -306,7 +320,7 @@ pub fn find(
         }
     }
     while let Some(frame) = frames.last_mut() {
-        let Some(entry) = frame.entries.next() else {
+        let Some(entry) = frame.entries.next_entry() else {
             let read = frames.pop().expect("the frame just read");
             if read.found_last {
                 emit(FindEvent::Found(read.relative_path, Some(Kind::Directory)))
@@ -331,11 +345,16 @@ pub fn find(
                 continue;
             }
         };
-        let name = entry.file_name();
+        let name = entry.name().to_os_string();
         let relative_path = frame.relative_path.join(&name);
         // The listing's own word for the entry: no lookup, and never
-        // through a link.
-        let kind = match entry.file_type() {
+        // through a link — or, where the listing does not say, a look at
+        // the entry itself, as the system's own word on it was.
+        let listed = match entry.kind() {
+            Some(kind) => Ok(kind),
+            None => frame.entries.look(&entry).map(|looked| looked.kind),
+        };
+        let kind = match listed {
             Ok(kind) => Kind::of(kind),
             Err(error) => {
                 emit(FindEvent::Failure(FindFailure {
@@ -350,7 +369,7 @@ pub fn find(
         // The entry itself is asked only when a test needs what only it
         // can say, and only once its name and kind have held (AC-7).
         if holds && options.needs_facts() {
-            match facts_of(&entry) {
+            match facts_of(&frame.entries, &entry) {
                 Ok(metadata) => holds = options.facts_hold(&metadata),
                 Err(error) => {
                     holds = false;
@@ -375,7 +394,12 @@ pub fn find(
             continue;
         }
         emit(FindEvent::Walking).map_err(FindEnd::Stopped)?;
-        match fs::read_dir(entry.path()) {
+        let entered = frames
+            .last()
+            .expect("the frame being read")
+            .entries
+            .enter(&entry);
+        match entered {
             Ok(entries) => frames.push(Frame {
                 relative_path,
                 entries,
@@ -399,20 +423,50 @@ pub fn find(
 
 /// What the entry itself says — its size, when it was written — a link as
 /// the link it is. One lookup, counted like the start's.
-fn facts_of(entry: &fs::DirEntry) -> io::Result<fs::Metadata> {
-    #[cfg(test)]
-    LOOKUPS.with(|count| count.set(count.get() + 1));
-    entry.metadata()
+fn facts_of(
+    directory: &crate::held::Directory,
+    entry: &crate::held::Listed,
+) -> io::Result<crate::held::Looked> {
+    counted();
+    directory.look(entry)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn write(root: &Path, rel: &str) {
         let path = root.join(rel);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, b"x").unwrap();
+    }
+
+    /// cr-uv9-1: a directory replaced by a link as the walk reaches it is
+    /// not gone into: the walk enters what it listed, held, never through
+    /// a link put in its place — by its path it went wherever the link
+    /// pointed. The entry is one the walk could not read.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_replaced_by_a_link_as_the_walk_reaches_it_is_not_gone_into() {
+        let tmp = tempfile::tempdir().unwrap();
+        let start = tmp.path().join("start");
+        write(&start, "a/inside");
+        write(tmp.path(), "outside/leaked");
+        let (a, outside) = (start.join("a"), tmp.path().join("outside"));
+        let moved = tmp.path().join("a-was-here");
+        let _hook = crate::held::before_each_entering(move |path| {
+            if path == a.as_path() && !moved.exists() {
+                fs::rename(&a, &moved).unwrap();
+                std::os::unix::fs::symlink(&outside, &a).unwrap();
+            }
+        });
+        let (found, failed) = walk(&start, "start", &FindOptions::default());
+        assert!(
+            !found.iter().any(|path| path.contains("leaked")),
+            "{found:?}"
+        );
+        assert_eq!(failed, ["a"]);
     }
 
     /// What a walk found, sorted, and what it could not read.

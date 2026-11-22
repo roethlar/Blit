@@ -1,6 +1,8 @@
 use super::{DiskUsageSender, FindSender, RmSender};
-use blit_core::disk_usage::{disk_usage, os_reason, Stopped, UsageEnd, UsageEvent, UsageOptions};
-use blit_core::find::{find, FindEnd, FindEvent, FindOptions};
+use blit_core::disk_usage::{
+    disk_usage_in, os_reason, Stopped, UsageEnd, UsageEvent, UsageOptions,
+};
+use blit_core::find::{find_in, FindEnd, FindEvent, FindOptions};
 use blit_core::generated::{
     du_reply, find_paths_reply, rm_reply, DfReply, DuFailure, DuReply, DuRow, FindBatch,
     FindFailure, FindPath, FindPathsReply, RmDone, RmFailure, RmFailures, RmReply,
@@ -128,8 +130,13 @@ fn start_is_contained(module_root: &Path, start_abs: PathBuf) -> Result<Readable
     // could find, by then, a link to somewhere else at the root's path.
     // Something there that cannot be resolved — a link to nothing, a ring
     // — is judged below, and refused, as before.
+    //
+    // cr-uv9-1: and nothing at a way to it — a folder above it made a file
+    // (`Not a directory`) — is the same: it was refused as no way out.
     match fs::symlink_metadata(module_root) {
-        Err(error) if error.kind() == NotFound => return Ok(Readable::Gone(error)),
+        Err(error) if matches!(error.kind(), NotFound | NotADirectory) => {
+            return Ok(Readable::Gone(error))
+        }
         _ => {}
     }
     // The module itself, however it was typed, is in the module. Judged
@@ -167,7 +174,15 @@ fn start_is_contained(module_root: &Path, start_abs: PathBuf) -> Result<Readable
     }
     blit_core::path_safety::verify_contained(module_root, &looked_up)
         .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))?;
-    Ok(Readable::At(start_abs))
+    // cr-uv9-1: a start that cannot be looked up is told with the error
+    // this look saw, and nothing is read by its name again — it was read
+    // again, by a path that could by then lead out of the module. One that
+    // can is read in the module, through what holds each directory from
+    // the root down (`blit_core::held`).
+    match fs::symlink_metadata(&start_abs) {
+        Ok(_) => Ok(Readable::At(start_abs)),
+        Err(error) => Ok(Readable::Gone(error)),
+    }
 }
 
 /// What [`start_is_contained`] makes of a read's start (cr-uv8-2): the
@@ -175,8 +190,8 @@ fn start_is_contained(module_root: &Path, start_abs: PathBuf) -> Result<Readable
 #[derive(Debug)]
 enum Readable {
     At(PathBuf),
-    /// Nothing at the module root's path: this error, told as the
-    /// command tells a start that is not there.
+    /// Nothing at the start's path, or the module root's (cr-uv9-1): this
+    /// error, told as the command tells a start that is not there.
     Gone(std::io::Error),
 }
 
@@ -603,7 +618,7 @@ pub(crate) fn stream_disk_usage(
                 .map_err(|Stopped| closed());
         }
     };
-    match disk_usage(&start_abs, options, &mut emit) {
+    match disk_usage_in(&start_abs, Some(&module_root), options, &mut emit) {
         Ok(()) => Ok(()),
         Err(UsageEnd::Stopped(Stopped)) => Err(closed()),
         Err(UsageEnd::Start(error)) => {
@@ -882,7 +897,13 @@ pub(crate) fn stream_find(
                 found.reply(failure(&failed.relative_path, &failed.error, false))
             }
         };
-        find(&start_abs, &start_name, &options, &mut emit)
+        find_in(
+            &start_abs,
+            Some(&module_root),
+            &start_name,
+            &options,
+            &mut emit,
+        )
     };
     let closed = || response_channel_closed("sending find result");
     match walked {
@@ -1741,11 +1762,28 @@ mod typed_operand_tests {
             );
         }
         fs::rename(&moved, &module).unwrap();
-        // Not looked up, in the module: the read goes on, and fails there.
+        // Not looked up, in the module: told with the error seen there,
+        // and nothing read by the name again (cr-uv9-1).
         for typed in ["ring/x", "ring/x/y", "ring/", "missing/x"] {
             let at = start(typed).below(&module);
-            assert!(start_is_contained(&module, at).is_ok(), "{typed:?}");
+            assert!(
+                matches!(start_is_contained(&module, at), Ok(Readable::Gone(_))),
+                "{typed:?}"
+            );
         }
+        // cr-uv9-1: a module a folder above which was made a file is not
+        // there either, and is told so: it was refused as no way out.
+        let deeper = top.join("above").join("module");
+        fs::create_dir_all(&deeper).unwrap();
+        fs::rename(top.join("above"), top.join("above-was-here")).unwrap();
+        fs::write(top.join("above"), b"a file").unwrap();
+        assert!(
+            matches!(
+                start_is_contained(&deeper, start("").below(&deeper)),
+                Ok(Readable::Gone(ref error)) if error.kind() == std::io::ErrorKind::NotADirectory
+            ),
+            "a folder above the module made a file"
+        );
         // By a way out of the module: refused, whatever cannot be looked
         // up beyond the link that leaves it.
         for typed in ["out", "out/", "out/ring/x", "out/missing"] {
