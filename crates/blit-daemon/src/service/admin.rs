@@ -121,8 +121,28 @@ fn start_is_contained(module_root: &Path, start_abs: &Path) -> Result<(), Status
     // The module itself, however it was typed, is in the module. Judged
     // by its ancestors — as what is no directory, typed as one, is — a
     // module that is one file would be out of itself.
+    //
+    // cr-uv6-2: but it is the module only while its path still resolves
+    // to ITSELF. The root is a path with no link in it, resolved when the
+    // daemon started; a link put in its place since leads somewhere
+    // else, and a listing of "the module" was a listing of that — passed
+    // here on the strength of the two paths being spelled alike. Asked
+    // of the root as the daemon holds it, with nothing after it: a
+    // module that is one file, typed as a directory, is still the module,
+    // and is told `Not a directory` by the read.
     if start_abs.components().eq(module_root.components()) {
-        return Ok(());
+        return match fs::canonicalize(module_root) {
+            Ok(now) if now == module_root => Ok(()),
+            Ok(now) => Err(Status::permission_denied(format!(
+                "path containment: the module's root '{}' now resolves to '{}'",
+                module_root.display(),
+                now.display()
+            ))),
+            Err(error) => Err(Status::permission_denied(format!(
+                "path containment: the module's root '{}' cannot be resolved: {error}",
+                module_root.display()
+            ))),
+        };
     }
     let mut looked_up = start_abs.to_path_buf();
     while let Err(error) = fs::canonicalize(&looked_up) {
@@ -1583,6 +1603,20 @@ mod typed_operand_tests {
                 );
             }
         }
+        // cr-uv6-2: a link put where the module's root was. The module
+        // is then somewhere else, and neither it nor anything below it
+        // is read — a listing of the root showed the other directory.
+        let moved = top.join("was-the-module");
+        fs::rename(&module, &moved).unwrap();
+        symlink(&outside, &module).unwrap();
+        for typed in ["", ".", "ring", "ring/x"] {
+            let at = start(typed).below(&module);
+            let refused = start_is_contained(&module, &at).expect_err(typed);
+            assert_eq!(refused.code(), tonic::Code::PermissionDenied, "{typed:?}");
+            assert!(refused.message().contains("path containment"), "{typed:?}");
+        }
+        fs::remove_file(&module).unwrap();
+        fs::rename(&moved, &module).unwrap();
         // Not looked up, in the module: the read goes on, and fails there.
         for typed in ["ring/x", "ring/x/y", "ring/", "missing/x"] {
             let at = start(typed).below(&module);
