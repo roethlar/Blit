@@ -6699,6 +6699,23 @@ async fn compute_resume_block_hashes(
                 ))
             }
         };
+        // cr-ecm19-4: the file the blocks will patch is made private and
+        // writable by its owner (600) through the handle it is hashed
+        // through, BEFORE it is hashed: a destination of mode 644 stayed
+        // 644 while blocks of the source landed in it. One whose mode this
+        // run may not set is not reused — removed, and none of it hashed:
+        // every block is sent, into a fresh private partial. One that can
+        // be neither is hashed and patched as it stands, as a copy into it
+        // would write it.
+        #[cfg(unix)]
+        match crate::copy::make_partial_private(&file, &dst) {
+            Ok(true) => {}
+            Ok(false) => return Ok(Vec::new()),
+            Err(error) => log::warn!(
+                "the resume partial {} could not be made private: {error}",
+                dst.display()
+            ),
+        }
         let mut hashes = Vec::new();
         let mut buf = vec![0u8; block_size];
         loop {
@@ -10975,6 +10992,33 @@ mod own_incomplete_copy_tests {
         assert!(
             !account.holds_content(b"alone", &alone),
             "a file of one name is not read"
+        );
+    }
+
+    /// cr-ecm19-4: the file a wire resume's blocks will patch is made
+    /// private (600) through the handle it is hashed through, before it is
+    /// hashed: a destination of mode 644 stayed 644 while blocks of the
+    /// source landed in it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_resume_partial_is_made_private_before_it_is_hashed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        std::fs::write(root.join("r.bin"), vec![3u8; 5000]).unwrap();
+        std::fs::set_permissions(root.join("r.bin"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let hashes = compute_resume_block_hashes(&root, None, "r.bin", None, 1024)
+            .await
+            .unwrap();
+        assert_eq!(hashes.len(), 5);
+        assert_eq!(
+            std::fs::metadata(root.join("r.bin"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
         );
     }
 

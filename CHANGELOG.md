@@ -274,8 +274,9 @@ part, and a job you can list, read, re-run and retry.
   being written** (mode 600), and gets its source's mode when it is
   complete. A partial was made with the usual mask — readable by all —
   and one of a read-only source could not be written by the retry. A
-  partial left by an earlier run that others could read, or that this
-  run cannot write, is not resumed: it is replaced by a fresh one.
+  destination already there is patched in place, as ever, and is its
+  owner's alone meanwhile — over the network too; one whose mode this
+  run may not set is replaced by a fresh one.
 - `check` of a single file against a destination of another name
   compares the two. With the source named in `--files-from`, or a
   pattern naming either file, it looked for one file's name on the

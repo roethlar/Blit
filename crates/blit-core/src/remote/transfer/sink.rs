@@ -2500,18 +2500,34 @@ fn mark_unfinished(file: &std::fs::File, source_size: u64) -> std::io::Result<()
 /// patched either, so its blocks fail and the file is reported. Created
 /// when missing, as the block writes would create it.
 fn hold_partial_unfinished(dst: &Path, total_size: u64) {
-    let held = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dst)
-        .and_then(|file| {
-            let meta = file.metadata()?;
-            if meta.is_file() && meta.len() <= total_size {
-                mark_unfinished(&file, total_size)?;
+    // cr-ecm19-4: a partial made here is made private (600), and one here
+    // already is made so through this handle — whatever the mask it was
+    // made under — before a block patches it.
+    let mut hold = std::fs::OpenOptions::new();
+    hold.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        hold.mode(0o600);
+    }
+    let held = hold.open(dst).and_then(|file| {
+        while_a_file_is_made(dst);
+        let meta = file.metadata()?;
+        #[cfg(unix)]
+        if meta.is_file() {
+            use std::os::unix::fs::PermissionsExt as _;
+            if let Err(error) = file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
+                log::warn!(
+                    "the resume partial {} could not be made private: {error}",
+                    dst.display()
+                );
             }
-            Ok(())
-        });
+        }
+        if meta.is_file() && meta.len() <= total_size {
+            mark_unfinished(&file, total_size)?;
+        }
+        Ok(())
+    });
     if let Err(error) = held {
         log::warn!(
             "could not hold the resume partial {} unfinished: {error}",
@@ -3507,10 +3523,12 @@ async fn patch_file_block(dst: &Path, offset: u64, bytes: Vec<u8>) -> Result<Sin
     // Resume blocks patch existing files at offset; we want to create
     // if missing but never truncate (subsequent block records share
     // the file).
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
+    // cr-ecm19-4: a partial a block write makes is made private (600).
+    let mut block = tokio::fs::OpenOptions::new();
+    block.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    block.mode(0o600);
+    let mut file = block
         .open(dst)
         .await
         .with_context(|| format!("opening {} for block write", dst.display()))?;
@@ -7461,6 +7479,57 @@ mod cr_win_1_tests {
             .unwrap();
         assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
         assert_eq!(std::fs::read(&at).unwrap(), b"somebody's", "untouched");
+    }
+
+    /// cr-ecm19-4: a partial the wire resume works on is private and
+    /// writable by its owner (600) while blocks patch it: one held before
+    /// the first block — made now, and private from the moment it exists,
+    /// or there already — and one a block write makes. They kept what
+    /// they had — a destination of mode 644 stayed 644 while blocks of a
+    /// private file landed in it — or were made with the usual mask.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_wire_partial_is_private_while_blocks_patch_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        struct Hooked(PathBuf);
+        impl Drop for Hooked {
+            fn drop(&mut self) {
+                if let Ok(mut hooks) = WHILE_A_FILE_IS_MADE_HOOKS.lock() {
+                    hooks.retain(|(prefix, _)| prefix != &self.0);
+                }
+            }
+        }
+        let tmp = tempdir().unwrap();
+        let mode_of = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let fresh = tmp.path().join("fresh");
+        let seen: Arc<std::sync::Mutex<Option<u32>>> = Arc::default();
+        let _hooked = {
+            let seen = Arc::clone(&seen);
+            WHILE_A_FILE_IS_MADE_HOOKS.lock().unwrap().push((
+                fresh.clone(),
+                Arc::new(move |at: &Path| {
+                    *seen.lock().unwrap() =
+                        Some(std::fs::metadata(at).unwrap().permissions().mode() & 0o777);
+                }),
+            ));
+            Hooked(fresh.clone())
+        };
+        hold_partial_unfinished(&fresh, 10);
+        let made_as = seen.lock().unwrap().expect("the seam ran");
+        assert_eq!(made_as & 0o077, 0, "made as {made_as:o}");
+        assert_eq!(mode_of(&fresh), 0o600);
+
+        let there = tmp.path().join("there");
+        std::fs::write(&there, b"old").unwrap();
+        std::fs::set_permissions(&there, std::fs::Permissions::from_mode(0o644)).unwrap();
+        hold_partial_unfinished(&there, 10);
+        assert_eq!(mode_of(&there), 0o600);
+
+        let by_a_block = tmp.path().join("by-a-block");
+        patch_file_block(&by_a_block, 0, b"0123".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(mode_of(&by_a_block) & 0o077, 0);
     }
 
     /// cr-ecm13-1: under `--ignore-existing` the local route's resume copy
