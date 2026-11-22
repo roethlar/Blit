@@ -1605,6 +1605,15 @@ impl TransferSink for FsTransferSink {
         Ok(SinkOutcome::failed(relative_path, reason))
     }
 
+    /// cr-ecm26-6: the source will not deliver the file: what was noted for
+    /// it goes, whoever tells the sink — the session's wrappers or the
+    /// public receive pipeline, which calls it directly. It was left to the
+    /// wrappers, and a caller of the sink itself kept the file's baseline.
+    async fn skip_record(&self, relative_path: &str, reason: &str) -> Result<SinkOutcome> {
+        self.forget_resume(relative_path);
+        Ok(SinkOutcome::failed(relative_path, reason))
+    }
+
     /// cr-ecm22-5, cr-ecm24-8, cr-ecm25-6: everything noted for a record
     /// that closed — its held handle, its baseline, a failure held for it,
     /// its raw name and its hold's mark.
@@ -8074,6 +8083,31 @@ mod cr_win_1_tests {
             .unwrap();
         assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
         assert_eq!(std::fs::read(&at).unwrap(), b"somebody's", "not marked");
+    }
+
+    /// cr-ecm26-6: the sink's own skip — as the public receive pipeline calls
+    /// it — leaves nothing noted for the file. Left to the session's
+    /// wrappers, it kept the baseline.
+    #[tokio::test]
+    async fn the_sinks_own_skip_leaves_nothing_noted() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        sink.note_resume_baseline("r.bin", ResumeBaseline::Whole);
+        let outcome = sink
+            .skip_record("r.bin", "source: cannot open")
+            .await
+            .unwrap();
+        assert!(outcome.file_failed("r.bin"), "{outcome:?}");
+        assert_eq!(sink.baselines_noted(), 0, "its baseline gone");
     }
 
     /// cr-ecm25-6: a file the source skips leaves nothing noted for it: its

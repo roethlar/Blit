@@ -2388,10 +2388,10 @@ impl TransferSink for NeedListSink {
     /// Contract v7: a SKIP record — Granted → Failed, or a violation.
     async fn skip_record(&self, relative_path: &str, reason: &str) -> Result<SinkOutcome> {
         self.ledger().skip(relative_path)?;
-        // cr-ecm25-6: and the sink it wraps forgets what it noted for the
-        // file: settled here alone, a resumed file's baseline stayed.
-        self.inner.forget_resume(relative_path);
-        Ok(SinkOutcome::failed(relative_path, reason))
+        // cr-ecm25-6, cr-ecm26-6: and the skip goes on to the sink it wraps,
+        // whose own skip forgets what it noted for the file: settled here
+        // alone, a resumed file's baseline stayed.
+        self.inner.skip_record(relative_path, reason).await
     }
 
     fn forget_resume(&self, relative_path: &str) {
@@ -2907,9 +2907,10 @@ mod tests {
         assert_eq!(holds.0.load(Ordering::SeqCst), 1);
     }
 
-    /// cr-ecm25-6: a file the source skips on the data plane reaches the sink
-    /// this one wraps, to forget what it noted for it. The ledger settled
-    /// it here, and the sink kept the file's baseline.
+    /// cr-ecm25-6, cr-ecm26-6: a file the source skips on the data plane
+    /// goes on to the sink this one wraps — its skip — once the ledger has
+    /// settled it. The ledger settled it here, and the sink kept the file's
+    /// baseline.
     #[tokio::test]
     async fn a_skip_reaches_the_sink_it_wraps() {
         struct Forgets(std::sync::atomic::AtomicUsize, PathBuf);
@@ -2918,8 +2919,9 @@ mod tests {
             async fn write_payload(&self, _payload: PreparedPayload) -> Result<SinkOutcome> {
                 Ok(SinkOutcome::default())
             }
-            fn forget_resume(&self, _path: &str) {
+            async fn skip_record(&self, path: &str, reason: &str) -> Result<SinkOutcome> {
                 self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(SinkOutcome::failed(path, reason))
             }
             fn root(&self) -> &Path {
                 &self.1
@@ -2952,7 +2954,7 @@ mod tests {
             .await
             .unwrap();
         assert!(outcome.file_failed("r.bin"), "{outcome:?}");
-        assert_eq!(forgets.0.load(Ordering::SeqCst), 1, "the sink forgets");
+        assert_eq!(forgets.0.load(Ordering::SeqCst), 1, "the sink is told");
     }
 
     /// cr-ecm22-5: a resume record the source closes failed on the data
