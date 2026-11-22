@@ -2896,16 +2896,24 @@ fn hold_hashed(
     total_size: u64,
     hashed: &crate::moved::Version,
 ) -> Result<Option<HeldPartial>> {
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
     // Had as it was hashed — to be read — made private and writable
     // through that, and only then opened to be written: the same file.
-    let held = std::fs::File::open(dst)
+    // cr-ecm28-1: neither open waits — a FIFO put in its place cannot hold
+    // the hold — and what was opened is a regular file.
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(dst)
         .with_context(|| format!("opening the resume partial {}", dst.display()))?;
     while_a_file_is_made(dst);
     // cr-ecm20-1: and the file hashed, unchanged since: blocks that match
     // what was hashed are not sent, and another file, or this one written
     // since, would be patched into the wrong bytes and reported complete.
     let seen = held.metadata()?;
+    if !seen.is_file() {
+        eyre::bail!("{} is no longer a regular file", dst.display());
+    }
     if crate::moved::Version::of(&seen) != *hashed {
         eyre::bail!(
             "{} is not the file whose blocks were hashed: it changed, or was replaced, since",
@@ -2927,7 +2935,12 @@ fn hold_hashed(
         error
     };
     let file = hashed_reopen_fault(dst)
-        .and_then(|()| std::fs::OpenOptions::new().write(true).open(dst))
+        .and_then(|()| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(dst)
+        })
         .with_context(|| format!("opening the resume partial {}", dst.display()))
         .map_err(undo)?;
     let same = held.metadata().and_then(|was| {
@@ -8227,6 +8240,62 @@ mod cr_win_1_tests {
             .await
             .unwrap();
         assert!(outcome.file_failed("r.bin"), "{outcome:?}");
+    }
+
+    /// cr-ecm28-1: a FIFO put in a hashed file's place before its hold does
+    /// not hold the hold: it is opened without waiting, found no regular
+    /// file, and the file fails. Opened to be read, it waited for a writer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fifo_put_in_a_hashed_files_place_does_not_hold_the_hold() {
+        use std::os::unix::fs::FileTypeExt as _;
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let at = dst.join("r.bin");
+        std::fs::write(&at, b"0123456789").unwrap();
+        sink.note_resume_baseline(
+            "r.bin",
+            ResumeBaseline::Hashed(crate::moved::Version::of(&std::fs::metadata(&at).unwrap())),
+        );
+        std::fs::remove_file(&at).unwrap();
+        let name = std::ffi::CString::new(at.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `name` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+        let held = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            sink.hold_resume_partial("r.bin", 10),
+        )
+        .await;
+        let Ok(held) = held else {
+            // A writer lets the waiting open go, so the test can end.
+            let _ = std::fs::OpenOptions::new().write(true).open(&at);
+            panic!("the hold waited on the FIFO");
+        };
+        held.unwrap();
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "r.bin".to_string(),
+                total_size: 10,
+                mtime_seconds: 0,
+                permissions: 0o600,
+                windows_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert!(outcome.file_failed("r.bin"), "{outcome:?}");
+        assert!(std::fs::symlink_metadata(&at)
+            .unwrap()
+            .file_type()
+            .is_fifo());
     }
 
     /// cr-ecm28-4: a wire resume's hashed hold that cannot mark its partial

@@ -6734,7 +6734,21 @@ async fn compute_resume_block_hashes(
             // file's — sends it whole. It ended the transfer.
             Err(_) => return whole(),
         }
-        let Ok(mut file) = std::fs::File::open(&dst) else {
+        // cr-ecm28-1: opened without waiting — a FIFO put in the file's place
+        // after the look cannot hold the hashing — and what was opened is a
+        // regular file (asked below), or the file comes whole.
+        after_the_hashed_look(&dst);
+        let opened = {
+            let mut open = std::fs::OpenOptions::new();
+            open.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                open.custom_flags(libc::O_NONBLOCK);
+            }
+            open.open(&dst)
+        };
+        let Ok(mut file) = opened else {
             return whole();
         };
         // cr-ecm20-2: hashing changes nothing — it changed the file's mode,
@@ -6753,7 +6767,7 @@ async fn compute_resume_block_hashes(
             return whole();
         };
         // And asked again of the file opened, which the hashes are of.
-        if !reusable(&found) {
+        if !found.is_file() || !reusable(&found) {
             return whole();
         }
         // cr-ecm21-2: the hashes are of the file AS IT WAS BEFORE THEY WERE
@@ -6823,6 +6837,33 @@ fn between_hashed_blocks(_path: &Path) {
     #[cfg(test)]
     {
         let hooks: Vec<BetweenHashedBlocksHook> = BETWEEN_HASHED_BLOCKS_HOOKS
+            .lock()
+            .map(|hooks| {
+                hooks
+                    .iter()
+                    .filter(|(at, _)| at == _path)
+                    .map(|(_, hook)| Arc::clone(hook))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for hook in hooks {
+            hook(_path);
+        }
+    }
+}
+
+/// Test seam (cr-ecm28-1): runs once a destination being hashed has been
+/// looked at by its path and before it is opened — for a test to put
+/// something else there. Keyed by path. Production never sets it.
+#[cfg(test)]
+pub(crate) static AFTER_THE_HASHED_LOOK_HOOKS: std::sync::Mutex<
+    Vec<(PathBuf, BetweenHashedBlocksHook)>,
+> = std::sync::Mutex::new(Vec::new());
+
+fn after_the_hashed_look(_path: &Path) {
+    #[cfg(test)]
+    {
+        let hooks: Vec<BetweenHashedBlocksHook> = AFTER_THE_HASHED_LOOK_HOOKS
             .lock()
             .map(|hooks| {
                 hooks
@@ -11317,6 +11358,51 @@ mod own_incomplete_copy_tests {
                 .await
                 .unwrap();
         assert!(hashes.is_empty(), "two names: not reused");
+        assert_eq!(baseline, ResumeBaseline::Whole);
+    }
+
+    /// cr-ecm28-1: a FIFO put in a destination's place after the hashing's
+    /// look does not hold the hashing: it is opened without waiting, found
+    /// no regular file, and the file comes whole. Opened to be read, it
+    /// waited for a writer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fifo_put_in_a_hashed_files_place_does_not_hold_the_hashing() {
+        use crate::remote::transfer::sink::ResumeBaseline;
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let at = root.join("r.bin");
+        std::fs::write(&at, vec![3u8; 5000]).unwrap();
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o600)).unwrap();
+        {
+            let at = at.clone();
+            AFTER_THE_HASHED_LOOK_HOOKS.lock().unwrap().push((
+                at.clone(),
+                Arc::new(move |_: &Path| {
+                    std::fs::remove_file(&at).unwrap();
+                    let name = std::ffi::CString::new(at.as_os_str().as_encoded_bytes()).unwrap();
+                    // SAFETY: `name` is a NUL-terminated path that outlives the call.
+                    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+                }),
+            ));
+        }
+        let hashed = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            compute_resume_block_hashes(&root, None, "r.bin", None, Some(0o100600), 1024),
+        )
+        .await;
+        AFTER_THE_HASHED_LOOK_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(path, _)| path != &at);
+        let Ok(hashed) = hashed else {
+            // A writer lets the waiting open go, so the test can end.
+            let _ = std::fs::OpenOptions::new().write(true).open(&at);
+            panic!("the hashing waited on the FIFO");
+        };
+        let (hashes, baseline) = hashed.unwrap();
+        assert!(hashes.is_empty());
         assert_eq!(baseline, ResumeBaseline::Whole);
     }
 
