@@ -643,7 +643,7 @@ impl TransferSource for DestSubtreeExcludedSource {
         filter: Option<FileFilter>,
         unreadable_paths: Arc<StdMutex<Vec<String>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
-        self.scan_with_metadata_policy(filter, unreadable_paths, true)
+        self.scan_with_metadata_policy(filter, unreadable_paths, true, false)
     }
 
     fn scan_without_windows_metadata(
@@ -651,7 +651,7 @@ impl TransferSource for DestSubtreeExcludedSource {
         filter: Option<FileFilter>,
         unreadable_paths: Arc<StdMutex<Vec<String>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
-        self.scan_with_metadata_policy(filter, unreadable_paths, false)
+        self.scan_with_metadata_policy(filter, unreadable_paths, false, false)
     }
 
     async fn prepare_payload(
@@ -681,8 +681,13 @@ impl TransferSource for DestSubtreeExcludedSource {
         self.inner.root()
     }
 
-    fn sightings(&self) -> Option<Arc<crate::moved::Sightings>> {
-        self.inner.sightings()
+    fn scan_seeing(
+        &self,
+        filter: Option<FileFilter>,
+        unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        preserve_windows_metadata: bool,
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        self.scan_with_metadata_policy(filter, unreadable_paths, preserve_windows_metadata, true)
     }
 }
 
@@ -692,8 +697,12 @@ impl DestSubtreeExcludedSource {
         filter: Option<FileFilter>,
         unreadable_paths: Arc<StdMutex<Vec<String>>>,
         preserve_windows_metadata: bool,
+        seeing: bool,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
-        let (mut inner_rx, mut scan) = if preserve_windows_metadata {
+        let (mut inner_rx, mut scan) = if seeing {
+            self.inner
+                .scan_seeing(filter, unreadable_paths, preserve_windows_metadata)
+        } else if preserve_windows_metadata {
             self.inner.scan(filter, unreadable_paths)
         } else {
             self.inner

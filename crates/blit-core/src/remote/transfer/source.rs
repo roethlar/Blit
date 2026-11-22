@@ -60,6 +60,10 @@ pub struct SourceScan {
     /// cr-g3fix6-2: what the walk pruned, when a [`FilteredSource`] that
     /// records it ran this scan; complete once [`Self::finish`] returns.
     pruned: Option<Arc<crate::enumeration::PrunedPaths>>,
+    /// cr-uv6-4: what THIS scan's walk saw of each file, when it was asked
+    /// to record it ([`TransferSource::scan_seeing`]); complete once
+    /// [`Self::finish`] returns.
+    sightings: Option<Arc<crate::moved::Sightings>>,
 }
 
 impl SourceScan {
@@ -70,7 +74,22 @@ impl SourceScan {
                 reported: true,
             }],
             pruned: None,
+            sightings: None,
         }
+    }
+
+    /// cr-uv6-4: this scan carries what its walk records, for its caller
+    /// alone.
+    pub(crate) fn seeing(mut self, sightings: Arc<crate::moved::Sightings>) -> Self {
+        self.sightings = Some(sightings);
+        self
+    }
+
+    /// cr-uv6-4: what this scan's walk saw of each file — `None` unless it
+    /// was asked to record it and its source could. Complete after
+    /// [`Self::finish`].
+    pub fn sightings(&self) -> Option<Arc<crate::moved::Sightings>> {
+        self.sightings.clone()
     }
 
     /// cr-g3fix6-2: the relative paths (POSIX form, as the source spells
@@ -222,14 +241,26 @@ pub trait TransferSource: Send + Sync {
         false
     }
 
-    /// cr-uv5-2: where this source's walk records each file AS IT SAW IT
-    /// — the look a manifest entry's size and time come from — for a
-    /// move's account (`moved::Sightings`). A walk records only once it
-    /// has been asked to (`Sightings::begin`). Wrappers delegate; a
-    /// source that reads no disk answers `None`, and a move from it is
-    /// given no account and removes nothing.
-    fn sightings(&self) -> Option<Arc<crate::moved::Sightings>> {
-        None
+    /// cr-uv5-2, cr-uv6-4: a scan whose walk RECORDS each file as it saw
+    /// it — the look a manifest entry's size and time come from — for a
+    /// move's account (`moved::Sightings`). The record is this scan's,
+    /// handed back in the [`SourceScan`] (`SourceScan::sightings`): it
+    /// was kept on the source, which scans can share, and one walk wrote
+    /// over another's. Wrappers scan through their inner source's
+    /// `scan_seeing`. A source that reads no disk scans as ever and
+    /// records nothing: a move from it is given no account, and removes
+    /// nothing.
+    fn scan_seeing(
+        &self,
+        filter: Option<FileFilter>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        preserve_windows_metadata: bool,
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        if preserve_windows_metadata {
+            self.scan(filter, unreadable_paths)
+        } else {
+            self.scan_without_windows_metadata(filter, unreadable_paths)
+        }
     }
 }
 
@@ -397,9 +428,6 @@ pub struct FsTransferSource {
     /// per-file hydration failure is a skip, never a session fault.
     hydrator: crate::remote::transfer::payload::Hydrator,
     excluded_subtree: Option<PathBuf>,
-    /// cr-uv5-2: what this source's walk saw of each file, recorded once
-    /// a move has asked for it.
-    sightings: Arc<crate::moved::Sightings>,
 }
 
 impl FsTransferSource {
@@ -411,7 +439,6 @@ impl FsTransferSource {
             verbose: false,
             hydrator: crate::remote::transfer::payload::default_hydrator(),
             excluded_subtree: None,
-            sightings: Arc::default(),
         }
     }
 
@@ -471,7 +498,7 @@ impl TransferSource for FsTransferSource {
             self.phase_probe.clone(),
             open_for_scan,
             self.excluded_subtree.clone(),
-            self.sightings.wanted().then(|| Arc::clone(&self.sightings)),
+            None,
         );
         (headers, SourceScan::new(task))
     }
@@ -490,7 +517,7 @@ impl TransferSource for FsTransferSource {
             self.phase_probe.clone(),
             open_for_scan,
             self.excluded_subtree.clone(),
-            self.sightings.wanted().then(|| Arc::clone(&self.sightings)),
+            None,
         );
         (headers, SourceScan::new(task))
     }
@@ -517,8 +544,26 @@ impl TransferSource for FsTransferSource {
         &self.root
     }
 
-    fn sightings(&self) -> Option<Arc<crate::moved::Sightings>> {
-        Some(Arc::clone(&self.sightings))
+    fn scan_seeing(
+        &self,
+        filter: Option<FileFilter>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        preserve_windows_metadata: bool,
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        // cr-uv6-4: this scan's own record, and nobody else's.
+        let sightings = Arc::new(crate::moved::Sightings::default());
+        let (headers, task) = spawn_manifest_task_with(
+            self.root.clone(),
+            filter.unwrap_or_default(),
+            unreadable_paths,
+            preserve_windows_metadata,
+            EnumerationHeartbeat::new(self.progress.clone(), self.verbose),
+            self.phase_probe.clone(),
+            open_for_scan,
+            self.excluded_subtree.clone(),
+            Some(Arc::clone(&sightings)),
+        );
+        (headers, SourceScan::new(task).seeing(sightings))
     }
 }
 
@@ -976,8 +1021,13 @@ impl TransferSource for WindowsMetadataDroppingSource {
         self.inner.root()
     }
 
-    fn sightings(&self) -> Option<Arc<crate::moved::Sightings>> {
-        self.inner.sightings()
+    fn scan_seeing(
+        &self,
+        filter: Option<FileFilter>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        _preserve_windows_metadata: bool,
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        self.inner.scan_seeing(filter, unreadable_paths, false)
     }
 }
 
@@ -1011,7 +1061,7 @@ impl TransferSource for FilteredSource {
         _filter: Option<FileFilter>,
         unreadable_paths: Arc<Mutex<Vec<String>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
-        self.scan_with_metadata_policy(unreadable_paths, true)
+        self.scan_with_metadata_policy(unreadable_paths, true, false)
     }
 
     fn scan_without_windows_metadata(
@@ -1019,7 +1069,7 @@ impl TransferSource for FilteredSource {
         _filter: Option<FileFilter>,
         unreadable_paths: Arc<Mutex<Vec<String>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
-        self.scan_with_metadata_policy(unreadable_paths, false)
+        self.scan_with_metadata_policy(unreadable_paths, false, false)
     }
 
     async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
@@ -1057,8 +1107,13 @@ impl TransferSource for FilteredSource {
         self.inner.root()
     }
 
-    fn sightings(&self) -> Option<Arc<crate::moved::Sightings>> {
-        self.inner.sightings()
+    fn scan_seeing(
+        &self,
+        _filter: Option<FileFilter>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        preserve_windows_metadata: bool,
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        self.scan_with_metadata_policy(unreadable_paths, preserve_windows_metadata, true)
     }
 }
 
@@ -1067,6 +1122,7 @@ impl FilteredSource {
         &self,
         unreadable_paths: Arc<Mutex<Vec<String>>>,
         preserve_windows_metadata: bool,
+        seeing: bool,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         // audit-19: the inner walk gets the exclude rules alone, so an
         // excluded directory is pruned where it is walked — never read,
@@ -1083,7 +1139,10 @@ impl FilteredSource {
             }
             _ => None,
         };
-        let (header_rx, mut scan) = if preserve_windows_metadata {
+        let (header_rx, mut scan) = if seeing {
+            self.inner
+                .scan_seeing(pruning, unreadable_paths, preserve_windows_metadata)
+        } else if preserve_windows_metadata {
             self.inner.scan(pruning, unreadable_paths)
         } else {
             self.inner
@@ -1143,7 +1202,7 @@ impl TransferSource for ChecksummingSource {
         filter: Option<FileFilter>,
         unreadable_paths: Arc<Mutex<Vec<String>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
-        self.scan_with_metadata_policy(filter, unreadable_paths, true)
+        self.scan_with_metadata_policy(filter, unreadable_paths, true, false)
     }
 
     fn scan_without_windows_metadata(
@@ -1151,7 +1210,7 @@ impl TransferSource for ChecksummingSource {
         filter: Option<FileFilter>,
         unreadable_paths: Arc<Mutex<Vec<String>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
-        self.scan_with_metadata_policy(filter, unreadable_paths, false)
+        self.scan_with_metadata_policy(filter, unreadable_paths, false, false)
     }
 
     async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
@@ -1178,8 +1237,13 @@ impl TransferSource for ChecksummingSource {
         self.inner.root()
     }
 
-    fn sightings(&self) -> Option<Arc<crate::moved::Sightings>> {
-        self.inner.sightings()
+    fn scan_seeing(
+        &self,
+        filter: Option<FileFilter>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        preserve_windows_metadata: bool,
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        self.scan_with_metadata_policy(filter, unreadable_paths, preserve_windows_metadata, true)
     }
 }
 
@@ -1189,8 +1253,12 @@ impl ChecksummingSource {
         filter: Option<FileFilter>,
         unreadable_paths: Arc<Mutex<Vec<String>>>,
         preserve_windows_metadata: bool,
+        seeing: bool,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
-        let (mut header_rx, mut scan) = if preserve_windows_metadata {
+        let (mut header_rx, mut scan) = if seeing {
+            self.inner
+                .scan_seeing(filter, unreadable_paths, preserve_windows_metadata)
+        } else if preserve_windows_metadata {
             self.inner.scan(filter, unreadable_paths)
         } else {
             self.inner

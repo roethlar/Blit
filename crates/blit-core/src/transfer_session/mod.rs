@@ -2148,18 +2148,16 @@ async fn source_send_half(
         let unreadable: Arc<StdMutex<Vec<String>>> =
             instruments.unreadable.clone().unwrap_or_default();
         // cr-uv5-2: a move's account is written from what the walk SEES of
-        // each file, and the walk is asked to record it before it begins.
+        // each file — cr-uv6-4: THIS scan's walk, whose record comes back
+        // with it and is nobody else's.
         let moving = negotiated.open.source_removed_after
             && negotiated.open.initiator_role() == TransferRole::Destination;
-        let sightings = if moving {
-            scan_source.sightings()
+        let (mut header_rx, mut scan) = if moving {
+            scan_source.scan_seeing(None, Arc::clone(&unreadable), true)
         } else {
-            None
+            scan_source.scan(None, Arc::clone(&unreadable))
         };
-        if let Some(sightings) = &sightings {
-            sightings.begin();
-        }
-        let (mut header_rx, mut scan) = scan_source.scan(None, Arc::clone(&unreadable));
+        let sightings = scan.sightings();
         // cr-ecm14-1: the names a LISTED scan found, each by its own
         // bytes — what the account of what was not found is taken from.
         let listed = scan_source.files_from_scope().is_some();
@@ -10843,9 +10841,10 @@ mod own_incomplete_copy_tests {
         /// as a filter would leave one out — and what it saw.
         async fn walked(root: &Path) -> (Arc<crate::moved::Sightings>, Vec<u128>) {
             let source = FsTransferSource::new(root.to_path_buf());
-            let sightings = source.sightings().expect("a source on a disk keeps them");
-            sightings.begin();
-            let (mut headers, mut scan) = source.scan(None, Arc::default());
+            let (mut headers, mut scan) = source.scan_seeing(None, Arc::default(), true);
+            let sightings = scan
+                .sightings()
+                .expect("a walk of a disk records what it sees");
             let mut listed = Vec::new();
             while let Some(header) = headers.recv().await {
                 if header.relative_path != "unlisted" {
@@ -10941,6 +10940,126 @@ mod own_incomplete_copy_tests {
         let sole = sightings.account(&one, &listed);
         assert_eq!(sole.len(), 1);
         assert!(held_of(sole).holds(b"", &now(&one)));
+    }
+
+    /// cr-uv6-4: what a walk saw is that SCAN's. Two scans of one source
+    /// — a source the caller shares between sessions — each keep their
+    /// own record: the first walk's account holds a file as the first walk
+    /// saw it, after a second walk saw it changed. They were kept on the
+    /// source, and the second walk cleared the first one's record and
+    /// wrote its own over it — one move's account then held a file as
+    /// another walk had seen it. A scan not asked to record keeps nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn two_scans_of_one_source_keep_their_own_record() {
+        use crate::moved::Version;
+        use crate::remote::transfer::source::FsTransferSource;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("src");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("f"), b"first").unwrap();
+        let source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(root.clone()));
+        let walk = |source: Arc<dyn TransferSource>| async move {
+            let (mut headers, mut scan) = source.scan_seeing(None, Arc::default(), true);
+            let mut listed = Vec::new();
+            while let Some(header) = headers.recv().await {
+                listed.push(crate::moved::name_key(own_name(&header)));
+            }
+            scan.finish().await.expect("the walk");
+            (scan.sightings().expect("recorded"), listed)
+        };
+        let now = || Version::of(&std::fs::symlink_metadata(root.join("f")).unwrap());
+        let held = |account: crate::moved::Account| {
+            let ticket = crate::moved::keep(account);
+            crate::moved::confirm(&ticket, &[]);
+            crate::moved::held(&[ticket])
+                .expect("kept")
+                .pop()
+                .expect("one")
+        };
+
+        let (first, first_listed) = walk(Arc::clone(&source)).await;
+        let as_first_saw = now();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        std::fs::write(root.join("f"), b"second, and longer").unwrap();
+        let (second, second_listed) = walk(Arc::clone(&source)).await;
+        let as_second_saw = now();
+        assert_ne!(as_first_saw, as_second_saw);
+
+        let first = held(first.account(&root, &first_listed));
+        assert!(first.holds(b"f", &as_first_saw), "the first walk's own");
+        assert!(!first.holds(b"f", &as_second_saw), "not the second walk's");
+        let second = held(second.account(&root, &second_listed));
+        assert!(second.holds(b"f", &as_second_saw));
+        assert!(!second.holds(b"f", &as_first_saw));
+
+        // A plain scan records nothing.
+        let (mut headers, mut scan) = source.scan(None, Arc::default());
+        while headers.recv().await.is_some() {}
+        scan.finish().await.expect("the walk");
+        assert!(scan.sightings().is_none());
+    }
+
+    /// cr-uv6-4: a scan asked to record what it sees asks it of the
+    /// source beneath each wrapper a session puts round it — the filter,
+    /// the checksum, the one that drops Windows metadata — and the record
+    /// comes back through them. A wrapper that scanned its inner source
+    /// the plain way left a move with no account, and it removed nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_wrapper_passes_the_request_to_record_on() {
+        use crate::remote::transfer::source::{
+            ChecksummingSource, FilteredSource, FsTransferSource, WindowsMetadataDroppingSource,
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("src");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("f"), b"one file").unwrap();
+        let disk = || -> Arc<dyn TransferSource> { Arc::new(FsTransferSource::new(root.clone())) };
+        let wrapped: [(&str, Arc<dyn TransferSource>); 4] = [
+            (
+                "filtered",
+                Arc::new(FilteredSource::new(
+                    disk(),
+                    crate::fs_enum::FileFilter::default(),
+                )),
+            ),
+            ("checksumming", Arc::new(ChecksummingSource::new(disk()))),
+            (
+                "dropping Windows metadata",
+                Arc::new(WindowsMetadataDroppingSource::new(disk())),
+            ),
+            (
+                "all three",
+                Arc::new(WindowsMetadataDroppingSource::new(Arc::new(
+                    ChecksummingSource::new(Arc::new(FilteredSource::new(
+                        disk(),
+                        crate::fs_enum::FileFilter::default(),
+                    ))),
+                ))),
+            ),
+        ];
+        let now = crate::moved::Version::of(&std::fs::symlink_metadata(root.join("f")).unwrap());
+        for (what, source) in wrapped {
+            let (mut headers, mut scan) = source.scan_seeing(None, Arc::default(), true);
+            let mut listed = Vec::new();
+            while let Some(header) = headers.recv().await {
+                listed.push(crate::moved::name_key(own_name(&header)));
+            }
+            scan.finish().await.expect("the walk");
+            let sightings = scan
+                .sightings()
+                .unwrap_or_else(|| panic!("{what}: no record"));
+            let ticket = crate::moved::keep(sightings.account(&root, &listed));
+            crate::moved::confirm(&ticket, &[]);
+            let account = crate::moved::held(&[ticket])
+                .expect("kept")
+                .pop()
+                .expect("one");
+            assert!(account.holds(b"f", &now), "{what}");
+        }
     }
 
     /// cr-uv4-1, cr-uv5-4: what a destination's summary says did not land

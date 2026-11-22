@@ -196,30 +196,19 @@ impl Account {
 /// as rewritten, and the removal took bytes that had been sent to nobody.
 /// Held as the first look found it, a file changed in any way since is
 /// another file to the removal, whenever the change came.
+///
+/// ONE WALK'S (cr-uv6-4): a scan that records them makes its own, and
+/// hands it back with the scan (`SourceScan::sightings`). They were kept
+/// on the source, which more than one scan can share: a second walk
+/// cleared the first one's record, or wrote over it, and one move's
+/// account could then hold a file as ANOTHER walk had seen it.
 #[derive(Debug, Default)]
 pub struct Sightings {
-    wanted: std::sync::atomic::AtomicBool,
     /// By a name's digest: the digest of the name with the file as seen.
     seen: Mutex<HashMap<u128, u128>>,
 }
 
 impl Sightings {
-    /// From here on a walk records what it sees. What an earlier walk saw
-    /// is dropped.
-    pub fn begin(&self) {
-        self.seen
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-        self.wanted
-            .store(true, std::sync::atomic::Ordering::Release);
-    }
-
-    /// Whether a walk is to record what it sees: only a move asks.
-    pub fn wanted(&self) -> bool {
-        self.wanted.load(std::sync::atomic::Ordering::Acquire)
-    }
-
     /// What a walk saw, each as [`sighting`] makes one.
     pub fn publish(&self, seen: Vec<(u128, u128)>) {
         self.seen
@@ -503,9 +492,7 @@ mod tests {
     /// cr-uv5-2: an account written from what a walk saw holds each file
     /// on the manifest as the walk saw it — changed in any way since, it
     /// is another file — and holds neither a file the walk saw that the
-    /// manifest does not list, nor a name the walk never saw. A walk
-    /// records nothing until it is asked to, and a new walk starts from
-    /// nothing.
+    /// manifest does not list, nor a name the walk never saw.
     #[test]
     fn an_account_is_written_from_what_the_walk_saw() {
         let seen = Version {
@@ -516,11 +503,12 @@ mod tests {
             inode: 9,
         };
         let sightings = Sightings::default();
-        assert!(!sightings.wanted());
-        sightings.begin();
-        assert!(sightings.wanted());
-        sightings.publish(vec![sighting(b"a", &seen), sighting(b"left-out", &seen)]);
         let root = Path::new("/srv/walked");
+        assert!(
+            sightings.account(root, &[name_key(b"a")]).is_empty(),
+            "nothing seen, nothing held"
+        );
+        sightings.publish(vec![sighting(b"a", &seen), sighting(b"left-out", &seen)]);
         let account = sightings.account(root, &[name_key(b"a"), name_key(b"never-seen")]);
         assert_eq!(account.len(), 1, "what is listed AND was seen");
         let ticket = keep(account);
@@ -537,9 +525,6 @@ mod tests {
         assert!(!accounts[0].holds(b"a", &rewritten));
         assert!(!accounts[0].holds(b"left-out", &seen));
         assert!(!accounts[0].holds(b"never-seen", &seen));
-
-        sightings.begin();
-        assert!(sightings.account(root, &[name_key(b"a")]).is_empty());
     }
 
     fn version(size: u64, mtime_nanos: i128) -> Version {
