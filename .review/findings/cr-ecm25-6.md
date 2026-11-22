@@ -1,9 +1,9 @@
 # cr-ecm25-6: a file the source skipped left its baseline at the destination
 
 **Severity**: MEDIUM — a resumed file the source skipped before its first block was settled in the ledger, and the sink kept its baseline to the session's end
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r27` (Codex openreview, 2026-11-22) reviewed `05ff50d7..e025a3e2` — the six `combined-r26` fixes — with `guard_confirmed: true`: "The patch takes the right approach by carrying the local writer through metadata stamping, staging private partials in a held directory, and discarding incomplete wire hashes." "Calling `skip_record` directly on `FsTransferSink` left one recorded baseline where the test expected zero. Both session wrappers perform cleanup, but the public receive pipeline can call the sink directly. Have `skip_record` perform cleanup and let wrappers delegate after validating the ledger transition." The remaining work is cr-ecm26-6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm25-6`)
+**Commit**: `c913ad4f`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r26` over `19025839..05ff50d7` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r26.codex.md`. It completes cr-ecm24-8 (`b38564c2`) for skips.
 
 ## Evidence

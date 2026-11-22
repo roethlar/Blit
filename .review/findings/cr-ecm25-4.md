@@ -1,9 +1,9 @@
 # cr-ecm25-4: a local resume refused its cleanup handle had already changed the destination
 
 **Severity**: MEDIUM — with the cleanup's handle refused, a reusable `0644` destination was left `0600`, and where nothing had stood an empty file was left
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r27` (Codex openreview, 2026-11-22) reviewed `05ff50d7..e025a3e2` — the six `combined-r26` fixes — with `guard_confirmed: true`: "The patch takes the right approach by carrying the local writer through metadata stamping, staging private partials in a held directory, and discarding incomplete wire hashes." "Locally, a missing-name lookup is followed by an ordinary writable open, which can adopt a file created in between. On a filesystem that refuses hard links, the final existence check and `renameat` can likewise overwrite a concurrent creation. Select exclusive publication immediately and use an atomic no-replace operation, failing that file safely if unavailable. Also check staging-name removal after a successful hard link so a cleanup failure cannot silently leave a second name." "On Linux, an owned `0444` destination became `0600` when the writable reopen failed with `EMFILE`. Keep rollback armed on the original descriptor until acquisition succeeds." The remaining work is cr-ecm26-1 and -4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm25-4`)
+**Commit**: `a8283606`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r26` over `19025839..05ff50d7` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r26.codex.md`. It completes cr-ecm24-2 (`7778af82`).
 
 ## Evidence

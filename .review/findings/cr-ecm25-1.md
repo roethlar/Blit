@@ -1,9 +1,9 @@
 # cr-ecm25-1: a local resume duplicated a handle for its metadata after its fresh partial was in place
 
 **Severity**: HIGH — with the duplicate for the metadata tail refused (`EMFILE`), an eight-byte destination was left nine bytes of nothing before a byte of the source was written
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r27` (Codex openreview, 2026-11-22) reviewed `05ff50d7..e025a3e2` — the six `combined-r26` fixes — with `guard_confirmed: true`: "The patch takes the right approach by carrying the local writer through metadata stamping, staging private partials in a held directory, and discarding incomplete wire hashes." "With source `ABCD`, destination `xxABCD`, and its cursor at offset 2, the new public helper reported one skipped block and zero bytes transferred. It returned success with `xxAB` on disk. Seek to zero before comparison or use positional I/O." The remaining work is cr-ecm26-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm25-1`)
+**Commit**: `ce8ae0ea`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r26` over `19025839..05ff50d7` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r26.codex.md`. It completes cr-ecm24-2 (`7778af82`).
 
 ## Evidence

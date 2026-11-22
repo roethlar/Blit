@@ -1,9 +1,9 @@
 # cr-ecm25-5: a local resume into a destination it could not read failed where the wire copies it whole
 
 **Severity**: MEDIUM — `blit copy --resume` from a `0600` source to an owned `0004` destination in a writable directory exited 2, where the wire path already chose a fresh copy
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r27` (Codex openreview, 2026-11-22) reviewed `05ff50d7..e025a3e2` — the six `combined-r26` fixes — with `guard_confirmed: true`: "The patch takes the right approach by carrying the local writer through metadata stamping, staging private partials in a held directory, and discarding incomplete wire hashes." "An injected `ESTALE` on the final wire metadata check escaped the hash computation and propagates out of the grant sender, abandoning unrelated files. An injected local destination-block `EIO` failed that copy despite a readable source and writable directory. Discard unverifiable hashes and retry the affected file whole." "The new lookup sees the file type, yet a read-only FIFO can still reach `O_RDONLY` and wait indefinitely for a writer. Resolve special entries before attempting reuse and verify the opened descriptor is regular." The remaining work is cr-ecm26-3 and -5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm25-5`)
+**Commit**: `660eb9d0`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r26` over `19025839..05ff50d7` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r26.codex.md`. It completes cr-ecm24-4 (`f6cb0495`) for the local route.
 
 ## Evidence
