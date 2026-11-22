@@ -6617,9 +6617,27 @@ fn resolve_attribute_repair(
 /// `checksum::hash_file` runs a whole file uninterruptibly; inside the
 /// diff's blocking chunk that must yield to a dead session's abort
 /// flag within one chunk).
+///
+/// cr-ecm29-4: opened without waiting — a FIFO put in the file's place after
+/// the diff's look cannot hold the session — and hashed only if what was
+/// opened is a regular file: anything else has no checksum, and the file is
+/// sent. Opened to be read, the FIFO waited for a writer, and the transfer
+/// with it.
 fn hash_file_abortable(path: &Path, abort: &AtomicBool) -> Result<Vec<u8>> {
     use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
+    let mut file = {
+        let mut open = std::fs::OpenOptions::new();
+        open.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            open.custom_flags(libc::O_NONBLOCK);
+        }
+        open.open(path)?
+    };
+    if !file.metadata()?.is_file() {
+        eyre::bail!("{} is not a regular file", path.display());
+    }
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
@@ -11359,6 +11377,34 @@ mod own_incomplete_copy_tests {
                 .unwrap();
         assert!(hashes.is_empty(), "two names: not reused");
         assert_eq!(baseline, ResumeBaseline::Whole);
+    }
+
+    /// cr-ecm29-4: the checksum comparison's open of a destination does not
+    /// wait on a FIFO there — put in a same-size file's place after the
+    /// diff's look — and finds no checksum in it: the file is sent. Opened
+    /// to be read, it waited for a writer, and the transfer with it.
+    #[cfg(unix)]
+    #[test]
+    fn the_checksum_comparison_does_not_wait_on_a_fifo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let at = tmp.path().join("r.bin");
+        let name = std::ffi::CString::new(at.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `name` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+        let (done, waited) = std::sync::mpsc::channel();
+        {
+            let at = at.clone();
+            std::thread::spawn(move || {
+                let abort = std::sync::atomic::AtomicBool::new(false);
+                let _ = done.send(hash_file_abortable(&at, &abort).is_err());
+            });
+        }
+        let Ok(refused) = waited.recv_timeout(std::time::Duration::from_secs(20)) else {
+            // A writer lets the waiting open go, so the test can end.
+            let _ = std::fs::OpenOptions::new().write(true).open(&at);
+            panic!("the checksum's open waited on the FIFO");
+        };
+        assert!(refused, "a FIFO has no checksum");
     }
 
     /// cr-ecm28-1: a FIFO put in a destination's place after the hashing's
