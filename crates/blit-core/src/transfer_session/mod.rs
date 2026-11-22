@@ -6707,7 +6707,9 @@ async fn compute_resume_block_hashes(
                 // A source of mode 0000 is a mode known (cr-ecm22-4); only
                 // one whose header carries none is not asked (cr-ecm23-5).
                 let wider = source_mode.is_some_and(|source| others & !(source & 0o077) != 0);
-                ours && !wider
+                // cr-ecm28-5: and a file with one name: another would read
+                // what the blocks write.
+                ours && !wider && meta.nlink() == 1
             }
             #[cfg(not(unix))]
             {
@@ -11293,6 +11295,28 @@ mod own_incomplete_copy_tests {
             .retain(|(path, _)| path != &at);
         let (hashes, baseline) = hashed.unwrap();
         assert!(hashes.is_empty(), "the opened file's look failed");
+        assert_eq!(baseline, ResumeBaseline::Whole);
+    }
+
+    /// cr-ecm28-5: a destination with a second name is not hashed for reuse:
+    /// every block comes, into a fresh partial. Another name would read what
+    /// the blocks write.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_destination_with_a_second_name_is_sent_whole() {
+        use crate::remote::transfer::sink::ResumeBaseline;
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let at = root.join("r.bin");
+        std::fs::write(&at, vec![3u8; 5000]).unwrap();
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::hard_link(&at, root.join("alias")).unwrap();
+        let (hashes, baseline) =
+            compute_resume_block_hashes(&root, None, "r.bin", None, Some(0o100600), 1024)
+                .await
+                .unwrap();
+        assert!(hashes.is_empty(), "two names: not reused");
         assert_eq!(baseline, ResumeBaseline::Whole);
     }
 

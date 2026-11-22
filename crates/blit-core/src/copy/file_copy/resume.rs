@@ -250,7 +250,10 @@ fn open_resume_partial_with(
     // readers kept it. cr-ecm23-4: and only a file this run's user owns is
     // reused: one another owns stays theirs, readable by them whatever its
     // mode. Asked again of the file opened, which is what is patched.
-    if reusable(found.mode(), found.uid()) {
+    // cr-ecm28-5: and only while it has one name: another — a hard link, or
+    // the staged name a failed publication left — would read what lands in
+    // it. Patched in place on a retry, both names held the new bytes.
+    if found.nlink() == 1 && reusable(found.mode(), found.uid()) {
         // cr-ecm25-4: the cleanup's handle is had before the file is changed:
         // had after it was made private, a refusal left a file others could
         // read made 600.
@@ -1501,6 +1504,35 @@ mod tests {
         let partial = std::fs::metadata(&kept)?;
         assert_eq!(partial.len(), 9, "unfinished");
         assert_eq!(partial.mode() & 0o777, 0o600, "private");
+        Ok(())
+    }
+
+    /// cr-ecm28-5: a destination with a second name is not patched in place:
+    /// a fresh partial takes its name, and the other name keeps what it had.
+    /// Patched in place on a retry, both names held the new bytes.
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_with_a_second_name_is_not_patched_in_place() -> Result<()> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let data = vec![7u8; 4096];
+        std::fs::write(&src, &data)?;
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))?;
+        let dst = tmp.path().join("dst");
+        std::fs::write(&dst, &data[..1000])?;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o600))?;
+        let alias = tmp.path().join("alias");
+        std::fs::hard_link(&dst, &alias)?;
+        let before = std::fs::metadata(&dst)?.ino();
+        resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024)?;
+        assert_ne!(std::fs::metadata(&dst)?.ino(), before, "a fresh partial");
+        assert_eq!(std::fs::read(&dst)?, data);
+        assert_eq!(
+            std::fs::read(&alias)?,
+            &data[..1000],
+            "the other name as it was"
+        );
         Ok(())
     }
 
