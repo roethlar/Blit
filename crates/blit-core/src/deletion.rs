@@ -302,7 +302,8 @@ pub enum Content {
     NotAsked,
     /// Its content's digest ([`crate::moved::content_of`]).
     Digest([u8; 32]),
-    /// It had to be read and could not be: nothing answers for it.
+    /// It had to be read and could not be — as the file that was looked
+    /// at (cr-uv8-1): another file, or changed — so nothing answers for it.
     Unreadable,
 }
 
@@ -891,14 +892,21 @@ fn remove_asking(
         // can see but the time it was last changed — which the removal's
         // own unlink changes anyway. What it holds is read, and the account
         // must hold that; one that cannot be read stays.
-        Some((before, left)) if met.kind == MetKind::File && met.version == *left => Met {
-            version: *before,
-            content: match within.content_of(name) {
-                Ok(digest) => Content::Digest(digest),
-                Err(_) => Content::Unreadable,
-            },
-            ..met
-        },
+        //
+        // cr-uv8-1: read AS THE FILE THIS LOOK FOUND — another file put at
+        // the name since, or this one written to before the read is done,
+        // is not it: unreadable, and it stays.
+        Some((before, left)) if met.kind == MetKind::File && met.version == *left => {
+            between("reading what a file holds", relative_path);
+            Met {
+                version: *before,
+                content: match within.content_of(name, &met.version) {
+                    Ok(digest) => Content::Digest(digest),
+                    Err(_) => Content::Unreadable,
+                },
+                ..met
+            }
+        }
         _ => met,
     };
     if let Some(error) = keep(relative_path, &asked) {
@@ -1304,8 +1312,9 @@ mod anchored {
         }
 
         /// cr-uv7-1: the digest of what the regular file called `name`
-        /// here holds — itself, never what a link by that name names.
-        fn content_of(&self, name: &CStr) -> io::Result<[u8; 32]> {
+        /// here holds — itself, never what a link by that name names —
+        /// read as `version`, the file that was looked at (cr-uv8-1).
+        fn content_of(&self, name: &CStr, version: &crate::moved::Version) -> io::Result<[u8; 32]> {
             // SAFETY: as in `open_child`.
             let fd = unsafe {
                 libc::openat(
@@ -1319,8 +1328,8 @@ mod anchored {
             }
             // SAFETY: `fd` was opened just above, is valid, and nothing
             // else owns it.
-            let mut file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
-            crate::moved::content_of(&mut file)
+            let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+            crate::moved::content_of(&file, version)
         }
 
         /// Remove the file called `name` here — a file with other names —
@@ -2105,7 +2114,11 @@ mod rm_tests {
                 // As a walk reads it: the content of a file with several
                 // names (cr-uv7-1).
                 let content = (metadata.nlink() > 1).then(|| {
-                    crate::moved::content_of(&mut fs::File::open(tree.join(name)).unwrap()).unwrap()
+                    crate::moved::content_of(
+                        &fs::File::open(tree.join(name)).unwrap(),
+                        &crate::moved::Version::of(&metadata),
+                    )
+                    .unwrap()
                 });
                 (
                     PathBuf::from(name),
@@ -2284,6 +2297,96 @@ mod rm_tests {
             b"two file",
             "the only copy of what was written"
         );
+    }
+
+    /// cr-uv8-1: and what a later name holds is read from the file the
+    /// removal found there, and no other. Another file put at the name
+    /// before it is read — of the same bytes and time — is somebody
+    /// else's, and stays, whole; the file written to once it is read — its
+    /// first bytes, which the digest has, its time put back — stays, with
+    /// what was written. Each went: the first as the file that was sent,
+    /// the second with the bytes written since.
+    #[cfg(unix)]
+    #[test]
+    fn a_later_names_content_is_read_from_the_file_seen() {
+        use std::os::unix::fs::{FileExt as _, MetadataExt as _};
+        use std::sync::{Arc, Mutex};
+        struct Unhooked((u64, u64));
+        impl Drop for Unhooked {
+            fn drop(&mut self) {
+                if let Ok(mut hooks) = crate::moved::WHILE_CONTENT_IS_READ_HOOKS.lock() {
+                    hooks.retain(|(file, _)| *file != self.0);
+                }
+            }
+        }
+        let mtime_of = |path: &Path| {
+            filetime::FileTime::from_last_modification_time(&fs::metadata(path).unwrap())
+        };
+        for swapped in [true, false] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().canonicalize().unwrap();
+            let tree = root.join("tree");
+            fs::create_dir_all(&tree).unwrap();
+            fs::write(tree.join("a"), b"one file").unwrap();
+            fs::hard_link(tree.join("a"), tree.join("b")).unwrap();
+            let held = held_of(&tree, &["a", "b"]);
+            // The later name, once the removal is about to read it.
+            let later: Arc<Mutex<Option<PathBuf>>> = Arc::default();
+            let changed = Arc::new(AtomicBool::new(false));
+            let _unhooked = (!swapped).then(|| {
+                let metadata = fs::metadata(tree.join("a")).unwrap();
+                let file = (metadata.dev(), metadata.ino());
+                let (later, changed) = (Arc::clone(&later), Arc::clone(&changed));
+                crate::moved::WHILE_CONTENT_IS_READ_HOOKS
+                    .lock()
+                    .unwrap()
+                    .push((
+                        file,
+                        Arc::new(move |stage, _| {
+                            let at = later.lock().unwrap().clone();
+                            if let (Some(at), "read") = (at, stage) {
+                                if !changed.swap(true, Ordering::SeqCst) {
+                                    let was = mtime_of(&at);
+                                    let file =
+                                        fs::OpenOptions::new().write(true).open(&at).unwrap();
+                                    file.write_at(b"two", 0).unwrap();
+                                    filetime::set_file_mtime(&at, was).unwrap();
+                                }
+                            }
+                        }),
+                    ));
+                Unhooked(file)
+            });
+            let stayed = {
+                let (tree, later, changed) =
+                    (tree.clone(), Arc::clone(&later), Arc::clone(&changed));
+                let scratch = root.join("somebody else's");
+                let _hook = between_each(move |stage, name| {
+                    if stage != "reading what a file holds" {
+                        return;
+                    }
+                    let at = tree.join(name);
+                    *later.lock().unwrap() = Some(at.clone());
+                    if swapped && !changed.swap(true, Ordering::SeqCst) {
+                        fs::write(&scratch, b"one file").unwrap();
+                        filetime::set_file_mtime(&scratch, mtime_of(&at)).unwrap();
+                        fs::rename(&scratch, &at).unwrap();
+                    }
+                });
+                removed_for_a_move(&root, "tree", &held)
+            };
+            assert!(changed.load(Ordering::SeqCst), "swapped: {swapped}");
+            assert_eq!(stayed.len(), 1, "swapped: {swapped}: {stayed:?}");
+            assert_eq!(
+                fs::read(tree.join(&stayed[0])).unwrap(),
+                if swapped {
+                    &b"one file"[..]
+                } else {
+                    &b"two file"[..]
+                },
+                "swapped: {swapped}"
+            );
+        }
     }
 
     #[cfg(unix)]

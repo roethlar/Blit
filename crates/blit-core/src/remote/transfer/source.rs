@@ -733,6 +733,38 @@ fn open_for_scan(path: &Path) -> std::io::Result<()> {
     std::fs::File::open(path).map(drop)
 }
 
+/// cr-uv8-1: the moment between a move's walk looking at a file with
+/// several names and opening it to read what it holds, for a test to
+/// change the tree in.
+#[cfg(unix)]
+fn before_a_content_is_opened(_path: &Path) {
+    #[cfg(test)]
+    {
+        let hooks: Vec<ContentOpenHook> = BEFORE_A_CONTENT_IS_OPENED_HOOKS
+            .lock()
+            .map(|hooks| {
+                hooks
+                    .iter()
+                    .filter(|(at, _)| at == _path)
+                    .map(|(_, hook)| Arc::clone(hook))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for hook in hooks {
+            hook(_path);
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) type ContentOpenHook = Arc<dyn Fn(&Path) + Send + Sync>;
+
+/// Tests' hooks on that moment, by the path about to be opened.
+#[cfg(all(test, unix))]
+pub(crate) static BEFORE_A_CONTENT_IS_OPENED_HOOKS: std::sync::Mutex<
+    Vec<(PathBuf, ContentOpenHook)>,
+> = std::sync::Mutex::new(Vec::new());
+
 /// [`spawn_manifest_task`] with the per-file open probe injected, so a
 /// unit test can make an enumerated file fail to open with any error.
 #[allow(clippy::too_many_arguments)]
@@ -821,18 +853,27 @@ fn spawn_manifest_task_with(
                         Some(raw) if !raw.is_empty() => raw,
                         _ => rel.as_bytes(),
                     };
-                    seen.push(crate::moved::sighting(
-                        name,
-                        &crate::moved::Version::of(&entry.metadata),
-                    ));
+                    let version = crate::moved::Version::of(&entry.metadata);
+                    seen.push(crate::moved::sighting(name, &version));
                     // cr-uv7-1: a file with several names is read too —
                     // its later names are taken by what it holds. One that
                     // cannot be read is recorded without it, and its later
                     // names stay.
+                    //
+                    // cr-uv8-1: read through a descriptor of the entry
+                    // itself — no link followed, no wait on what is no
+                    // file — and AS THE FILE THIS LOOK SAW: another file at
+                    // the name by then, or this one changed, is not it,
+                    // and is recorded without what it holds.
                     #[cfg(unix)]
                     if std::os::unix::fs::MetadataExt::nlink(&entry.metadata) > 1 {
-                        if let Ok(content) = std::fs::File::open(&absolute)
-                            .and_then(|mut file| crate::moved::content_of(&mut file))
+                        use std::os::unix::fs::OpenOptionsExt as _;
+                        before_a_content_is_opened(&absolute);
+                        if let Ok(content) = std::fs::OpenOptions::new()
+                            .read(true)
+                            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                            .open(&absolute)
+                            .and_then(|file| crate::moved::content_of(&file, &version))
                         {
                             seen_contents.push(crate::moved::content_sighting(name, &content));
                         }

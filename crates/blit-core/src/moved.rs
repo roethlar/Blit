@@ -131,12 +131,60 @@ fn path_digest(path: &[u8]) -> u128 {
     first_sixteen(&hasher)
 }
 
-/// cr-uv7-1: the digest of everything `file` holds, from where it is read.
-pub fn content_of(file: &mut impl std::io::Read) -> std::io::Result<[u8; 32]> {
+/// cr-uv7-1, cr-uv8-1: the digest of what `file` holds — read through
+/// that descriptor, AS THE FILE `version` IS. No more than `version.size`
+/// bytes are read, and once they have been, the descriptor must be that
+/// version: that file (Unix: its device and its number there), unchanged.
+///
+/// One look, after the read, answers for all of it. The time a file was
+/// last changed (Unix) moves with every change to it, and no program sets
+/// it: a descriptor that is the version once read was that file,
+/// unchanged, from the look the version came from to the end of the read
+/// — written to anywhere meanwhile, a part already read included, it is
+/// not. Anything else is an error, and nothing is known of what it holds.
+pub fn content_of(file: &std::fs::File, version: &Version) -> std::io::Result<[u8; 32]> {
+    use std::io::Read as _;
+    while_content_is_read(version, "reading", 0);
     let mut hasher = blake3::Hasher::new();
-    std::io::copy(file, &mut hasher)?;
+    let read = std::io::copy(&mut file.take(version.size), &mut hasher)?;
+    while_content_is_read(version, "read", read);
+    if read != version.size || Version::of(&file.metadata()?) != *version {
+        return Err(std::io::Error::other(
+            "not the file that was seen: another file, or changed since",
+        ));
+    }
     Ok(*hasher.finalize().as_bytes())
 }
+
+/// A moment in a read of what a file holds, for a test to change the file
+/// in: `stage` says which, `read` how many bytes have been read.
+fn while_content_is_read(_version: &Version, _stage: &'static str, _read: u64) {
+    #[cfg(test)]
+    {
+        let hooks: Vec<ContentReadHook> = WHILE_CONTENT_IS_READ_HOOKS
+            .lock()
+            .map(|hooks| {
+                hooks
+                    .iter()
+                    .filter(|(file, _)| *file == (_version.device, _version.inode))
+                    .map(|(_, hook)| Arc::clone(hook))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for hook in hooks {
+            hook(_stage, _read);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) type ContentReadHook = Arc<dyn Fn(&'static str, u64) + Send + Sync>;
+
+/// Tests' hooks on a read of what a file holds, by the file it is read as
+/// (its device and its number).
+#[cfg(test)]
+pub(crate) static WHILE_CONTENT_IS_READ_HOOKS: Mutex<Vec<((u64, u64), ContentReadHook)>> =
+    Mutex::new(Vec::new());
 
 fn content_digest(path: &[u8], content: &[u8; 32]) -> u128 {
     let mut hasher = blake3::Hasher::new();
@@ -901,5 +949,112 @@ mod tests {
         for (at, ticket) in tickets.iter().enumerate() {
             assert_eq!(kept.contains_key(ticket), at >= 2, "the {at}th");
         }
+    }
+}
+
+/// cr-uv8-1: what a file holds is known only of the file as it was seen.
+#[cfg(all(test, unix))]
+mod content_tests {
+    use super::*;
+    use std::os::unix::fs::{FileExt as _, MetadataExt as _};
+
+    /// A hook on each read of what the file at `path` holds, while the
+    /// guard lives.
+    struct Hooked((u64, u64));
+
+    impl Drop for Hooked {
+        fn drop(&mut self) {
+            if let Ok(mut hooks) = WHILE_CONTENT_IS_READ_HOOKS.lock() {
+                hooks.retain(|(file, _)| *file != self.0);
+            }
+        }
+    }
+
+    fn hook(path: &Path, hook: impl Fn(&'static str, u64) + Send + Sync + 'static) -> Hooked {
+        let metadata = std::fs::metadata(path).unwrap();
+        let file = (metadata.dev(), metadata.ino());
+        WHILE_CONTENT_IS_READ_HOOKS
+            .lock()
+            .unwrap()
+            .push((file, Arc::new(hook)));
+        Hooked(file)
+    }
+
+    fn seen(path: &Path) -> Version {
+        Version::of(&std::fs::symlink_metadata(path).unwrap())
+    }
+
+    fn mtime_of(path: &Path) -> filetime::FileTime {
+        filetime::FileTime::from_last_modification_time(&std::fs::metadata(path).unwrap())
+    }
+
+    /// Unchanged, its digest. Written to once read — its first bytes,
+    /// which the digest has, as many as there were, its time put back, so
+    /// that no look but at the time it was last changed sees it — or
+    /// another file of the same bytes and time: nothing is known of what
+    /// it holds.
+    #[test]
+    fn a_content_is_known_only_of_the_file_as_it_was_seen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("one");
+        std::fs::write(&path, b"one file").unwrap();
+        let version = seen(&path);
+        assert_eq!(
+            content_of(&std::fs::File::open(&path).unwrap(), &version).unwrap(),
+            *blake3::hash(b"one file").as_bytes()
+        );
+        {
+            let target = path.clone();
+            let _hooked = hook(&path, move |stage, _| {
+                if stage == "read" {
+                    let was = mtime_of(&target);
+                    let file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&target)
+                        .unwrap();
+                    file.write_at(b"two", 0).unwrap();
+                    filetime::set_file_mtime(&target, was).unwrap();
+                }
+            });
+            assert!(content_of(&std::fs::File::open(&path).unwrap(), &version).is_err());
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), b"two file", "it was written");
+
+        let version = seen(&path);
+        let other = tmp.path().join("other");
+        std::fs::write(&other, b"two file").unwrap();
+        filetime::set_file_mtime(&other, mtime_of(&path)).unwrap();
+        assert_eq!(seen(&other).mtime_nanos, version.mtime_nanos);
+        assert!(content_of(&std::fs::File::open(&other).unwrap(), &version).is_err());
+        assert!(content_of(&std::fs::File::open(&path).unwrap(), &version).is_ok());
+    }
+
+    /// No further than the size it was seen with: a file that grows as it
+    /// is read is not read on, and is not the file that was seen.
+    #[test]
+    fn a_content_read_goes_no_further_than_the_size_seen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("growing");
+        std::fs::write(&path, b"one file").unwrap();
+        let version = seen(&path);
+        let read = Arc::new(Mutex::new(None));
+        {
+            let (target, read) = (path.clone(), Arc::clone(&read));
+            let _hooked = hook(&path, move |stage, so_far| match stage {
+                "reading" => {
+                    use std::io::Write as _;
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&target)
+                        .unwrap()
+                        .write_all(&[7u8; 100_000])
+                        .unwrap();
+                }
+                "read" => *read.lock().unwrap() = Some(so_far),
+                _ => {}
+            });
+            assert!(content_of(&std::fs::File::open(&path).unwrap(), &version).is_err());
+        }
+        assert_eq!(*read.lock().unwrap(), Some(version.size));
     }
 }

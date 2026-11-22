@@ -10954,10 +10954,8 @@ mod own_incomplete_copy_tests {
         std::fs::write(root.join("a"), b"one file").unwrap();
         std::fs::hard_link(root.join("a"), root.join("b")).unwrap();
         std::fs::write(root.join("alone"), b"another").unwrap();
-        let content =
-            crate::moved::content_of(&mut std::fs::File::open(root.join("a")).unwrap()).unwrap();
-        let alone = crate::moved::content_of(&mut std::fs::File::open(root.join("alone")).unwrap())
-            .unwrap();
+        let content = *blake3::hash(b"one file").as_bytes();
+        let alone = *blake3::hash(b"another").as_bytes();
         let source = FsTransferSource::new(root.clone());
         let (mut headers, mut scan) = source.scan_seeing(None, Arc::default(), true);
         let mut listed = Vec::new();
@@ -10978,6 +10976,87 @@ mod own_incomplete_copy_tests {
             !account.holds_content(b"alone", &alone),
             "a file of one name is not read"
         );
+    }
+
+    /// cr-uv8-1: and it reads only the file it SAW. Another file put at a
+    /// name between the walk's look and its read — of the same bytes and
+    /// time — or the file rewritten there, as many bytes, its time put
+    /// back, is not what the look saw: nothing of what it holds is
+    /// recorded for that name, and its later names stay.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_moves_walk_reads_only_the_file_it_saw() {
+        use crate::remote::transfer::source::{FsTransferSource, BEFORE_A_CONTENT_IS_OPENED_HOOKS};
+        struct Unhooked(Vec<PathBuf>);
+        impl Drop for Unhooked {
+            fn drop(&mut self) {
+                if let Ok(mut hooks) = BEFORE_A_CONTENT_IS_OPENED_HOOKS.lock() {
+                    hooks.retain(|(at, _)| !self.0.contains(at));
+                }
+            }
+        }
+        let mtime_of = |path: &Path| {
+            filetime::FileTime::from_last_modification_time(&std::fs::metadata(path).unwrap())
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let top = tmp.path().canonicalize().unwrap();
+        let root = top.join("src");
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["swapped", "rewritten"] {
+            std::fs::write(root.join(name), b"one file").unwrap();
+            std::fs::hard_link(root.join(name), root.join(format!("{name}.link"))).unwrap();
+        }
+        let fired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _unhooked = {
+            let (swapped, rewritten) = (root.join("swapped"), root.join("rewritten"));
+            let scratch = top.join("somebody else's");
+            let mut hooks = BEFORE_A_CONTENT_IS_OPENED_HOOKS.lock().unwrap();
+            let once = Arc::clone(&fired);
+            hooks.push((
+                swapped.clone(),
+                Arc::new(move |at: &Path| {
+                    std::fs::write(&scratch, b"one file").unwrap();
+                    filetime::set_file_mtime(&scratch, mtime_of(at)).unwrap();
+                    std::fs::rename(&scratch, at).unwrap();
+                    once.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }),
+            ));
+            let once = Arc::clone(&fired);
+            hooks.push((
+                rewritten.clone(),
+                Arc::new(move |at: &Path| {
+                    let was = mtime_of(at);
+                    std::fs::write(at, b"two file").unwrap();
+                    filetime::set_file_mtime(at, was).unwrap();
+                    once.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }),
+            ));
+            Unhooked(vec![swapped, rewritten])
+        };
+        let source = FsTransferSource::new(root.clone());
+        let (mut headers, mut scan) = source.scan_seeing(None, Arc::default(), true);
+        let mut listed = Vec::new();
+        while let Some(header) = headers.recv().await {
+            listed.push(crate::moved::name_key(own_name(&header)));
+        }
+        scan.finish().await.expect("the walk");
+        drop(_unhooked);
+        assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let account = scan.sightings().expect("recorded").account(&root, &listed);
+        let ticket = crate::moved::keep(account);
+        crate::moved::confirm(&ticket, &[]);
+        let account = crate::moved::held(&[ticket])
+            .expect("kept")
+            .pop()
+            .expect("one");
+        for name in ["swapped", "rewritten"] {
+            for held in [b"one file", b"two file"] {
+                assert!(
+                    !account.holds_content(name.as_bytes(), blake3::hash(held).as_bytes()),
+                    "{name}"
+                );
+            }
+        }
     }
 
     /// cr-uv6-4: what a walk saw is that SCAN's. Two scans of one source

@@ -1120,7 +1120,8 @@ mod rm_tests {
             let version =
                 blit_core::moved::Version::of(&fs::symlink_metadata(src.join("a")).unwrap());
             let content =
-                blit_core::moved::content_of(&mut fs::File::open(src.join("a")).unwrap()).unwrap();
+                blit_core::moved::content_of(&fs::File::open(src.join("a")).unwrap(), &version)
+                    .unwrap();
             let recorded = if as_read { content } else { [0u8; 32] };
             let mut account = Account::of(&src);
             for name in ["a", "b"] {
