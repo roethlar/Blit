@@ -2940,12 +2940,39 @@ fn hold_hashed(
             dst.display()
         )));
     }
-    let now = file.metadata()?;
+    // cr-ecm28-4: which file it is is learned before its length changes, and
+    // a length the system refuses (`EFBIG`) puts its mode back too: marked
+    // after the rollback was let go, a refusal left a 0644 file 0600.
+    let now = file
+        .metadata()
+        .with_context(|| format!("looking at the resume partial {}", dst.display()))
+        .map_err(undo)?;
+    let identity = HeldPartial::identity_of(&file, dst).map_err(undo)?;
     if now.is_file() && now.len() <= total_size {
-        mark_unfinished(&file, total_size)
-            .with_context(|| format!("marking {} unfinished", dst.display()))?;
+        mark_fault(dst)
+            .and_then(|()| mark_unfinished(&file, total_size))
+            .with_context(|| format!("marking {} unfinished", dst.display()))
+            .map_err(undo)?;
     }
-    HeldPartial::of(file, dst).map(Some)
+    Ok(Some(HeldPartial { file, identity }))
+}
+
+/// Test seam (cr-ecm28-4): marking a hashed hold's partial unfinished
+/// refused, by path — a file-size limit (`EFBIG`), which no test sets for a
+/// whole process. Production never sets it.
+#[cfg(all(test, unix))]
+pub(crate) static MARK_FAULTS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn mark_fault(_dst: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if MARK_FAULTS
+        .lock()
+        .is_ok_and(|faults| faults.iter().any(|at| at == _dst))
+    {
+        return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
+    }
+    Ok(())
 }
 
 /// Test seam (cr-ecm27-4): the hashed hold's writable reopen refused, by
@@ -8193,6 +8220,55 @@ mod cr_win_1_tests {
             .write_payload(PreparedPayload::FileBlockComplete {
                 relative_path: "r.bin".to_string(),
                 total_size: 10,
+                mtime_seconds: 0,
+                permissions: 0o600,
+                windows_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert!(outcome.file_failed("r.bin"), "{outcome:?}");
+    }
+
+    /// cr-ecm28-4: a wire resume's hashed hold that cannot mark its partial
+    /// unfinished (`EFBIG`) gets the partial's mode back, its bytes kept, and
+    /// the file fails. Marked after the rollback was let go, a 0644 file was
+    /// left 0600.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hashed_hold_that_cannot_mark_its_partial_gets_the_mode_back() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let at = dst.join("r.bin");
+        std::fs::write(&at, b"01234567").unwrap();
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o644)).unwrap();
+        sink.note_resume_baseline(
+            "r.bin",
+            ResumeBaseline::Hashed(crate::moved::Version::of(&std::fs::metadata(&at).unwrap())),
+        );
+        MARK_FAULTS.lock().unwrap().push(at.clone());
+        let held = sink.hold_resume_partial("r.bin", 8).await;
+        MARK_FAULTS.lock().unwrap().retain(|fault| fault != &at);
+        held.unwrap();
+        assert_eq!(
+            std::fs::metadata(&at).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "its mode as it was"
+        );
+        assert_eq!(std::fs::read(&at).unwrap(), b"01234567", "its bytes kept");
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "r.bin".to_string(),
+                total_size: 8,
                 mtime_seconds: 0,
                 permissions: 0o600,
                 windows_metadata: None,
