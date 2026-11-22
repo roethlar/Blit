@@ -772,7 +772,7 @@ impl Resolved {
         // a short name of blit's own, whatever the destination is called, and
         // another is tried when that one is taken.
         let mut tries = 0;
-        let (stage_name, stage) = loop {
+        let (stage_name, (stage, stage_identity)) = loop {
             let name = c_string(std::ffi::OsStr::new(&format!(
                 ".blit-partial-{}-{}",
                 std::process::id(),
@@ -781,13 +781,19 @@ impl Resolved {
             // SAFETY: `held` is open for the length of the call, and `name`
             // is a NUL-terminated name that outlives it.
             if unsafe { libc::mkdirat(held, name.as_ptr(), STAGE_MODE) } == 0 {
+                after_a_stage_is_made(dst);
                 match open_stage(held, &name) {
                     Ok(stage) => break (name, stage),
+                    // cr-ecm29-6: what stands at its name is not known to be
+                    // the one made: it is left as it is. Removed by that
+                    // name, an empty directory put there was removed.
                     Err(error) => {
-                        // SAFETY: as for `mkdirat` above.
-                        unsafe { libc::unlinkat(held, name.as_ptr(), libc::AT_REMOVEDIR) };
                         return Err(error).with_context(|| {
-                            format!("making a fresh partial for {}", dst.display())
+                            format!(
+                                "making a fresh partial for {}: {} beside it is left as it is",
+                                dst.display(),
+                                name.to_string_lossy()
+                            )
                         });
                     }
                 }
@@ -801,9 +807,16 @@ impl Resolved {
                 .with_context(|| format!("making a fresh partial for {}", dst.display()));
         };
         let staged = c"partial";
+        // cr-ecm29-6: let go by its name only while that is the one held —
+        // moved, the name may be another's — and only empty. Removed by its
+        // name whatever stood there, an empty directory put at it went.
         let stage_gone = || {
-            // SAFETY: as for `mkdirat` above; only an empty directory goes.
-            unsafe { libc::unlinkat(held, stage_name.as_ptr(), libc::AT_REMOVEDIR) };
+            let held_still = entry_at(held, &stage_name)
+                .is_ok_and(|there| there.is_some_and(|there| there.identity == stage_identity));
+            if held_still {
+                // SAFETY: as for `mkdirat` above; only an empty directory goes.
+                unsafe { libc::unlinkat(held, stage_name.as_ptr(), libc::AT_REMOVEDIR) };
+            }
         };
         let file = match open_in(
             stage.as_raw_fd(),
@@ -1092,7 +1105,7 @@ const STAGE_MODE: libc::mode_t = 0o700;
 fn open_stage(
     held: std::os::unix::io::RawFd,
     name: &std::ffi::CStr,
-) -> std::io::Result<std::os::unix::io::OwnedFd> {
+) -> std::io::Result<(std::os::unix::io::OwnedFd, (u64, u64))> {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     use std::os::unix::io::{FromRawFd as _, OwnedFd};
     // SAFETY: `held` is open for the length of the call, and `name` is a
@@ -1122,7 +1135,85 @@ fn open_stage(
     }
     #[allow(clippy::unnecessary_cast)]
     handle.set_permissions(std::fs::Permissions::from_mode(STAGE_MODE as u32))?;
-    Ok(stage)
+    Ok((stage, (seen.dev(), seen.ino())))
+}
+
+/// What stands at a name, itself: its mode (type bits included), its owner,
+/// and which it is (device, inode).
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Entry {
+    pub(crate) mode: u32,
+    pub(crate) owner: u32,
+    pub(crate) identity: (u64, u64),
+}
+
+/// What stands at `name` in the directory `directory` — looked at itself,
+/// never through a link — or nothing.
+#[cfg(unix)]
+fn entry_at(
+    directory: std::os::unix::io::RawFd,
+    name: &std::ffi::CStr,
+) -> std::io::Result<Option<Entry>> {
+    #[cfg(not(target_os = "linux"))]
+    use libc::{fstatat, stat};
+    #[cfg(target_os = "linux")]
+    use libc::{fstatat64 as fstatat, stat64 as stat};
+    let mut found = std::mem::MaybeUninit::<stat>::uninit();
+    // SAFETY: `directory` is open for the length of the call, `name` is
+    // NUL-terminated and outlives it, and `found` is a writable record the
+    // call fills on success.
+    let looked = unsafe {
+        fstatat(
+            directory,
+            name.as_ptr(),
+            found.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if looked == 0 {
+        // SAFETY: the call succeeded, so the record is filled in.
+        let found = unsafe { found.assume_init() };
+        #[allow(clippy::unnecessary_cast)]
+        return Ok(Some(Entry {
+            mode: found.st_mode as u32,
+            owner: found.st_uid as u32,
+            identity: (found.st_dev as u64, found.st_ino as u64),
+        }));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return Ok(None);
+    }
+    Err(error)
+}
+
+/// Test seam (cr-ecm29-6): runs once a fresh partial's staging directory is
+/// made and before it is opened — for a test to put another in its place.
+/// Keyed by the destination's path. Production never sets it.
+#[cfg(all(test, unix))]
+pub(crate) static AFTER_A_STAGE_IS_MADE_HOOKS: std::sync::Mutex<
+    Vec<(std::path::PathBuf, PartialOpenedHook)>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn after_a_stage_is_made(_dst: &Path) {
+    #[cfg(test)]
+    {
+        let hooks: Vec<PartialOpenedHook> = AFTER_A_STAGE_IS_MADE_HOOKS
+            .lock()
+            .map(|hooks| {
+                hooks
+                    .iter()
+                    .filter(|(at, _)| at == _dst)
+                    .map(|(_, hook)| std::sync::Arc::clone(hook))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for hook in hooks {
+            hook(_dst);
+        }
+    }
 }
 
 /// Test seam (cr-ecm28-3): runs once a fresh partial is staged and before it
@@ -1819,6 +1910,117 @@ mod tests {
         assert_eq!(std::fs::read(&elsewhere)?, b"elsewhere");
         let left: Vec<_> = std::fs::read_dir(tmp.path())?.collect::<std::io::Result<_>>()?;
         assert_eq!(left.len(), 3, "src, the link and elsewhere: no stage left");
+        Ok(())
+    }
+
+    /// The staging directory beside `dst`, by its name.
+    #[cfg(unix)]
+    fn stage_beside(dst: &Path) -> std::path::PathBuf {
+        let mut stages: Vec<_> = std::fs::read_dir(dst.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|at| {
+                at.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".blit-partial-"))
+            })
+            .collect();
+        assert_eq!(stages.len(), 1, "{stages:?}");
+        stages.remove(0)
+    }
+
+    /// cr-ecm29-6: a staging directory moved while its partial is staged is
+    /// not let go by its old name: what stands there now — an empty
+    /// directory of another's making — is left as it is. Removed by its
+    /// name, that directory went.
+    #[cfg(unix)]
+    #[test]
+    fn a_moved_stage_is_not_let_go_by_its_old_name() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let data = vec![7u8; 4096];
+        std::fs::write(&src, &data)?;
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))?;
+        let folder = tmp.path().join("folder");
+        std::fs::create_dir(&folder)?;
+        let dst = folder.join("dst");
+        std::fs::write(&dst, &data[..1000])?;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o644))?;
+        let old: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>> =
+            std::sync::Arc::default();
+        {
+            let (moved, old) = (tmp.path().join("moved"), std::sync::Arc::clone(&old));
+            BEFORE_A_FRESH_PARTIAL_IS_PUBLISHED_HOOKS
+                .lock()
+                .unwrap()
+                .push((
+                    dst.clone(),
+                    std::sync::Arc::new(move |at: &Path| {
+                        let stage = stage_beside(at);
+                        std::fs::rename(&stage, &moved).unwrap();
+                        std::fs::create_dir(&stage).unwrap();
+                        *old.lock().unwrap() = Some(stage);
+                    }),
+                ));
+        }
+        let copied = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024);
+        BEFORE_A_FRESH_PARTIAL_IS_PUBLISHED_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(at, _)| at != &dst);
+        copied?;
+        assert_eq!(std::fs::read(&dst)?, data);
+        let old = old.lock().unwrap().clone().expect("the stage was moved");
+        assert!(old.is_dir(), "what stands at the old name is left");
+        Ok(())
+    }
+
+    /// cr-ecm29-6: a staging directory that is not the one made — another
+    /// put in its place before it was opened — is left as it is, and the
+    /// resume fails. Removed by its name, that directory went.
+    #[cfg(unix)]
+    #[test]
+    fn a_stage_not_known_to_be_the_one_made_is_left() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let data = vec![7u8; 4096];
+        std::fs::write(&src, &data)?;
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))?;
+        let folder = tmp.path().join("folder");
+        std::fs::create_dir(&folder)?;
+        let dst = folder.join("dst");
+        std::fs::write(&dst, &data[..1000])?;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o644))?;
+        let put: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>> =
+            std::sync::Arc::default();
+        {
+            let put = std::sync::Arc::clone(&put);
+            AFTER_A_STAGE_IS_MADE_HOOKS.lock().unwrap().push((
+                dst.clone(),
+                std::sync::Arc::new(move |at: &Path| {
+                    let stage = stage_beside(at);
+                    std::fs::remove_dir(&stage).unwrap();
+                    std::fs::create_dir(&stage).unwrap();
+                    std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                    *put.lock().unwrap() = Some(stage);
+                }),
+            ));
+        }
+        let copied = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024);
+        AFTER_A_STAGE_IS_MADE_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(at, _)| at != &dst);
+        assert!(copied.is_err(), "the resume fails");
+        let put = put.lock().unwrap().clone().expect("another was put there");
+        assert!(put.is_dir(), "the one put there is left");
+        assert_eq!(
+            std::fs::read(&dst)?,
+            &data[..1000],
+            "the destination as it was"
+        );
         Ok(())
     }
 
