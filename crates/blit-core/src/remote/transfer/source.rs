@@ -762,6 +762,8 @@ fn spawn_manifest_task_with(
         // cr-uv5-2: each file as this walk's own look finds it, for a
         // move's account.
         let mut seen: Vec<(u128, u128)> = Vec::new();
+        // cr-uv7-1: and what a file with several names holds.
+        let mut seen_contents: Vec<(u128, u128)> = Vec::new();
         let unreadable = unreadable;
         // ls-1: the walk's own wall clock. The bounded send below is measured
         // separately and subtracted, so this reads as enumeration work rather
@@ -823,6 +825,18 @@ fn spawn_manifest_task_with(
                         name,
                         &crate::moved::Version::of(&entry.metadata),
                     ));
+                    // cr-uv7-1: a file with several names is read too —
+                    // its later names are taken by what it holds. One that
+                    // cannot be read is recorded without it, and its later
+                    // names stay.
+                    #[cfg(unix)]
+                    if std::os::unix::fs::MetadataExt::nlink(&entry.metadata) > 1 {
+                        if let Ok(content) = std::fs::File::open(&absolute)
+                            .and_then(|mut file| crate::moved::content_of(&mut file))
+                        {
+                            seen_contents.push(crate::moved::content_sighting(name, &content));
+                        }
+                    }
                 }
                 let mtime = crate::wire_metadata::mtime_seconds(&entry.metadata).unwrap_or(0);
                 let permissions = crate::wire_metadata::permissions_mode(&entry.metadata);
@@ -872,6 +886,7 @@ fn spawn_manifest_task_with(
         }
         if let Some(sightings) = &sightings {
             sightings.publish(std::mem::take(&mut seen));
+            sightings.publish_contents(std::mem::take(&mut seen_contents));
         }
         let scan_outcome = scan_outcome?;
         for suppressed in &scan_outcome.suppressed_errors {

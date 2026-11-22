@@ -400,7 +400,9 @@ asks before it deletes.
   one rewritten with as many bytes in the same second, or put back under
   an older time, stays, whenever in the move that was done — and each
   directory this leaves empty. (A daemon on Windows holds a file by its
-  size and the time it was last written only.) An account
+  size and the time it was last written only.) A file with several names goes by
+  each name that was sent — a later name only while it holds what the
+  daemon read of it, which no look at the file can stand in for. An account
   is of the path its session read and answers for no other, and it
   answers only once that session has ended well, with whatever the
   receiving end says did not land struck from it. Anything else stays

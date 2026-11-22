@@ -131,6 +131,22 @@ fn path_digest(path: &[u8]) -> u128 {
     first_sixteen(&hasher)
 }
 
+/// cr-uv7-1: the digest of everything `file` holds, from where it is read.
+pub fn content_of(file: &mut impl std::io::Read) -> std::io::Result<[u8; 32]> {
+    let mut hasher = blake3::Hasher::new();
+    std::io::copy(file, &mut hasher)?;
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn content_digest(path: &[u8], content: &[u8; 32]) -> u128 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"content");
+    hasher.update(&(path.len() as u64).to_le_bytes());
+    hasher.update(path);
+    hasher.update(content);
+    first_sixteen(&hasher)
+}
+
 fn digest(path: &[u8], version: &Version) -> u128 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&(path.len() as u64).to_le_bytes());
@@ -156,6 +172,9 @@ pub struct Account {
     /// Each file: its path's digest, to strike it by, and the digest of
     /// the path with its version, which is what the account holds.
     sent: Vec<(u128, u128)>,
+    /// cr-uv7-1: and for a file with several names, its path's digest and
+    /// the digest of the path with the file's CONTENT, as the walk read it.
+    contents: Vec<(u128, u128)>,
 }
 
 impl Account {
@@ -165,7 +184,16 @@ impl Account {
         Self {
             root: place(root),
             sent: Vec::new(),
+            contents: Vec::new(),
         }
+    }
+
+    /// cr-uv7-1: what a file the session put on its manifest held, read
+    /// as the walk saw it — kept for a file with several names, whose later
+    /// names a removal can take only by its content.
+    pub fn record_content(&mut self, path: &[u8], content: &[u8; 32]) {
+        self.contents
+            .push((path_digest(path), content_digest(path, content)));
     }
 
     /// A file the session put on its manifest: its path below the source
@@ -206,6 +234,9 @@ impl Account {
 pub struct Sightings {
     /// By a name's digest: the digest of the name with the file as seen.
     seen: Mutex<HashMap<u128, u128>>,
+    /// cr-uv7-1: by a name's digest, the digest of the name with what the
+    /// file held — for a file with several names.
+    contents: Mutex<HashMap<u128, u128>>,
 }
 
 impl Sightings {
@@ -227,14 +258,37 @@ impl Sightings {
             .seen
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let contents = self
+            .contents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let held = |map: &HashMap<u128, u128>| {
+            listed
+                .iter()
+                .filter_map(|name| map.get(name).map(|whole| (*name, *whole)))
+                .collect()
+        };
         Account {
             root: place(root),
-            sent: listed
-                .iter()
-                .filter_map(|name| seen.get(name).map(|whole| (*name, *whole)))
-                .collect(),
+            sent: held(&seen),
+            contents: held(&contents),
         }
     }
+
+    /// cr-uv7-1: what a walk read of files with several names, each as
+    /// [`content_sighting`] makes one.
+    pub fn publish_contents(&self, contents: Vec<(u128, u128)>) {
+        self.contents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(contents);
+    }
+}
+
+/// cr-uv7-1: what a walk read of one file with several names, for
+/// [`Sightings::publish_contents`].
+pub fn content_sighting(path: &[u8], content: &[u8; 32]) -> (u128, u128) {
+    (path_digest(path), content_digest(path, content))
 }
 
 /// One file as a walk saw it, for [`Sightings::publish`]: its path below
@@ -255,6 +309,7 @@ pub fn name_key(path: &[u8]) -> u128 {
 pub struct Closed {
     root: PathBuf,
     sent: Vec<u128>,
+    contents: Vec<u128>,
 }
 
 impl Closed {
@@ -267,6 +322,15 @@ impl Closed {
     /// file written to since, or put there since, is another.
     pub fn holds(&self, path: &[u8], version: &Version) -> bool {
         self.sent.binary_search(&digest(path, version)).is_ok()
+    }
+
+    /// cr-uv7-1: whether the session sent this path holding exactly this
+    /// content — asked of a later name of a file with several, which no
+    /// look at the file can tell from one rewritten in place.
+    pub fn holds_content(&self, path: &[u8], content: &[u8; 32]) -> bool {
+        self.contents
+            .binary_search(&content_digest(path, content))
+            .is_ok()
     }
 
     pub fn len(&self) -> usize {
@@ -416,16 +480,22 @@ pub fn confirm(ticket: &[u8], not_landed: &[Vec<u8>]) {
     };
     let struck: std::collections::HashSet<u128> =
         not_landed.iter().map(|path| path_digest(path)).collect();
-    let mut sent: Vec<u128> = std::mem::take(&mut account.sent)
-        .into_iter()
-        .filter(|(path, _)| !struck.contains(path))
-        .map(|(_, whole)| whole)
-        .collect();
-    sent.sort_unstable();
-    sent.dedup();
+    let landed = |pairs: Vec<(u128, u128)>| {
+        let mut kept: Vec<u128> = pairs
+            .into_iter()
+            .filter(|(path, _)| !struck.contains(path))
+            .map(|(_, whole)| whole)
+            .collect();
+        kept.sort_unstable();
+        kept.dedup();
+        kept
+    };
+    let sent = landed(std::mem::take(&mut account.sent));
+    let contents = landed(std::mem::take(&mut account.contents));
     held.state = State::Confirmed(Arc::new(Closed {
         root: std::mem::take(&mut account.root),
         sent,
+        contents,
     }));
 }
 
@@ -488,6 +558,36 @@ mod tests {
     use super::*;
 
     const SECOND: i128 = 1_000_000_000;
+
+    /// cr-uv7-1: an account holds a file's content by its path, and a
+    /// path that did not land is struck from it with its version.
+    #[test]
+    fn an_account_holds_what_a_file_held_by_its_path() {
+        let content = [7u8; 32];
+        let other = [8u8; 32];
+        let mut account = Account::of(Path::new("/srv/contents"));
+        account.record(
+            b"a",
+            &Version {
+                size: 1,
+                mtime_nanos: 1,
+                ctime_nanos: 1,
+                device: 1,
+                inode: 1,
+            },
+        );
+        for name in [&b"a"[..], b"b", b"gone"] {
+            account.record_content(name, &content);
+        }
+        let ticket = keep(account);
+        confirm(&ticket, &[b"gone".to_vec()]);
+        let accounts = held(&[ticket]).expect("kept");
+        assert!(accounts[0].holds_content(b"a", &content));
+        assert!(accounts[0].holds_content(b"b", &content));
+        assert!(!accounts[0].holds_content(b"a", &other), "other content");
+        assert!(!accounts[0].holds_content(b"c", &content), "another path");
+        assert!(!accounts[0].holds_content(b"gone", &content), "struck");
+    }
 
     /// cr-uv5-2: an account written from what a walk saw holds each file
     /// on the manifest as the walk saw it — changed in any way since, it

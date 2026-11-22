@@ -10942,6 +10942,44 @@ mod own_incomplete_copy_tests {
         assert!(held_of(sole).holds(b"", &now(&one)));
     }
 
+    /// cr-uv7-1: a move's walk reads what a file with several names holds,
+    /// under each of its names, and nothing of a file with one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_moves_walk_reads_a_file_with_several_names() {
+        use crate::remote::transfer::source::FsTransferSource;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("src");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a"), b"one file").unwrap();
+        std::fs::hard_link(root.join("a"), root.join("b")).unwrap();
+        std::fs::write(root.join("alone"), b"another").unwrap();
+        let content =
+            crate::moved::content_of(&mut std::fs::File::open(root.join("a")).unwrap()).unwrap();
+        let alone = crate::moved::content_of(&mut std::fs::File::open(root.join("alone")).unwrap())
+            .unwrap();
+        let source = FsTransferSource::new(root.clone());
+        let (mut headers, mut scan) = source.scan_seeing(None, Arc::default(), true);
+        let mut listed = Vec::new();
+        while let Some(header) = headers.recv().await {
+            listed.push(crate::moved::name_key(own_name(&header)));
+        }
+        scan.finish().await.expect("the walk");
+        let account = scan.sightings().expect("recorded").account(&root, &listed);
+        let ticket = crate::moved::keep(account);
+        crate::moved::confirm(&ticket, &[]);
+        let account = crate::moved::held(&[ticket])
+            .expect("kept")
+            .pop()
+            .expect("one");
+        assert!(account.holds_content(b"a", &content));
+        assert!(account.holds_content(b"b", &content));
+        assert!(
+            !account.holds_content(b"alone", &alone),
+            "a file of one name is not read"
+        );
+    }
+
     /// cr-uv6-4: what a walk saw is that SCAN's. Two scans of one source
     /// — a source the caller shares between sessions — each keep their
     /// own record: the first walk's account holds a file as the first walk

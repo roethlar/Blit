@@ -287,6 +287,23 @@ pub struct Met {
     /// How many names the file has (cr-uv5-3); 1 where the system does
     /// not say.
     pub links: u64,
+    /// cr-uv7-1: what the entry holds, where its version cannot answer
+    /// for it.
+    pub content: Content,
+}
+
+/// cr-uv7-1: what a removal read of an entry's content, when it had to —
+/// for a later name of a file with several, whose version after the
+/// removal's own unlink cannot tell it from the file rewritten in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Content {
+    /// Not asked: the entry's version answers for it.
+    #[default]
+    NotAsked,
+    /// Its content's digest ([`crate::moved::content_of`]).
+    Digest([u8; 32]),
+    /// It had to be read and could not be: nothing answers for it.
+    Unreadable,
 }
 
 /// What kind of entry [`Met`] is: the entry itself, a link being a link.
@@ -868,8 +885,18 @@ fn remove_asking(
     let met = within.met(name)?;
     let file = (met.version.device, met.version.inode);
     let asked = match own.files.get(&file) {
+        // cr-uv7-1: and as the file stood before, it is asked about BY ITS
+        // CONTENT too. A rewrite of as many bytes whose time was put back,
+        // between the two looks at its earlier name, changes nothing a look
+        // can see but the time it was last changed — which the removal's
+        // own unlink changes anyway. What it holds is read, and the account
+        // must hold that; one that cannot be read stays.
         Some((before, left)) if met.kind == MetKind::File && met.version == *left => Met {
             version: *before,
+            content: match within.content_of(name) {
+                Ok(digest) => Content::Digest(digest),
+                Err(_) => Content::Unreadable,
+            },
             ..met
         },
         _ => met,
@@ -1017,6 +1044,7 @@ fn met_by_path(metadata: &std::fs::Metadata) -> Met {
         kind,
         version: crate::moved::Version::of(metadata),
         links: 1,
+        content: Content::NotAsked,
     }
 }
 
@@ -1271,7 +1299,28 @@ mod anchored {
                 kind,
                 version: version_of(&found),
                 links,
+                content: super::Content::NotAsked,
             })
+        }
+
+        /// cr-uv7-1: the digest of what the regular file called `name`
+        /// here holds — itself, never what a link by that name names.
+        fn content_of(&self, name: &CStr) -> io::Result<[u8; 32]> {
+            // SAFETY: as in `open_child`.
+            let fd = unsafe {
+                libc::openat(
+                    self.descriptor(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: `fd` was opened just above, is valid, and nothing
+            // else owns it.
+            let mut file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+            crate::moved::content_of(&mut file)
         }
 
         /// Remove the file called `name` here — a file with other names —
@@ -2047,29 +2096,46 @@ mod rm_tests {
     /// The versions an account would hold `names` below `tree` as: each
     /// as it stands.
     #[cfg(unix)]
-    fn held_of(tree: &Path, names: &[&str]) -> Vec<(PathBuf, crate::moved::Version)> {
+    fn held_of(tree: &Path, names: &[&str]) -> Vec<Held> {
+        use std::os::unix::fs::MetadataExt as _;
         names
             .iter()
             .map(|name| {
                 let metadata = fs::symlink_metadata(tree.join(name)).unwrap();
-                (PathBuf::from(name), crate::moved::Version::of(&metadata))
+                // As a walk reads it: the content of a file with several
+                // names (cr-uv7-1).
+                let content = (metadata.nlink() > 1).then(|| {
+                    crate::moved::content_of(&mut fs::File::open(tree.join(name)).unwrap()).unwrap()
+                });
+                (
+                    PathBuf::from(name),
+                    crate::moved::Version::of(&metadata),
+                    content,
+                )
             })
             .collect()
     }
 
+    /// A file a move's account holds: its path, its version, and what it
+    /// held where the walk read that.
+    #[cfg(unix)]
+    type Held = (PathBuf, crate::moved::Version, Option<[u8; 32]>);
+
     /// `operand` below `root`, removed as a move removes it when its
     /// account holds `held`: what stayed.
     #[cfg(unix)]
-    fn removed_for_a_move(
-        root: &Path,
-        operand: &str,
-        held: &[(PathBuf, crate::moved::Version)],
-    ) -> Vec<String> {
+    fn removed_for_a_move(root: &Path, operand: &str, held: &[Held]) -> Vec<String> {
         let keep = |path: &Path, met: &Met| {
             let holds = met.kind == MetKind::File
-                && held
-                    .iter()
-                    .any(|(name, version)| name == path && *version == met.version);
+                && held.iter().any(|(name, version, content)| {
+                    name == path
+                        && *version == met.version
+                        && match met.content {
+                            Content::NotAsked => true,
+                            Content::Digest(digest) => *content == Some(digest),
+                            Content::Unreadable => false,
+                        }
+                });
             (!holds).then(|| std::io::Error::other("not a file the move sent"))
         };
         let mut stayed = Vec::new();
@@ -2178,6 +2244,48 @@ mod rm_tests {
     /// appended to became "how the removal left it", the next name passed
     /// as the file that was sent, and the last copy of the appended bytes
     /// went with it. The other name stays, with what was written.
+    /// cr-uv7-1: and a rewrite between those two looks that a look cannot
+    /// see — as many bytes, its time put back — is seen by what the file
+    /// holds: the other name stays, with what was written. It went, as the
+    /// file that was sent.
+    #[cfg(unix)]
+    #[test]
+    fn a_rewrite_no_look_can_see_keeps_the_other_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let tree = root.join("tree");
+        fs::create_dir_all(&tree).unwrap();
+        fs::write(tree.join("a"), b"one file").unwrap();
+        fs::hard_link(tree.join("a"), tree.join("b")).unwrap();
+        let held = held_of(&tree, &["a", "b"]);
+        let written = std::rc::Rc::new(std::cell::Cell::new(false));
+        let stayed = {
+            let (tree, written) = (tree.clone(), std::rc::Rc::clone(&written));
+            let _hook = between_each(move |stage, name| {
+                if stage == "unlinking a name" && !written.get() {
+                    let other = tree.join(if name == Path::new("a") { "b" } else { "a" });
+                    let was = filetime::FileTime::from_last_modification_time(
+                        &fs::metadata(&other).unwrap(),
+                    );
+                    fs::write(&other, b"two file").unwrap();
+                    filetime::set_file_mtime(&other, was).unwrap();
+                    written.set(true);
+                }
+            });
+            removed_for_a_move(&root, "tree", &held)
+        };
+        assert!(
+            written.get(),
+            "the file was rewritten between the two looks"
+        );
+        assert_eq!(stayed.len(), 1, "{stayed:?}");
+        assert_eq!(
+            fs::read(tree.join(&stayed[0])).unwrap(),
+            b"two file",
+            "the only copy of what was written"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_write_between_a_removals_two_looks_keeps_the_other_name() {

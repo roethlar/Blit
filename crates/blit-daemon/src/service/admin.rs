@@ -325,10 +325,21 @@ fn remove_each(
             let why = match met.kind {
                 MetKind::Link => "it is a symbolic link, which a move does not carry",
                 MetKind::Other => "it is not a regular file, and a move carries only those",
+                // cr-uv7-1: and where the version cannot answer for what
+                // the file holds — a later name of one with several — the
+                // account must hold what it holds.
                 MetKind::File
-                    if accounts
-                        .iter()
-                        .any(|account| account.holds(&sent_path(relative_path), &met.version)) =>
+                    if accounts.iter().any(|account| {
+                        let path = sent_path(relative_path);
+                        account.holds(&path, &met.version)
+                            && match &met.content {
+                                blit_core::deletion::Content::NotAsked => true,
+                                blit_core::deletion::Content::Digest(digest) => {
+                                    account.holds_content(&path, digest)
+                                }
+                                blit_core::deletion::Content::Unreadable => false,
+                            }
+                    }) =>
                 {
                     return None;
                 }
@@ -1059,6 +1070,55 @@ mod rm_tests {
     /// contents of the same length, written 800 ms later in the same
     /// second (`same.txt`). And the accounts are of the path the sessions
     /// read: presented for another path, they let nothing go.
+    /// cr-uv7-1: a later name of a file with several goes only if the
+    /// account holds what the file holds: with the content the walk read,
+    /// both names go; with other content, the later one stays.
+    #[cfg(unix)]
+    #[test]
+    fn a_later_name_goes_only_with_the_content_that_was_sent() {
+        use blit_core::moved::Account;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        for (as_read, left) in [(true, 0usize), (false, 1)] {
+            let src = root.join("src");
+            fs::create_dir_all(&src).unwrap();
+            fs::write(src.join("a"), "one file").unwrap();
+            fs::hard_link(src.join("a"), src.join("b")).unwrap();
+            let version =
+                blit_core::moved::Version::of(&fs::symlink_metadata(src.join("a")).unwrap());
+            let content =
+                blit_core::moved::content_of(&mut fs::File::open(src.join("a")).unwrap()).unwrap();
+            let recorded = if as_read { content } else { [0u8; 32] };
+            let mut account = Account::of(&src);
+            for name in ["a", "b"] {
+                account.record(name.as_bytes(), &version);
+                account.record_content(name.as_bytes(), &recorded);
+            }
+            let ticket = blit_core::moved::keep(account);
+            blit_core::moved::confirm(&ticket, &[]);
+            let accounts = blit_core::moved::held(&[ticket]).expect("kept");
+            let operands = read_operands(vec!["src".to_string()], Vec::new()).expect("operands");
+            remove_each(
+                &root,
+                &root,
+                &operands,
+                blit_core::deletion::RmOptions {
+                    recursive: true,
+                    force: true,
+                },
+                Some(&accounts),
+                &|| false,
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+            let stayed = fs::read_dir(&src)
+                .map(|entries| entries.count())
+                .unwrap_or(0);
+            assert_eq!(stayed, left, "content as read: {as_read}");
+            let _ = fs::remove_dir_all(&src);
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_moves_removal_takes_what_its_sessions_sent() {
