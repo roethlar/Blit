@@ -723,25 +723,36 @@ impl Resolved {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
         before_a_fresh_partial_is_made(dst);
-        // cr-ecm22-6: by a short name of blit's own beside it, whatever the
-        // destination is called — the destination's name in it made a name too
-        // long for a destination whose own name was the longest a name can be
-        // — and another is tried when that one is taken.
+        let held = self.directory.as_raw_fd();
+        // cr-ecm28-3: staged in a directory of its own — made private (700)
+        // in the destination's directory, held, and checked to be this run's
+        // — so no other user can put anything in the staged name's place to
+        // be published, or have the cleanup remove what is theirs. Staged
+        // beside the destination, its name could be replaced. cr-ecm22-6: by
+        // a short name of blit's own, whatever the destination is called, and
+        // another is tried when that one is taken.
         let mut tries = 0;
-        let (staged, file) = loop {
-            let staged = c_string(std::ffi::OsStr::new(&format!(
+        let (stage_name, stage) = loop {
+            let name = c_string(std::ffi::OsStr::new(&format!(
                 ".blit-partial-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             )))?;
-            let error = match open_in(
-                self.directory.as_raw_fd(),
-                &staged,
-                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-            ) {
-                Ok(made) => break (staged, made),
-                Err(error) => error,
-            };
+            // SAFETY: `held` is open for the length of the call, and `name`
+            // is a NUL-terminated name that outlives it.
+            if unsafe { libc::mkdirat(held, name.as_ptr(), STAGE_MODE) } == 0 {
+                match open_stage(held, &name) {
+                    Ok(stage) => break (name, stage),
+                    Err(error) => {
+                        // SAFETY: as for `mkdirat` above.
+                        unsafe { libc::unlinkat(held, name.as_ptr(), libc::AT_REMOVEDIR) };
+                        return Err(error).with_context(|| {
+                            format!("making a fresh partial for {}", dst.display())
+                        });
+                    }
+                }
+            }
+            let error = std::io::Error::last_os_error();
             if error.kind() == std::io::ErrorKind::AlreadyExists && tries < 16 {
                 tries += 1;
                 continue;
@@ -749,10 +760,29 @@ impl Resolved {
             return Err(error)
                 .with_context(|| format!("making a fresh partial for {}", dst.display()));
         };
+        let staged = c"partial";
+        let stage_gone = || {
+            // SAFETY: as for `mkdirat` above; only an empty directory goes.
+            unsafe { libc::unlinkat(held, stage_name.as_ptr(), libc::AT_REMOVEDIR) };
+        };
+        let file = match open_in(
+            stage.as_raw_fd(),
+            staged,
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+        ) {
+            Ok(file) => file,
+            Err(error) => {
+                stage_gone();
+                return Err(error)
+                    .with_context(|| format!("making a fresh partial for {}", dst.display()));
+            }
+        };
+        before_a_fresh_partial_is_published(dst);
         let unmade = || {
-            // SAFETY: the held directory is open for the length of the call,
-            // and `staged` is a NUL-terminated name that outlives it.
-            unsafe { libc::unlinkat(self.directory.as_raw_fd(), staged.as_ptr(), 0) };
+            // SAFETY: the stage is open for the length of the call, and
+            // `staged` is a NUL-terminated name that outlives it.
+            unsafe { libc::unlinkat(stage.as_raw_fd(), staged.as_ptr(), 0) };
+            stage_gone();
         };
         let prepared = file
             .set_permissions(std::fs::Permissions::from_mode(0o600))
@@ -770,24 +800,24 @@ impl Resolved {
             }
         };
         if exclusive {
-            return self.publish_exclusive(dst, file, readied, &staged, unmade);
+            let published =
+                self.publish_exclusive(dst, file, readied, stage.as_raw_fd(), staged, &unmade);
+            if published.is_ok() {
+                stage_gone();
+            }
+            return published;
         }
-        // SAFETY: the held directory is open for the length of the call, and
+        // SAFETY: both directories are open for the length of the call, and
         // both names are NUL-terminated and outlive it.
-        if unsafe {
-            libc::renameat(
-                self.directory.as_raw_fd(),
-                staged.as_ptr(),
-                self.directory.as_raw_fd(),
-                self.name.as_ptr(),
-            )
-        } != 0
+        if unsafe { libc::renameat(stage.as_raw_fd(), staged.as_ptr(), held, self.name.as_ptr()) }
+            != 0
         {
             let error = std::io::Error::last_os_error();
             unmade();
             return Err(error)
                 .with_context(|| format!("putting a fresh partial in place of {}", dst.display()));
         }
+        stage_gone();
         Ok((file, readied))
     }
 }
@@ -809,8 +839,9 @@ impl Resolved {
         dst: &Path,
         file: File,
         readied: T,
+        stage: std::os::unix::io::RawFd,
         staged: &std::ffi::CStr,
-        unmade: impl Fn(),
+        unmade: &impl Fn(),
     ) -> Result<(File, T)> {
         use std::os::unix::io::AsRawFd as _;
         let held = self.directory.as_raw_fd();
@@ -829,7 +860,7 @@ impl Resolved {
                 // call, and both names are NUL-terminated and outlive it.
                 match unsafe {
                     libc::renameat2(
-                        held,
+                        stage,
                         staged.as_ptr(),
                         held,
                         self.name.as_ptr(),
@@ -859,7 +890,7 @@ impl Resolved {
         } else {
             // SAFETY: as for the rename above.
             let linked =
-                unsafe { libc::linkat(held, staged.as_ptr(), held, self.name.as_ptr(), 0) };
+                unsafe { libc::linkat(stage, staged.as_ptr(), held, self.name.as_ptr(), 0) };
             (linked != 0).then(std::io::Error::last_os_error)
         };
         if let Some(refused) = refused {
@@ -870,18 +901,88 @@ impl Resolved {
             Err(std::io::Error::from_raw_os_error(libc::EIO))
         } else {
             // SAFETY: as for the rename above.
-            match unsafe { libc::unlinkat(held, staged.as_ptr(), 0) } {
+            match unsafe { libc::unlinkat(stage, staged.as_ptr(), 0) } {
                 0 => Ok(()),
                 _ => Err(std::io::Error::last_os_error()),
             }
         };
         let_go.with_context(|| {
             format!(
-                "letting go of the staged name beside {}: the partial stands at the name, unfinished, with a second name",
+                "letting go of the staged name beside {}: the partial stands at the name, unfinished, with a second name in a private directory beside it",
                 dst.display()
             )
         })?;
         Ok((file, readied))
+    }
+}
+
+/// The mode a fresh partial's staging directory is made with: this run's
+/// user's alone.
+#[cfg(unix)]
+const STAGE_MODE: libc::mode_t = 0o700;
+
+/// cr-ecm28-3: the staging directory called `name` in `held`, opened — never
+/// through a link — and checked to be the one this run made: a directory
+/// this run's user owns, private. A directory put in its place is refused.
+#[cfg(unix)]
+fn open_stage(
+    held: std::os::unix::io::RawFd,
+    name: &std::ffi::CStr,
+) -> std::io::Result<std::os::unix::io::OwnedFd> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    use std::os::unix::io::{FromRawFd as _, OwnedFd};
+    // SAFETY: `held` is open for the length of the call, and `name` is a
+    // NUL-terminated name that outlives it.
+    let opened = unsafe {
+        libc::openat(
+            held,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if opened < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `opened` is an open descriptor nothing else owns.
+    let stage = unsafe { OwnedFd::from_raw_fd(opened) };
+    let seen = File::from(stage.try_clone()?).metadata()?;
+    // SAFETY: `geteuid` has no preconditions and cannot fail.
+    let me = unsafe { libc::geteuid() };
+    #[allow(clippy::unnecessary_cast)]
+    let private = seen.permissions().mode() & 0o777 == STAGE_MODE as u32;
+    if !seen.is_dir() || seen.uid() != me || !private {
+        return Err(std::io::Error::other(
+            "the staging directory is not the one this run made",
+        ));
+    }
+    Ok(stage)
+}
+
+/// Test seam (cr-ecm28-3): runs once a fresh partial is staged and before it
+/// is made ready and published — for a test to look at where it stands.
+/// Keyed by the destination's path. Production never sets it.
+#[cfg(all(test, unix))]
+pub(crate) static BEFORE_A_FRESH_PARTIAL_IS_PUBLISHED_HOOKS: std::sync::Mutex<
+    Vec<(std::path::PathBuf, PartialOpenedHook)>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn before_a_fresh_partial_is_published(_dst: &Path) {
+    #[cfg(test)]
+    {
+        let hooks: Vec<PartialOpenedHook> = BEFORE_A_FRESH_PARTIAL_IS_PUBLISHED_HOOKS
+            .lock()
+            .map(|hooks| {
+                hooks
+                    .iter()
+                    .filter(|(at, _)| at == _dst)
+                    .map(|(_, hook)| std::sync::Arc::clone(hook))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for hook in hooks {
+            hook(_dst);
+        }
     }
 }
 
@@ -1504,6 +1605,68 @@ mod tests {
         let partial = std::fs::metadata(&kept)?;
         assert_eq!(partial.len(), 9, "unfinished");
         assert_eq!(partial.mode() & 0o777, 0o600, "private");
+        Ok(())
+    }
+
+    /// cr-ecm28-3: a fresh partial is staged in a directory of its own —
+    /// private (700) and this run's — and nothing is left beside the
+    /// destination once it is published. Staged beside the destination, its
+    /// name could be replaced by another hand before it was published.
+    #[cfg(unix)]
+    #[test]
+    fn a_fresh_partial_is_staged_in_a_private_directory() -> Result<()> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let data = vec![7u8; 4096];
+        std::fs::write(&src, &data)?;
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))?;
+        let folder = tmp.path().join("folder");
+        std::fs::create_dir(&folder)?;
+        let dst = folder.join("dst");
+        std::fs::write(&dst, &data[..1000])?;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o644))?;
+        let staged: std::sync::Arc<std::sync::Mutex<Vec<(bool, u32, u32, bool)>>> =
+            std::sync::Arc::default();
+        {
+            let (folder, staged) = (folder.clone(), std::sync::Arc::clone(&staged));
+            BEFORE_A_FRESH_PARTIAL_IS_PUBLISHED_HOOKS
+                .lock()
+                .unwrap()
+                .push((
+                    dst.clone(),
+                    std::sync::Arc::new(move |at: &Path| {
+                        for entry in std::fs::read_dir(&folder).unwrap() {
+                            let entry = entry.unwrap();
+                            if entry.path() == at {
+                                continue;
+                            }
+                            let meta = std::fs::symlink_metadata(entry.path()).unwrap();
+                            staged.lock().unwrap().push((
+                                meta.is_dir(),
+                                meta.permissions().mode() & 0o777,
+                                meta.uid(),
+                                entry.path().join("partial").exists(),
+                            ));
+                        }
+                    }),
+                ));
+        }
+        let copied = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024);
+        BEFORE_A_FRESH_PARTIAL_IS_PUBLISHED_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(at, _)| at != &dst);
+        copied?;
+        let me = std::fs::metadata(&src)?.uid();
+        assert_eq!(
+            *staged.lock().unwrap(),
+            [(true, 0o700, me, true)],
+            "one private directory of this run's, the partial in it"
+        );
+        let left: Vec<_> = std::fs::read_dir(&folder)?.collect::<std::io::Result<_>>()?;
+        assert_eq!(left.len(), 1, "nothing left beside the destination");
+        assert_eq!(std::fs::read(&dst)?, data);
         Ok(())
     }
 
