@@ -88,6 +88,52 @@ fn a_local_copy_gives_every_file_its_sources_mode() {
     }
 }
 
+/// cr-ecm29-5: a resume under a narrow mask (0200) still makes its fresh
+/// partial: its private staging directory, made 0500 by the mask, is given
+/// its mode through its handle. Checked for exactly 0700, it was refused and
+/// the copy failed (exit 2); the mask left in place, this run could not
+/// write in it.
+#[test]
+fn a_resume_under_a_narrow_mask_makes_its_fresh_partial() {
+    use std::os::unix::process::CommandExt as _;
+    let ctx = TestContext::new();
+    let source = ctx.workspace.join("source");
+    let target = ctx.workspace.join("target");
+    fs::create_dir_all(&source).unwrap();
+    fs::create_dir_all(&target).unwrap();
+    let data: Vec<u8> = (0..300 * 1024).map(|at| (at % 251) as u8).collect();
+    fs::write(source.join("big.bin"), &data).unwrap();
+    fs::set_permissions(source.join("big.bin"), fs::Permissions::from_mode(0o600)).unwrap();
+    // Wider than its source: not reused, a fresh partial is made for it.
+    fs::write(target.join("big.bin"), &data[..1000]).unwrap();
+    fs::set_permissions(target.join("big.bin"), fs::Permissions::from_mode(0o644)).unwrap();
+    let mut cmd = Command::new(&ctx.cli_bin);
+    cmd.arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .arg("copy")
+        .arg("--resume")
+        .arg(format!("{}/", source.display()))
+        .arg(format!("{}/", target.display()));
+    // SAFETY: the closure runs in the child before it executes blit, and
+    // calls only `umask`, which is safe to call there.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::umask(0o200);
+            Ok(())
+        });
+    }
+    let output = run_with_timeout(cmd, Duration::from_secs(120));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(target.join("big.bin")).unwrap(), data);
+    assert_eq!(mode_of(&target.join("big.bin")), 0o600);
+    let left: Vec<_> = fs::read_dir(&target).unwrap().collect();
+    assert_eq!(left.len(), 1, "nothing left beside it");
+}
+
 /// cr-ecm22-1: a resume whose fresh partial cannot be made ready — here a
 /// file-size limit refuses its length — leaves the destination as it
 /// stood. The partial was renamed into place first, and the destination

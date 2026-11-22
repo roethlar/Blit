@@ -1082,7 +1082,12 @@ const STAGE_MODE: libc::mode_t = 0o700;
 
 /// cr-ecm28-3: the staging directory called `name` in `held`, opened — never
 /// through a link — and checked to be the one this run made: a directory
-/// this run's user owns, private. A directory put in its place is refused.
+/// this run's user owns, granting no one else anything. A directory put in
+/// its place is refused.
+///
+/// cr-ecm29-5: and its mode set through that handle (700): made under a
+/// narrow mask — 0200 makes it 0500 — it was refused as not this run's, and
+/// the copy failed; where it was taken, this run could not write in it.
 #[cfg(unix)]
 fn open_stage(
     held: std::os::unix::io::RawFd,
@@ -1104,16 +1109,19 @@ fn open_stage(
     }
     // SAFETY: `opened` is an open descriptor nothing else owns.
     let stage = unsafe { OwnedFd::from_raw_fd(opened) };
-    let seen = File::from(stage.try_clone()?).metadata()?;
+    let handle = File::from(stage.try_clone()?);
+    let seen = handle.metadata()?;
     // SAFETY: `geteuid` has no preconditions and cannot fail.
     let me = unsafe { libc::geteuid() };
-    #[allow(clippy::unnecessary_cast)]
-    let private = seen.permissions().mode() & 0o777 == STAGE_MODE as u32;
+    // A mask only takes away: made as asked, it grants no one else anything.
+    let private = seen.permissions().mode() & 0o077 == 0;
     if !seen.is_dir() || seen.uid() != me || !private {
         return Err(std::io::Error::other(
             "the staging directory is not the one this run made",
         ));
     }
+    #[allow(clippy::unnecessary_cast)]
+    handle.set_permissions(std::fs::Permissions::from_mode(STAGE_MODE as u32))?;
     Ok(stage)
 }
 
