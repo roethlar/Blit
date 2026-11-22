@@ -1258,6 +1258,8 @@ impl Blit for BlitService {
             now_nanos: blit_core::find::nanos_of(std::time::SystemTime::now()),
             // What is in a directory goes before the directory can.
             contents_first: req.delete,
+            // cr-uv10-2: and goes only where, and as, it was found.
+            seen: req.delete,
             ..Default::default()
         };
         let compare = |compare: i32| match blit_core::generated::FindCompare::try_from(compare) {

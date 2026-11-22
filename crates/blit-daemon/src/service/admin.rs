@@ -881,13 +881,17 @@ pub(crate) fn stream_find(
             // of it from a send that fails.
             FindEvent::Walking if found.sender.is_closed() => Err(Stopped),
             FindEvent::Walking => Ok(()),
-            FindEvent::Found(path, kind) => match &mut deleting {
+            FindEvent::Found(path, kind, seen) => match &mut deleting {
                 None => found.add(&path),
                 // Asked again before EACH removal: what is removed after
                 // the asker has gone is removed for nobody.
                 Some(_) if found.sender.is_closed() => Err(Stopped),
                 Some(deleting) => {
-                    match deleting.remove(&path, kind == Some(blit_core::find::Kind::Directory)) {
+                    match deleting.remove(
+                        &path,
+                        kind == Some(blit_core::find::Kind::Directory),
+                        seen,
+                    ) {
                         Ok(()) => Ok(()),
                         Err(error) => found.reply(failure(&path, &error, true)),
                     }
@@ -975,11 +979,20 @@ impl Deleting {
     }
 
     /// Remove the entry `relative` below the start (empty: the start).
-    fn remove(&mut self, relative: &Path, directory: bool) -> std::io::Result<()> {
+    ///
+    /// cr-uv10-2: `seen` — where the walk found it — must be what the
+    /// removal finds, or it stays.
+    fn remove(
+        &mut self,
+        relative: &Path,
+        directory: bool,
+        seen: Option<blit_core::find::Seen>,
+    ) -> std::io::Result<()> {
+        let seen = seen.map(|seen| (seen.within, seen.entry));
         if !relative.as_os_str().is_empty() {
             return self
                 .remover
-                .remove(&self.start_at.join(relative), directory);
+                .remove_found(&self.start_at.join(relative), directory, seen);
         }
         // The module itself is never removed, and is passed over without
         // a word — as `find . -delete` passes over `.`, with everything
@@ -997,7 +1010,7 @@ impl Deleting {
         // Typed with a separator after it, it goes as a directory or not
         // at all.
         let directory = directory || self.start_as_directory;
-        self.remover.remove(&self.start_at, directory)
+        self.remover.remove_found(&self.start_at, directory, seen)
     }
 }
 
@@ -2226,10 +2239,10 @@ mod status_mapping_tests {
         std::fs::write(root.join("t/real/deep/g"), b"x").unwrap();
         let mut by_a_link = deleting(root.join("t/start/deep"), false);
         by_a_link
-            .remove(Path::new("g"), false)
+            .remove(Path::new("g"), false, None)
             .expect_err("nothing goes by a path through a link");
         by_a_link
-            .remove(Path::new(""), true)
+            .remove(Path::new(""), true, None)
             .expect_err("nor the start itself");
         assert!(root.join("t/real/deep/g").exists());
         std::fs::remove_dir_all(root.join("t/real/deep")).unwrap();
@@ -2246,13 +2259,13 @@ mod status_mapping_tests {
 
         let mut through = deleting(root.join("t/start"), true);
         through
-            .remove(Path::new("f"), false)
+            .remove(Path::new("f"), false, None)
             .expect_err("nothing goes through the link");
         assert!(root.join("t/real/f").exists());
         // The start was typed as a directory: what stands there now goes
         // as one, or not at all.
         through
-            .remove(Path::new(""), false)
+            .remove(Path::new(""), false, None)
             .expect_err("a link is no directory");
         assert!(root.join("t/start").is_symlink());
 
@@ -2260,15 +2273,15 @@ mod status_mapping_tests {
         // goes itself.
         let mut plain = deleting(root.join("t/real"), true);
         plain
-            .remove(Path::new("f"), false)
+            .remove(Path::new("f"), false, None)
             .expect("the entry found");
         assert!(!root.join("t/real/f").exists());
-        plain.remove(Path::new(""), true).expect("the start");
+        plain.remove(Path::new(""), true, None).expect("the start");
         assert!(!root.join("t/real").exists());
         // And a link typed plainly goes as the link.
         std::fs::create_dir(root.join("t/real")).unwrap();
         let mut link = deleting(root.join("t/start"), false);
-        link.remove(Path::new(""), false).expect("the link");
+        link.remove(Path::new(""), false, None).expect("the link");
         assert!(!root.join("t/start").is_symlink() && root.join("t/real").is_dir());
     }
 }

@@ -346,7 +346,7 @@ pub struct RmOptions {
 pub struct Remover {
     canonical_root: PathBuf,
     #[cfg(unix)]
-    held: Option<(PathBuf, anchored::Passage)>,
+    held: Option<(PathBuf, anchored::Passage, Option<(u64, u64)>)>,
 }
 
 impl Remover {
@@ -364,6 +364,22 @@ impl Remover {
     /// anything else otherwise. `target`'s directory is a path with no
     /// link in it, at or below the root; the root itself is never removed.
     pub fn remove(&mut self, target: &Path, directory: bool) -> std::io::Result<()> {
+        self.remove_found(target, directory, None)
+    }
+
+    /// [`Self::remove`] of an entry a walk found (cr-uv10-2): `seen` —
+    /// the directory it was found in, and which file it was, device and
+    /// number each — must be what this removal holds and finds there, or
+    /// it stays. A directory replaced after the walk read it, holding an
+    /// entry of the same name — another file, or another name for the same
+    /// one — gave that entry up in the found one's place. Unix only;
+    /// elsewhere `seen` is not asked.
+    pub fn remove_found(
+        &mut self,
+        target: &Path,
+        directory: bool,
+        seen: Option<((u64, u64), Option<(u64, u64)>)>,
+    ) -> std::io::Result<()> {
         let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
             return Err(leaves_the_root());
         };
@@ -375,18 +391,35 @@ impl Remover {
             use anchored::ByName as _;
             use std::os::unix::ffi::OsStrExt as _;
             let name = std::ffi::CString::new(name.as_bytes())?;
-            if self.held.as_ref().is_none_or(|(held, _)| held != parent) {
+            if self.held.as_ref().is_none_or(|(held, _, _)| held != parent) {
                 self.held = None;
                 let passage =
                     anchored::Passage::open_canonical(parent, Some(&self.canonical_root))?;
-                self.held = Some((parent.to_path_buf(), passage));
+                // Which directory it is, once for all its entries.
+                let identity = passage.version().ok().map(|held| (held.device, held.inode));
+                self.held = Some((parent.to_path_buf(), passage, identity));
             }
-            let (_, passage) = self.held.as_ref().expect("held just above");
+            let (_, passage, identity) = self.held.as_ref().expect("held just above");
+            if let Some((within, entry)) = seen {
+                if *identity != Some(within) {
+                    return Err(std::io::Error::other(
+                        "the directory it was found in is not the one there now",
+                    ));
+                }
+                if let Some(entry) = entry {
+                    let met = passage.met(&name)?;
+                    if (met.version.device, met.version.inode) != entry {
+                        return Err(std::io::Error::other(
+                            "it is not what was found: it was replaced since",
+                        ));
+                    }
+                }
+            }
             passage.remove(&name, directory)
         }
         #[cfg(not(unix))]
         {
-            let _ = name;
+            let _ = (name, seen);
             crate::path_safety::verify_contained(&self.canonical_root, target)
                 .map_err(|_| leaves_the_root())?;
             if directory {
@@ -1470,6 +1503,11 @@ mod anchored {
                 fd: unsafe { OwnedFd::from_raw_fd(fd) },
             })
         }
+
+        /// This directory, as it stands (cr-uv10-2).
+        pub(super) fn version(&self) -> io::Result<crate::moved::Version> {
+            version_held(&self.fd)
+        }
     }
 
     impl ByName for Passage {
@@ -2169,6 +2207,55 @@ mod rm_tests {
         )
         .unwrap();
         stayed
+    }
+
+    /// cr-uv10-2: what `find -delete` found is removed only where it was
+    /// found and as it was. Its directory replaced by another holding
+    /// another name for the same file: the entry stays. The entry replaced
+    /// in its directory by another file: it stays. As it was: it goes.
+    #[cfg(unix)]
+    #[test]
+    fn a_found_entry_is_removed_only_where_and_as_it_was_found() {
+        use std::os::unix::fs::MetadataExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let identity = |path: &Path| {
+            let found = fs::symlink_metadata(path).unwrap();
+            (found.dev(), found.ino())
+        };
+        let seen_at = |dir: &Path| Some((identity(dir), Some(identity(&dir.join("f")))));
+        let mut remover = Remover::below(&root);
+
+        fs::create_dir_all(root.join("d")).unwrap();
+        fs::write(root.join("d/f"), b"found").unwrap();
+        let seen = seen_at(&root.join("d"));
+        fs::rename(root.join("d"), root.join("d-was-here")).unwrap();
+        fs::create_dir(root.join("d")).unwrap();
+        fs::hard_link(root.join("d-was-here/f"), root.join("d/f")).unwrap();
+        assert!(remover
+            .remove_found(&root.join("d/f"), false, seen)
+            .is_err());
+        assert!(root.join("d/f").exists(), "the directory was replaced");
+
+        fs::create_dir_all(root.join("g")).unwrap();
+        fs::write(root.join("g/f"), b"found").unwrap();
+        let seen = seen_at(&root.join("g"));
+        fs::write(root.join("g/another"), b"another").unwrap();
+        fs::rename(root.join("g/another"), root.join("g/f")).unwrap();
+        assert!(remover
+            .remove_found(&root.join("g/f"), false, seen)
+            .is_err());
+        assert_eq!(
+            fs::read(root.join("g/f")).unwrap(),
+            b"another",
+            "the entry was replaced"
+        );
+
+        let seen = seen_at(&root.join("g"));
+        remover
+            .remove_found(&root.join("g/f"), false, seen)
+            .unwrap();
+        assert!(!root.join("g/f").exists(), "as it was: gone");
     }
 
     /// cr-uv5-3: a file with several names goes by every one of them when

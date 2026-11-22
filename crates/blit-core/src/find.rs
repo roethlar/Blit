@@ -148,6 +148,22 @@ pub struct FindOptions {
     /// which `-delete` turns on: what is in a directory goes before the
     /// directory can.
     pub contents_first: bool,
+    /// cr-uv10-2: each entry found comes with where it was ([`Seen`]) —
+    /// `-delete` removes only that. Each costs a look of its own.
+    pub seen: bool,
+}
+
+/// cr-uv10-2: where an entry found was — the directory the walk held it
+/// in, and which file the entry is (device and number each) where the
+/// walk looked at it anyway: a test of its size or age asked, or it is a
+/// directory the walk entered, or the start. Nothing more is looked up
+/// for it: the look a removal would want costs every entry a call.
+/// Given only when it is asked for ([`FindOptions::seen`]), and where the
+/// system says (Unix).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Seen {
+    pub within: (u64, u64),
+    pub entry: Option<(u64, u64)>,
 }
 
 impl FindOptions {
@@ -198,7 +214,7 @@ pub enum FindEvent {
     /// An entry every test holds for: its path below the start, empty for
     /// the start itself — and what kind of entry it is, where it is one of
     /// the three.
-    Found(PathBuf, Option<Kind>),
+    Found(PathBuf, Option<Kind>, Option<Seen>),
     Failure(FindFailure),
 }
 
@@ -273,11 +289,21 @@ pub fn find_in(
     }
     let kind = Kind::of(metadata.kind);
     let start_holds = options.holds(start_name, kind) && options.facts_hold(&metadata);
+    // A start read through a link is not removed by its name (the daemon
+    // refuses that first); nothing is said of where it was.
+    let start_seen = if options.seen && !through {
+        start.seen(&metadata).map(|(within, entry)| Seen {
+            within,
+            entry: Some(entry),
+        })
+    } else {
+        None
+    };
     let entered = kind == Some(Kind::Directory) && options.max_depth != Some(0);
     // Contents first: a start that is entered is given last.
     let start_last = start_holds && options.contents_first && entered;
     if start_holds && !start_last {
-        emit(FindEvent::Found(PathBuf::new(), kind)).map_err(FindEnd::Stopped)?;
+        emit(FindEvent::Found(PathBuf::new(), kind, start_seen)).map_err(FindEnd::Stopped)?;
     }
     if !entered {
         return Ok(());
@@ -292,7 +318,18 @@ pub fn find_in(
         found_last: bool,
         /// Entries read since the caller last had a word.
         read: usize,
+        /// cr-uv10-2: which directory this is, when entries are to say
+        /// where they were; and where the directory itself was, for its
+        /// word when it is given last.
+        within: Option<(u64, u64)>,
+        seen: Option<Seen>,
     }
+    let held_as = |entries: &crate::held::Directory| {
+        options
+            .seen
+            .then(|| entries.itself().ok().and_then(|looked| looked.identity))
+            .flatten()
+    };
     let mut frames: Vec<Frame> = Vec::new();
     emit(FindEvent::Walking).map_err(FindEnd::Stopped)?;
     let opened = if through {
@@ -303,9 +340,11 @@ pub fn find_in(
     match opened {
         Ok(entries) => frames.push(Frame {
             relative_path: PathBuf::new(),
+            within: held_as(&entries),
             entries,
             found_last: start_last,
             read: 0,
+            seen: start_seen,
         }),
         Err(error) => {
             emit(FindEvent::Failure(FindFailure {
@@ -314,7 +353,8 @@ pub fn find_in(
             }))
             .map_err(FindEnd::Stopped)?;
             if start_last {
-                emit(FindEvent::Found(PathBuf::new(), kind)).map_err(FindEnd::Stopped)?;
+                emit(FindEvent::Found(PathBuf::new(), kind, start_seen))
+                    .map_err(FindEnd::Stopped)?;
             }
             return Ok(());
         }
@@ -323,8 +363,12 @@ pub fn find_in(
         let Some(entry) = frame.entries.next_entry() else {
             let read = frames.pop().expect("the frame just read");
             if read.found_last {
-                emit(FindEvent::Found(read.relative_path, Some(Kind::Directory)))
-                    .map_err(FindEnd::Stopped)?;
+                emit(FindEvent::Found(
+                    read.relative_path,
+                    Some(Kind::Directory),
+                    read.seen,
+                ))
+                .map_err(FindEnd::Stopped)?;
             }
             continue;
         };
@@ -366,11 +410,15 @@ pub fn find_in(
             }
         };
         let mut holds = options.holds(&name_bytes(&name), kind);
+        let mut looked_at = None;
         // The entry itself is asked only when a test needs what only it
         // can say, and only once its name and kind have held (AC-7).
         if holds && options.needs_facts() {
             match facts_of(&frame.entries, &entry) {
-                Ok(metadata) => holds = options.facts_hold(&metadata),
+                Ok(metadata) => {
+                    looked_at = metadata.identity;
+                    holds = options.facts_hold(&metadata);
+                }
                 Err(error) => {
                     holds = false;
                     emit(FindEvent::Failure(FindFailure {
@@ -381,6 +429,14 @@ pub fn find_in(
                 }
             }
         }
+        let seen = if holds && options.seen {
+            frame.within.map(|within| Seen {
+                within,
+                entry: looked_at,
+            })
+        } else {
+            None
+        };
         // This entry is `frames.len()` levels below the start.
         let enter = kind == Some(Kind::Directory)
             && options
@@ -388,7 +444,7 @@ pub fn find_in(
                 .is_none_or(|max| (frames.len() as u32) < max);
         let last = holds && options.contents_first && enter;
         if holds && !last {
-            emit(FindEvent::Found(relative_path.clone(), kind)).map_err(FindEnd::Stopped)?;
+            emit(FindEvent::Found(relative_path.clone(), kind, seen)).map_err(FindEnd::Stopped)?;
         }
         if !enter {
             continue;
@@ -400,12 +456,21 @@ pub fn find_in(
             .entries
             .enter(&entry);
         match entered {
-            Ok(entries) => frames.push(Frame {
-                relative_path,
-                entries,
-                found_last: last,
-                read: 0,
-            }),
+            Ok(entries) => {
+                // A directory entered says which it is, for nothing more.
+                let within = held_as(&entries);
+                frames.push(Frame {
+                    relative_path,
+                    within,
+                    entries,
+                    found_last: last,
+                    read: 0,
+                    seen: seen.map(|seen| Seen {
+                        entry: seen.entry.or(within),
+                        ..seen
+                    }),
+                })
+            }
             Err(error) => {
                 emit(FindEvent::Failure(FindFailure {
                     relative_path: relative_path.clone(),
@@ -413,7 +478,7 @@ pub fn find_in(
                 }))
                 .map_err(FindEnd::Stopped)?;
                 if last {
-                    emit(FindEvent::Found(relative_path, kind)).map_err(FindEnd::Stopped)?;
+                    emit(FindEvent::Found(relative_path, kind, seen)).map_err(FindEnd::Stopped)?;
                 }
             }
         }
@@ -469,13 +534,68 @@ mod tests {
         assert_eq!(failed, ["a"]);
     }
 
+    /// cr-uv10-2: asked, each entry found says where it was: the directory
+    /// the walk held it in, and which file it is. Not asked, nothing.
+    #[cfg(unix)]
+    #[test]
+    fn each_entry_found_says_where_it_was_when_asked() {
+        use std::os::unix::fs::MetadataExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let start = tmp.path().join("start");
+        write(&start, "a/f");
+        let identity = |path: &Path| {
+            let found = fs::symlink_metadata(path).unwrap();
+            (found.dev(), found.ino())
+        };
+        let sized = vec![SizeTest {
+            compare: Compare::More,
+            count: 0,
+            unit_bytes: 1,
+        }];
+        for (asked, facts) in [(true, false), (true, true), (false, false)] {
+            let mut said = Vec::new();
+            find(
+                &start,
+                b"start",
+                &FindOptions {
+                    seen: asked,
+                    contents_first: true,
+                    sizes: if facts { sized.clone() } else { Vec::new() },
+                    ..FindOptions::default()
+                },
+                &mut |event| {
+                    if let FindEvent::Found(path, _, seen) = event {
+                        said.push((path, seen));
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(said.len(), 3, "{said:?}");
+            for (path, seen) in said {
+                let at = start.join(&path);
+                let at = at.components().collect::<PathBuf>();
+                // Which file it is, where the walk looked at it anyway: its
+                // size asked, or a directory, or the start.
+                let looked = facts || at.is_dir();
+                let expected = asked.then(|| Seen {
+                    within: identity(at.parent().unwrap()),
+                    entry: looked.then(|| identity(&at)),
+                });
+                assert_eq!(seen, expected, "{path:?}, asked: {asked}, facts: {facts}");
+            }
+        }
+    }
+
     /// What a walk found, sorted, and what it could not read.
     fn walk(start: &Path, name: &str, options: &FindOptions) -> (Vec<String>, Vec<String>) {
         let (mut found, mut failed) = (Vec::new(), Vec::new());
         find(start, name.as_bytes(), options, &mut |event| {
             match event {
                 FindEvent::Walking => {}
-                FindEvent::Found(path, _) => found.push(path.to_string_lossy().replace('\\', "/")),
+                FindEvent::Found(path, _, _) => {
+                    found.push(path.to_string_lossy().replace('\\', "/"))
+                }
                 FindEvent::Failure(failure) => {
                     failed.push(failure.relative_path.to_string_lossy().replace('\\', "/"))
                 }
@@ -532,7 +652,7 @@ mod tests {
         // contents.
         let mut order = Vec::new();
         find(&start, b"t", &all, &mut |event| {
-            if let FindEvent::Found(path, _) = event {
+            if let FindEvent::Found(path, _, _) = event {
                 order.push(path.to_string_lossy().replace('\\', "/"));
             }
             Ok(())
@@ -731,7 +851,7 @@ mod tests {
             &FindOptions::default(),
             &mut |event| match event {
                 FindEvent::Walking => Err(Stopped),
-                FindEvent::Found(path, _) => {
+                FindEvent::Found(path, _, _) => {
                     given.push(path);
                     Ok(())
                 }
@@ -855,7 +975,7 @@ mod tests {
         let order = |options: &FindOptions| {
             let mut given = Vec::new();
             find(&start, b"t", options, &mut |event| {
-                if let FindEvent::Found(path, _) = event {
+                if let FindEvent::Found(path, _, _) = event {
                     given.push(path.to_string_lossy().replace('\\', "/"));
                 }
                 Ok(())
@@ -1028,7 +1148,7 @@ mod tests {
             ..FindOptions::default()
         };
         find(&start, b"t", &options, &mut |event| {
-            if let FindEvent::Found(path, _) = event {
+            if let FindEvent::Found(path, _, _) = event {
                 found.push(path.into_os_string().into_vec());
             }
             Ok(())

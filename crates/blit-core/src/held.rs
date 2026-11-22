@@ -652,6 +652,19 @@ mod imp {
         pub(crate) fn several_names(&self, looked: &Looked) -> Option<(u64, u64)> {
             several(looked)
         }
+
+        /// cr-uv10-2: where the start's own entry is — the directory it is
+        /// in, held, and which file `looked` says it is; nothing for a
+        /// start read whole.
+        pub(crate) fn seen(&self, looked: &Looked) -> Option<((u64, u64), (u64, u64))> {
+            match &self.place {
+                Place::In(dir, _) => look_held(dir.as_raw_fd())
+                    .ok()
+                    .and_then(|within| within.identity)
+                    .zip(looked.identity),
+                Place::Whole(_) => None,
+            }
+        }
     }
 }
 
@@ -785,6 +798,10 @@ mod imp {
 
         pub(crate) fn several_names(&self, looked: &Looked) -> Option<(u64, u64)> {
             several_names_at(&self.typed, looked)
+        }
+
+        pub(crate) fn seen(&self, _looked: &Looked) -> Option<((u64, u64), (u64, u64))> {
+            None
         }
     }
 }
