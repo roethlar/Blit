@@ -161,27 +161,36 @@ pub fn make_partial_private(file: &File) -> std::io::Result<bool> {
 /// from the moment it exists, and only then renamed over it. If it cannot
 /// be made, what stands there is as it was: it was removed, or cut to
 /// nothing through the link, before the new one could be had.
-#[cfg(unix)]
 ///
 /// cr-ecm22-1: and it is READY first — its mode, and its length
 /// (`unfinished`: one byte longer than its source) — before it takes the
 /// destination's place: renamed first, a length the system then refused left
 /// the destination an empty file.
+///
+/// cr-ecm22-2: what a CHAIN of links ends at is the file replaced — the
+/// file opening the name reaches, which a resume in place patches — and
+/// every link of it kept. One link was followed, and the next link of the
+/// chain replaced by the partial, the file at its end left as it was.
+#[cfg(unix)]
 pub fn fresh_partial(dst: &Path, unfinished: u64) -> Result<File> {
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let target = match std::fs::symlink_metadata(dst) {
-        Ok(there) if there.file_type().is_symlink() => {
-            let named = std::fs::read_link(dst)
-                .with_context(|| format!("reading the link {}", dst.display()))?;
-            match dst.parent() {
-                Some(parent) if named.is_relative() => parent.join(named),
-                _ => named,
-            }
+    let mut target = dst.to_path_buf();
+    let mut links = 0;
+    while std::fs::symlink_metadata(&target).is_ok_and(|there| there.file_type().is_symlink()) {
+        // As many as opening the name would follow (Linux's own limit).
+        links += 1;
+        if links > 40 {
+            eyre::bail!("{} is a chain of too many links", dst.display());
         }
-        _ => dst.to_path_buf(),
-    };
+        let named = std::fs::read_link(&target)
+            .with_context(|| format!("reading the link {}", target.display()))?;
+        target = match target.parent() {
+            Some(parent) if named.is_relative() => parent.join(named),
+            _ => named,
+        };
+    }
     if target.file_name().is_none() {
         eyre::bail!("{} names no file", dst.display());
     }
@@ -603,6 +612,39 @@ mod tests {
                 0o644
             );
         }
+        Ok(())
+    }
+
+    /// cr-ecm22-2: a chain of links at the destination is followed to its
+    /// end — the file there is the one replaced — and every link of it kept.
+    /// One link was followed and the next link replaced, the file at the
+    /// chain's end left as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_fresh_partial_through_a_chain_of_links_replaces_its_end() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let data = vec![7u8; 4096];
+        std::fs::write(&src, &data)?;
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))?;
+        let actual = tmp.path().join("actual");
+        std::fs::write(&actual, &data[..1000])?;
+        std::fs::set_permissions(&actual, std::fs::Permissions::from_mode(0o644))?;
+        std::fs::create_dir(tmp.path().join("sub"))?;
+        let middle = tmp.path().join("sub").join("middle");
+        std::os::unix::fs::symlink("../actual", &middle)?;
+        let entry = tmp.path().join("entry");
+        std::os::unix::fs::symlink("sub/middle", &entry)?;
+        resume_copy_from(&mut File::open(&src)?, data.len() as u64, &entry, 1024)?;
+        for link in [&entry, &middle] {
+            assert!(
+                std::fs::symlink_metadata(link)?.file_type().is_symlink(),
+                "{} kept",
+                link.display()
+            );
+        }
+        assert_eq!(std::fs::read(&actual)?, data, "the chain's end replaced");
         Ok(())
     }
 
