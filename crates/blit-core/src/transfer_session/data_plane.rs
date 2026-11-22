@@ -2919,9 +2919,9 @@ mod tests {
             async fn write_payload(&self, _payload: PreparedPayload) -> Result<SinkOutcome> {
                 Ok(SinkOutcome::default())
             }
-            async fn skip_record(&self, path: &str, reason: &str) -> Result<SinkOutcome> {
+            // cr-ecm27-5: it only forgets; the skip it inherits tells it.
+            fn forget_resume(&self, _path: &str) {
                 self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(SinkOutcome::failed(path, reason))
             }
             fn root(&self) -> &Path {
                 &self.1
@@ -2954,7 +2954,7 @@ mod tests {
             .await
             .unwrap();
         assert!(outcome.file_failed("r.bin"), "{outcome:?}");
-        assert_eq!(forgets.0.load(Ordering::SeqCst), 1, "the sink is told");
+        assert_eq!(forgets.0.load(Ordering::SeqCst), 1, "the sink forgets");
     }
 
     /// cr-ecm22-5: a resume record the source closes failed on the data

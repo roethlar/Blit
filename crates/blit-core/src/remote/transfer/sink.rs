@@ -955,9 +955,12 @@ pub trait TransferSink: Send + Sync {
     }
 
     /// The SOURCE will not deliver `relative_path` (a v7 skip record).
-    /// The default reports the file failed; a sink that tracks granted
-    /// needs overrides it to move the need to `Failed` first.
+    /// The default forgets what the sink noted for the file
+    /// ([`Self::forget_resume`], cr-ecm27-5) and reports it failed; a sink
+    /// that tracks granted needs overrides it to move the need to `Failed`
+    /// first, and hands the skip on.
     async fn skip_record(&self, relative_path: &str, reason: &str) -> Result<SinkOutcome> {
+        self.forget_resume(relative_path);
         Ok(SinkOutcome::failed(relative_path, reason))
     }
 
@@ -1601,15 +1604,6 @@ impl TransferSink for FsTransferSink {
     /// its source. It was kept to the session's end: a descriptor for
     /// every file the source failed.
     async fn fail_resume_record(&self, relative_path: &str, reason: &str) -> Result<SinkOutcome> {
-        self.forget_resume(relative_path);
-        Ok(SinkOutcome::failed(relative_path, reason))
-    }
-
-    /// cr-ecm26-6: the source will not deliver the file: what was noted for
-    /// it goes, whoever tells the sink — the session's wrappers or the
-    /// public receive pipeline, which calls it directly. It was left to the
-    /// wrappers, and a caller of the sink itself kept the file's baseline.
-    async fn skip_record(&self, relative_path: &str, reason: &str) -> Result<SinkOutcome> {
         self.forget_resume(relative_path);
         Ok(SinkOutcome::failed(relative_path, reason))
     }
