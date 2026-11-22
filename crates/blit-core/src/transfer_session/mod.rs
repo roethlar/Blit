@@ -6114,7 +6114,12 @@ async fn diff_chunk_and_send_needs(
             canonical_dst_root,
             &header.relative_path,
             header.raw_relative_path.as_deref(),
-            header.permissions,
+            // A Windows source carries no mode of its own (its attributes
+            // ride beside it); every other source's is known, 0000 too.
+            header
+                .windows_metadata
+                .is_none()
+                .then_some(header.permissions),
             resume_block_size,
         )
         .await?;
@@ -6659,7 +6664,7 @@ async fn compute_resume_block_hashes(
     canonical_dst_root: Option<&Path>,
     relative_path: &str,
     raw_relative_path: Option<&[u8]>,
-    source_mode: u32,
+    source_mode: Option<u32>,
     block_size: usize,
 ) -> Result<(Vec<Vec<u8>>, crate::remote::transfer::sink::ResumeBaseline)> {
     use crate::remote::transfer::sink::ResumeBaseline;
@@ -6711,17 +6716,22 @@ async fn compute_resume_block_hashes(
         // grants others what the source does not — a reader who has it open
         // would read what the blocks write — is not hashed, and every block
         // comes, into a fresh private partial.
+        // cr-ecm22-4: ONE look decides whether the file is reused and is
+        // the version its hashes are of: two let a change between them
+        // undo the decision.
+        let found = file
+            .metadata()
+            .map_err(|e| eyre::eyre!("stat {} for block hashes: {e}", dst.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
-            let found = file
-                .metadata()
-                .map_err(|e| eyre::eyre!("stat {} for block hashes: {e}", dst.display()))?;
             // SAFETY: `geteuid` has no preconditions and cannot fail.
             let me = unsafe { libc::geteuid() };
             let ours = me == 0 || found.uid() == me;
             let others = found.mode() & 0o077;
-            let wider = source_mode != 0 && others & !(source_mode & 0o077) != 0;
+            // A source of mode 0000 is a mode known (cr-ecm22-4); only one
+            // that carries none — a Windows source — is not asked.
+            let wider = source_mode.is_some_and(|source| others & !(source & 0o077) != 0);
             if !ours || wider {
                 return whole();
             }
@@ -6733,11 +6743,7 @@ async fn compute_resume_block_hashes(
         // size it had — or none are sent. A block written once it was
         // hashed was paired with the version the file had after, which the
         // writer then found unchanged, and the source skipped the block.
-        let before = crate::moved::Version::of(
-            &file
-                .metadata()
-                .map_err(|e| eyre::eyre!("stat {} for block hashes: {e}", dst.display()))?,
-        );
+        let before = crate::moved::Version::of(&found);
         let mut bounded = Read::take(&mut file, before.size);
         let mut hashes = Vec::new();
         let mut buf = vec![0u8; block_size];
@@ -11090,7 +11096,7 @@ mod own_incomplete_copy_tests {
             );
         };
         let (hashes, baseline) =
-            compute_resume_block_hashes(&root, None, "r.bin", None, 0o644, 1024)
+            compute_resume_block_hashes(&root, None, "r.bin", None, Some(0o644), 1024)
                 .await
                 .unwrap();
         assert_eq!(hashes.len(), 5);
@@ -11100,11 +11106,24 @@ mod own_incomplete_copy_tests {
         );
         unchanged();
         let (hashes, baseline) =
-            compute_resume_block_hashes(&root, None, "r.bin", None, 0o600, 1024)
+            compute_resume_block_hashes(&root, None, "r.bin", None, Some(0o600), 1024)
                 .await
                 .unwrap();
         assert!(hashes.is_empty());
         assert_eq!(baseline, ResumeBaseline::Whole);
+        unchanged();
+        // cr-ecm22-4: a source of mode 0000 is more private still; one that
+        // carries no mode — a Windows source — is not asked.
+        let (hashes, baseline) =
+            compute_resume_block_hashes(&root, None, "r.bin", None, Some(0), 1024)
+                .await
+                .unwrap();
+        assert!(hashes.is_empty(), "0000 is a mode");
+        assert_eq!(baseline, ResumeBaseline::Whole);
+        let (hashes, _) = compute_resume_block_hashes(&root, None, "r.bin", None, None, 1024)
+            .await
+            .unwrap();
+        assert_eq!(hashes.len(), 5, "no mode to ask");
         unchanged();
     }
 
@@ -11130,7 +11149,7 @@ mod own_incomplete_copy_tests {
         let at = root.join("r.bin");
         std::fs::write(&at, vec![3u8; 3072]).unwrap();
         let (hashes, baseline) =
-            compute_resume_block_hashes(&root, None, "r.bin", None, 0o644, 1024)
+            compute_resume_block_hashes(&root, None, "r.bin", None, Some(0o644), 1024)
                 .await
                 .unwrap();
         assert_eq!(hashes.len(), 3);
@@ -11157,7 +11176,7 @@ mod own_incomplete_copy_tests {
             Unhooked(at.clone())
         };
         let (hashes, baseline) =
-            compute_resume_block_hashes(&root, None, "r.bin", None, 0o644, 1024)
+            compute_resume_block_hashes(&root, None, "r.bin", None, Some(0o644), 1024)
                 .await
                 .unwrap();
         assert!(hashes.is_empty(), "{} hashes", hashes.len());

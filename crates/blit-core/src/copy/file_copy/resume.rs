@@ -111,9 +111,10 @@ pub fn open_resume_partial(
     };
     while_a_partial_is_opened(dst);
     let found = file.metadata()?;
-    let wider = source_mode.is_some_and(|source| {
-        source & 0o7777 != 0 && found.mode() & 0o077 & !(source & 0o077) != 0
-    });
+    // cr-ecm22-4: a source of mode 0000 is a mode known, and the most
+    // private of all — it was taken for no mode, and the destination's
+    // readers kept it.
+    let wider = source_mode.is_some_and(|source| found.mode() & 0o077 & !(source & 0o077) != 0);
     if !wider
         && make_partial_private(&file)
             .with_context(|| format!("making the partial {} private", dst.display()))?
@@ -602,6 +603,29 @@ mod tests {
                 0o644
             );
         }
+        Ok(())
+    }
+
+    /// cr-ecm22-4: a source of mode 0000 is a known mode — the most private
+    /// — and a destination others can read takes a fresh partial for it.
+    /// It was taken for no mode, and the destination's inode reused.
+    #[cfg(unix)]
+    #[test]
+    fn a_source_of_no_mode_bits_is_more_private_than_its_destination() -> Result<()> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let data = vec![7u8; 4096];
+        std::fs::write(&src, &data)?;
+        let mut opened = File::open(&src)?;
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o000))?;
+        let dst = tmp.path().join("dst");
+        std::fs::write(&dst, &data[..1000])?;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o644))?;
+        let before = std::fs::metadata(&dst)?.ino();
+        resume_copy_from(&mut opened, data.len() as u64, &dst, 1024)?;
+        assert_ne!(std::fs::metadata(&dst)?.ino(), before, "a fresh partial");
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))?;
         Ok(())
     }
 
