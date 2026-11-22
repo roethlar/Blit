@@ -6114,12 +6114,7 @@ async fn diff_chunk_and_send_needs(
             canonical_dst_root,
             &header.relative_path,
             header.raw_relative_path.as_deref(),
-            // A Windows source carries no mode of its own (its attributes
-            // ride beside it); every other source's is known, 0000 too.
-            header
-                .windows_metadata
-                .is_none()
-                .then_some(header.permissions),
+            wire_source_mode(header),
             resume_block_size,
         )
         .await?;
@@ -6866,6 +6861,17 @@ fn claim_resume_record(
 /// through the sink, until the record's `BlockTransferComplete`. Nothing
 /// may interleave with the open record on the source lane — same rule as
 /// file records.
+/// cr-ecm23-5: the Unix mode a source's header carries, or `None` for a
+/// source that has none. A Unix source sends its whole `st_mode`, its
+/// file-type bits with it, so even a file of mode 0000 arrives as more than
+/// 0; a source with no Unix mode — Windows, whether its own metadata rides
+/// beside the header or was dropped — sends 0. It was told by the Windows
+/// metadata alone, and a Windows source without it counted as mode 0000:
+/// every block was sent again.
+fn wire_source_mode(header: &FileHeader) -> Option<u32> {
+    (header.permissions != 0).then_some(header.permissions)
+}
+
 async fn receive_block_record(
     transport: &mut FrameTransport,
     sink: &dyn TransferSink,
@@ -11128,6 +11134,33 @@ mod own_incomplete_copy_tests {
             .unwrap();
         assert_eq!(hashes.len(), 5, "no mode to ask");
         unchanged();
+    }
+
+    /// cr-ecm23-5: a source's mode is known by the mode its header carries —
+    /// a Unix file of mode 0000 included, its type bits sent with it — and a
+    /// header that carries none has none, its Windows metadata dropped or
+    /// not. Told by the Windows metadata alone, a Windows source without it
+    /// counted as mode 0000, and every block was sent again.
+    #[test]
+    fn a_source_mode_is_known_by_the_mode_its_header_carries() {
+        let header = |permissions: u32, windows: bool| FileHeader {
+            relative_path: "r.bin".to_string(),
+            permissions,
+            windows_metadata: windows.then(Default::default),
+            ..Default::default()
+        };
+        assert_eq!(wire_source_mode(&header(0o100644, false)), Some(0o100644));
+        assert_eq!(
+            wire_source_mode(&header(0o100000, false)),
+            Some(0o100000),
+            "a Unix file of mode 0000"
+        );
+        assert_eq!(
+            wire_source_mode(&header(0, false)),
+            None,
+            "a Windows source, its metadata dropped"
+        );
+        assert_eq!(wire_source_mode(&header(0, true)), None, "a Windows source");
     }
 
     /// cr-ecm22-5: a resume record the source closes failed on the control
