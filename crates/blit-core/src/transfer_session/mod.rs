@@ -5153,10 +5153,7 @@ async fn destination_session_inner(
                         skipped.relative_path
                     )));
                 }
-                ledger
-                    .lock()
-                    .expect("need ledger lock poisoned")
-                    .skip(&skipped.relative_path)?;
+                close_skipped_record(sink.as_ref(), &ledger, &skipped.relative_path)?;
                 if let Some(p) = &progress {
                     p.report_file_failed(skipped.relative_path.clone(), skipped.reason.clone())
                         .await;
@@ -6991,6 +6988,23 @@ async fn receive_block_record(
 /// (the wire complete frame carries only `total_bytes`, which must match
 /// the size the manifest promised, exactly as a file record must
 /// complete at `header.size` bytes).
+/// Contract v7: a skip record on the control lane closes its need —
+/// Granted → Failed — and (cr-ecm25-6) the sink forgets what it noted for
+/// the file. Settled in the ledger alone, a resumed file's baseline stayed
+/// to the session's end.
+fn close_skipped_record(
+    sink: &dyn TransferSink,
+    ledger: &need_ledger::SharedNeedLedger,
+    relative_path: &str,
+) -> Result<()> {
+    ledger
+        .lock()
+        .expect("need ledger lock poisoned")
+        .skip(relative_path)?;
+    sink.forget_resume(relative_path);
+    Ok(())
+}
+
 /// otp-7a: the close of a resume record no block came before — every
 /// block matched, or the source failed before its first: finalized, or
 /// (contract v7) failed — the partial stays unstamped and the file is
@@ -11352,6 +11366,45 @@ mod own_incomplete_copy_tests {
         .unwrap();
         assert!(outcome.file_failed("r.bin"), "{outcome:?}");
         assert_eq!(sink.0.load(Ordering::SeqCst), 1, "the sink is told");
+    }
+
+    /// cr-ecm25-6: a file the source skips on the control lane closes its
+    /// need and goes to the sink, to forget what it noted for it. Settled in
+    /// the ledger alone, the sink kept the file's baseline.
+    #[test]
+    fn a_skip_on_the_control_lane_reaches_the_sink() {
+        struct Forgets(std::sync::atomic::AtomicUsize, PathBuf);
+        #[async_trait::async_trait]
+        impl TransferSink for Forgets {
+            async fn write_payload(
+                &self,
+                _payload: PreparedPayload,
+            ) -> Result<crate::remote::transfer::SinkOutcome> {
+                Ok(crate::remote::transfer::SinkOutcome::default())
+            }
+            fn forget_resume(&self, _path: &str) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn root(&self) -> &Path {
+                &self.1
+            }
+        }
+        let ledger: need_ledger::SharedNeedLedger = Arc::default();
+        ledger.lock().unwrap().grant(
+            FileHeader {
+                relative_path: "r.bin".to_string(),
+                size: 8,
+                ..Default::default()
+            },
+            true,
+        );
+        let sink = Forgets(std::sync::atomic::AtomicUsize::new(0), PathBuf::new());
+        close_skipped_record(&sink, &ledger, "r.bin").unwrap();
+        assert_eq!(sink.0.load(Ordering::SeqCst), 1, "the sink forgets");
+        assert!(
+            close_skipped_record(&sink, &ledger, "r.bin").is_err(),
+            "a second skip is a violation"
+        );
     }
 
     /// cr-ecm21-2: a block written once it was hashed — as many bytes, the

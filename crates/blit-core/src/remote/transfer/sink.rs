@@ -961,6 +961,14 @@ pub trait TransferSink: Send + Sync {
         Ok(SinkOutcome::failed(relative_path, reason))
     }
 
+    /// cr-ecm25-6: the record for `relative_path` closed without this sink
+    /// having been asked — the source skipped the file: what it noted for
+    /// it goes. A sink that wraps another passes it on; one that notes
+    /// nothing ignores it.
+    fn forget_resume(&self, relative_path: &str) {
+        let _ = relative_path;
+    }
+
     /// The SOURCE closed `relative_path`'s resume record failed (a v7
     /// `BLOCK_COMPLETE` with `ok = false`): the partial stays unstamped
     /// and the file is reported failed. Same override rule as
@@ -1221,6 +1229,14 @@ impl FsTransferSink {
             .lock()
             .expect("resume-held lock poisoned")
             .remove(relative_path);
+    }
+
+    #[cfg(test)]
+    fn baselines_noted(&self) -> usize {
+        self.resume_baselines
+            .lock()
+            .expect("resume-baselines lock poisoned")
+            .len()
     }
 
     #[cfg(all(test, unix))]
@@ -1585,6 +1601,14 @@ impl TransferSink for FsTransferSink {
     /// its source. It was kept to the session's end: a descriptor for
     /// every file the source failed.
     async fn fail_resume_record(&self, relative_path: &str, reason: &str) -> Result<SinkOutcome> {
+        self.forget_resume(relative_path);
+        Ok(SinkOutcome::failed(relative_path, reason))
+    }
+
+    /// cr-ecm22-5, cr-ecm24-8, cr-ecm25-6: everything noted for a record
+    /// that closed — its held handle, its baseline, a failure held for it,
+    /// its raw name and its hold's mark.
+    fn forget_resume(&self, relative_path: &str) {
         self.resume_files
             .lock()
             .expect("resume-files lock poisoned")
@@ -1595,7 +1619,6 @@ impl TransferSink for FsTransferSink {
             .remove(relative_path);
         let _ = self.take_resume_block_failure(relative_path);
         self.forget_record(relative_path);
-        Ok(SinkOutcome::failed(relative_path, reason))
     }
 
     async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
@@ -8053,6 +8076,30 @@ mod cr_win_1_tests {
             .unwrap();
         assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
         assert_eq!(std::fs::read(&at).unwrap(), b"somebody's", "not marked");
+    }
+
+    /// cr-ecm25-6: a file the source skips leaves nothing noted for it: its
+    /// baseline and raw name go. Settled in the ledger alone, the baseline
+    /// stayed to the session's end.
+    #[tokio::test]
+    async fn a_skipped_record_leaves_nothing_noted_for_it() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        sink.note_raw_name("r.bin", b"r.bin");
+        sink.note_resume_baseline("r.bin", ResumeBaseline::Whole);
+        assert_eq!(sink.baselines_noted(), 1);
+        sink.forget_resume("r.bin");
+        assert_eq!(sink.baselines_noted(), 0, "its baseline gone");
+        assert!(sink.raw_name_for("r.bin").is_none(), "its raw name gone");
     }
 
     /// cr-ecm24-8: a resume record that closes — failed by its source, or

@@ -2388,7 +2388,14 @@ impl TransferSink for NeedListSink {
     /// Contract v7: a SKIP record — Granted → Failed, or a violation.
     async fn skip_record(&self, relative_path: &str, reason: &str) -> Result<SinkOutcome> {
         self.ledger().skip(relative_path)?;
+        // cr-ecm25-6: and the sink it wraps forgets what it noted for the
+        // file: settled here alone, a resumed file's baseline stayed.
+        self.inner.forget_resume(relative_path);
         Ok(SinkOutcome::failed(relative_path, reason))
+    }
+
+    fn forget_resume(&self, relative_path: &str) {
+        self.inner.forget_resume(relative_path);
     }
 
     /// Contract v7: a failed BLOCK_COMPLETE — the resume grant (Granted,
@@ -2898,6 +2905,54 @@ mod tests {
         );
         sink.write_payload(block(b"bytes".to_vec())).await.unwrap();
         assert_eq!(holds.0.load(Ordering::SeqCst), 1);
+    }
+
+    /// cr-ecm25-6: a file the source skips on the data plane reaches the sink
+    /// this one wraps, to forget what it noted for it. The ledger settled
+    /// it here, and the sink kept the file's baseline.
+    #[tokio::test]
+    async fn a_skip_reaches_the_sink_it_wraps() {
+        struct Forgets(std::sync::atomic::AtomicUsize, PathBuf);
+        #[async_trait]
+        impl TransferSink for Forgets {
+            async fn write_payload(&self, _payload: PreparedPayload) -> Result<SinkOutcome> {
+                Ok(SinkOutcome::default())
+            }
+            fn forget_resume(&self, _path: &str) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn root(&self) -> &Path {
+                &self.1
+            }
+        }
+        let ledger: SharedNeedLedger = Arc::default();
+        ledger.lock().unwrap().grant(
+            FileHeader {
+                relative_path: "r.bin".to_string(),
+                size: 8,
+                ..Default::default()
+            },
+            true,
+        );
+        let forgets = Arc::new(Forgets(
+            std::sync::atomic::AtomicUsize::new(0),
+            PathBuf::new(),
+        ));
+        let sink = NeedListSink::new(
+            Arc::clone(&forgets) as Arc<dyn TransferSink>,
+            Arc::clone(&ledger),
+            Some(ResumeRecv {
+                resumed: Arc::new(AtomicU64::new(0)),
+            }),
+            None,
+        )
+        .with_lane(0, 3);
+        let outcome = sink
+            .skip_record("r.bin", "source: cannot open")
+            .await
+            .unwrap();
+        assert!(outcome.file_failed("r.bin"), "{outcome:?}");
+        assert_eq!(forgets.0.load(Ordering::SeqCst), 1, "the sink forgets");
     }
 
     /// cr-ecm22-5: a resume record the source closes failed on the data
