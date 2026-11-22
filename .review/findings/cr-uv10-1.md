@@ -1,9 +1,9 @@
 # cr-uv10-1: the daemon's walk was not anchored at the root its check verified
 
 **Severity**: HIGH — a folder above a module replaced by a link after the check leads `ls`, `du` or `find` into another tree
-**Status**: Fixed on Unix, awaiting review; the Windows half is BLOCKED (no Windows host reachable — `michael@10.1.10.222` and `michael@10.1.10.173`: "No route to host", 2026-11-22)
+**Status**: Verified on Unix — `combined-r22` (Codex openreview, 2026-11-22) reviewed `b92c9a17..5d2f8def` — the eight `combined-r21` fixes — with `guard_confirmed: true`: "Opening Unix module-root components from `/` … [is] sound"; the Windows half stays open, with cr-ecm21-4's Windows walk
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv10-1`)
+**Commit**: `1233e9de`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r21` over `c15ebf5a..b92c9a17` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r21.codex.md`. It completes cr-uv9-1 (`5a663780`).
 
 ## Evidence

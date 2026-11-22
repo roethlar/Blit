@@ -1,9 +1,9 @@
 # cr-uv10-2: `find -delete` removed by a path, not in the directory its tests were held in
 
 **Severity**: HIGH — a directory replaced between the walk's test and the removal gives up a same-named entry of another size: one the test never held for is removed
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r22` (Codex openreview, 2026-11-22) reviewed `b92c9a17..5d2f8def` — the eight `combined-r21` fixes — with `guard_confirmed: true`. "For `-type l -delete`, the walker normally supplies the parent identity and omits the entry identity. If a regular file replaces the selected link in the same directory, the remover unlinks that regular file. Carry the listed inode and kind where reliable, obtain missing facts for a destructive match, and report a changed entry as a per-entry failure. The read-only walk can keep its current fast path." The remaining work is cr-uv11-1
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv10-2`)
+**Commit**: `55f43417`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r21` over `c15ebf5a..b92c9a17` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r21.codex.md`. It completes cr-uv9-1 (`5a663780`).
 
 ## Evidence

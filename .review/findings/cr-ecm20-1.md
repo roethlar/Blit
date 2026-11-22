@@ -1,9 +1,9 @@
 # cr-ecm20-1: a wire resume's hashes, block writes and completion were not tied to one file
 
 **Severity**: HIGH — a destination changed or replaced after its blocks were hashed is patched with the source's other blocks and reported complete with bytes it never had
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r22` (Codex openreview, 2026-11-22) reviewed `b92c9a17..5d2f8def` — the eight `combined-r21` fixes — with `guard_confirmed: true`. "When every block matches, both wire carriers can go straight to completion. The sink then has no held identity and can truncate and stamp a replacement. In an independent Linux run with identical bytes, an older destination timestamp, and an owner-controlled `0444` destination, this path reported `Permission denied`, zero resumed, and one failed. An empty TCP keepalive has the converse problem: it can change the file's mode and length before any changed bytes arrive. Acquire and verify the writer on the first data-bearing block or successful completion. Keep liveness records read-only." "If an already-read block changes while later blocks are being hashed, the receiver pairs the old block hash with the file's *post-read* version. The writer's version check can pass, the sender can skip that block, and Blit can report incorrect bytes as complete. Compare the opened file's version before and after a bounded read. Discard the hash list if it changed." The remaining work is cr-ecm21-1 and cr-ecm21-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm20-1`)
+**Commit**: `5b3bf24e`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r21` over `c15ebf5a..b92c9a17` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r21.codex.md`. It completes cr-ecm19-4 (`af308007`).
 
 ## Evidence

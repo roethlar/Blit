@@ -1,9 +1,9 @@
 # cr-ecm20-3: a failed local partial could be left unwritable for the retry
 
 **Severity**: HIGH — a resume of a read-only source that fails at its last step leaves a read-only partial, and every retry is refused
-**Status**: Fixed on Unix, awaiting review
+**Status**: Verified — `combined-r22` (Codex openreview, 2026-11-22) reviewed `b92c9a17..5d2f8def` — the eight `combined-r21` fixes — with `guard_confirmed: true`; no change required of it
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm20-3`)
+**Commit**: `c31a4594`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r21` over `c15ebf5a..b92c9a17` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r21.codex.md`. It completes cr-ecm19-4 (`af308007`).
 
 ## Evidence

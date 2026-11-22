@@ -1,9 +1,9 @@
 # cr-uv10-3: a module root that cannot be looked up was refused, not told
 
 **Severity**: MEDIUM — `ls`, `du` or `find` of a module a folder above which the daemon may not search fails the request as a containment refusal, not as the verb's own `cannot access`
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r22` (Codex openreview, 2026-11-22) reviewed `b92c9a17..5d2f8def` — the eight `combined-r21` fixes — with `guard_confirmed: true`: "preserving the original lookup error … [is] sound"
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv10-3`)
+**Commit**: `97815d1e`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r21` over `c15ebf5a..b92c9a17` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r21.codex.md`. It completes cr-uv9-1 (`5a663780`).
 
 ## Evidence

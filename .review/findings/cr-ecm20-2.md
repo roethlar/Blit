@@ -1,9 +1,9 @@
 # cr-ecm20-2: a wire resume's hash negotiation changed the destination
 
 **Severity**: HIGH — before the source sends a block, hashing could change the destination's mode or remove it; a source that then skips the file, or goes away, leaves the user's file changed or gone
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r22` (Codex openreview, 2026-11-22) reviewed `b92c9a17..5d2f8def` — the eight `combined-r21` fixes — with `guard_confirmed: true`. "A local resume from a `0600` source into a `0644` destination reuses the inode, so a reader who already has it open can read the new bytes. On the wire, a whole-file fallback through a destination symlink opens its referent with truncation before setting permissions. A subsequent permission failure can therefore leave the old contents gone. Apply the same source-aware acquisition rule locally and remotely. Where reuse is unsafe, establish a fresh private file before replacing the destination or its supported referent." "A read-only filesystem or exhausted volume during the hold is recorded as one file's failure. The receiver can continue draining payloads after the destination has stopped accepting writes. Apply the existing root and volume error classifier at acquisition, as the block-write path already does." The remaining work is cr-ecm21-3 and cr-ecm21-5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm20-2`)
+**Commit**: `9ee5cb63`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r21` over `c15ebf5a..b92c9a17` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r21.codex.md`. It completes cr-ecm19-4 (`af308007`).
 
 ## Evidence

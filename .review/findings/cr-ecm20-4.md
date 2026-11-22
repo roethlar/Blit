@@ -1,9 +1,9 @@
 # cr-ecm20-4: the local and Windows delivery checks
 
 **Severity**: HIGH — a local resume whose destination is replaced once its blocks are written gives the other file the copy's time and reports the copy done, and a move takes its source as delivered
-**Status**: Fixed on Unix, awaiting review; the Windows half is BLOCKED (no Windows host reachable — `michael@10.1.10.222` and `michael@10.1.10.173`: "No route to host", 2026-11-22)
+**Status**: Reviewed, found incomplete — `combined-r22` (Codex openreview, 2026-11-22) reviewed `b92c9a17..5d2f8def` — the eight `combined-r21` fixes — with `guard_confirmed: true`. "The wire hold returns only device and inode. Failed-block cleanup checks the pathname and then reopens it to mark the partial, so a rename between those operations can extend somebody else's file. The local success path also turns a failed identity lookup into `None`, which permits acknowledgment. Retain the active descriptor for patching and cleanup, and require a successful destination identity check before a move releases its source. Windows also needs a handle-based file identity and directory walk. Its current paths can accept a replacement or descend through a changed pathname." The remaining work is cr-ecm21-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm20-4`)
+**Commit**: `ae10d707`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r21` over `c15ebf5a..b92c9a17` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r21.codex.md`. It completes cr-ecm19-1 (`c8130e4a`) and carries cr-ecm19-2's (`3f7d60b4`) check to the local resume.
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-ecm20-5: a `/` in one alternative of a brace group anchored the pattern in the case line's proof
 
 **Severity**: MEDIUM — the deletion prompt's case line names a spelling `--ignore-case` would add that matches a file the typed pattern already matches
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r22` (Codex openreview, 2026-11-22) reviewed `b92c9a17..5d2f8def` — the eight `combined-r21` fixes — with `guard_confirmed: true`: "treating a slash inside a brace alternative conservatively [is] sound"
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm20-5`)
+**Commit**: `aed9e559`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r21` over `c15ebf5a..b92c9a17` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r21.codex.md`. It completes cr-ecm19-5 (`f764e6b8`).
 
 ## Evidence
