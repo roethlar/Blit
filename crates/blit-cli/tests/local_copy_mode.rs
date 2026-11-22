@@ -4,6 +4,7 @@
 //! was created with (644 under the usual mask): a private file readable
 //! by all, a program no longer one. Small files among others, and every
 //! file to or from a daemon, kept theirs; `cp` and `rsync` keep them.
+//! And with `--resume` (cr-ecm16-1), whose copy had a path of its own.
 
 #![cfg(unix)]
 
@@ -60,8 +61,18 @@ fn a_local_copy_gives_every_file_its_sources_mode() {
         fs::write(root.join(name), vec![b'x'; bytes]).unwrap();
         fs::set_permissions(root.join(name), fs::Permissions::from_mode(mode)).unwrap();
     }
-    for options in [&[][..], &["--ignore-existing"], &["--checksum"]] {
-        let landed = ctx.workspace.join(format!("landed{}", options.len()));
+    // cr-ecm16-1: `--resume` too, which left a file copied on its own
+    // 644.
+    for (at, options) in [
+        &[][..],
+        &["--ignore-existing"],
+        &["--checksum"],
+        &["--resume"],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let landed = ctx.workspace.join(format!("landed{at}"));
         let _ = fs::remove_dir_all(&landed);
         copy(&ctx, &tree, &landed.join("tree"), options);
         copy(&ctx, &alone, &landed.join("alone"), options);

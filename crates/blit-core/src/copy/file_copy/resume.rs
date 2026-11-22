@@ -173,6 +173,23 @@ pub fn resume_copy_from(
     // longer, or the one-byte unfinished mark set above.
     dst_file.set_len(src_len)?;
 
+    // cr-ecm16-1: the source's mode, through this writer's own handle,
+    // as every other copy on this machine gives it (local-copy-mode). A
+    // resumed copy kept the mode its destination was created with — 644
+    // under the usual mask — or the one a partial left before had: a
+    // private file became readable by all.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = src_file.metadata()?.permissions().mode();
+        if dst_file
+            .set_permissions(std::fs::Permissions::from_mode(mode))
+            .is_err()
+        {
+            log::debug!("Could not preserve permissions for {}", dst.display());
+        }
+    }
+
     // Sync to disk
     dst_file.sync_all()?;
 
@@ -205,6 +222,37 @@ mod tests {
         let mut src_file = File::open(&src)?;
         assert!(resume_copy_from(&mut src_file, 12_000, &dst, 1024).is_err());
         assert_eq!(std::fs::metadata(&dst)?.len(), 12_001);
+        Ok(())
+    }
+
+    /// cr-ecm16-1: a resumed copy has its source's mode — into a file it
+    /// makes, and into a partial left before with another mode.
+    #[cfg(unix)]
+    #[test]
+    fn a_resumed_copy_has_its_sources_mode() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir()?;
+        let data = vec![7u8; 3 * 1024 + 5];
+        let mode_of = |path: &Path| -> Result<u32> {
+            Ok(std::fs::metadata(path)?.permissions().mode() & 0o7777)
+        };
+        for mode in [0o600, 0o640, 0o750] {
+            let src = tmp.path().join(format!("src-{mode:o}"));
+            std::fs::write(&src, &data)?;
+            std::fs::set_permissions(&src, std::fs::Permissions::from_mode(mode))?;
+
+            let fresh = tmp.path().join(format!("fresh-{mode:o}"));
+            resume_copy_from(&mut File::open(&src)?, data.len() as u64, &fresh, 1024)?;
+            assert_eq!(mode_of(&fresh)?, mode, "into a new file, {mode:o}");
+            assert_eq!(std::fs::read(&fresh)?, data);
+
+            let partial = tmp.path().join(format!("partial-{mode:o}"));
+            std::fs::write(&partial, &data[..1024])?;
+            std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o644))?;
+            resume_copy_from(&mut File::open(&src)?, data.len() as u64, &partial, 1024)?;
+            assert_eq!(mode_of(&partial)?, mode, "into a partial, {mode:o}");
+            assert_eq!(std::fs::read(&partial)?, data);
+        }
         Ok(())
     }
 
