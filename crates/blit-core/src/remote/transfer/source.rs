@@ -79,8 +79,11 @@ impl SourceScan {
     }
 
     /// cr-uv6-4: this scan carries what its walk records, for its caller
-    /// alone.
-    pub(crate) fn seeing(mut self, sightings: Arc<crate::moved::Sightings>) -> Self {
+    /// alone. cr-uv7-3: public, so that a source outside this crate that
+    /// walks a disk of its own can hand its record back from
+    /// [`TransferSource::scan_seeing`] — it was the crate's alone, and such
+    /// a source could record what it saw and give it to nobody.
+    pub fn seeing(mut self, sightings: Arc<crate::moved::Sightings>) -> Self {
         self.sightings = Some(sightings);
         self
     }
