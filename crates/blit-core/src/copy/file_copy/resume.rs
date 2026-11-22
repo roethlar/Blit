@@ -147,8 +147,12 @@ fn open_resume_partial_with(
     // was followed out and the file made there.
     let resolved = resolve_destination(dst, within)?;
     let keep = |file: &File| cleanup.then(|| keep_handle(file, dst)).transpose();
-    let fresh = |resolved: &Resolved| -> Result<(File, Option<File>, u64)> {
-        let (file, kept) = resolved.fresh(dst, src_len.saturating_add(1), |file| {
+    // cr-ecm29-2: and what a fresh partial may replace is what was judged:
+    // what the look found, or — once it is opened — what was opened. Looked
+    // at again when the partial was made, a file come there since was taken
+    // for it and replaced.
+    let fresh = |resolved: &Resolved, seen: Entry| -> Result<(File, Option<File>, u64)> {
+        let (file, kept) = resolved.fresh(dst, src_len.saturating_add(1), seen, |file| {
             keep(file).map_err(eyre::Report::new)
         })?;
         Ok((file, kept, 0))
@@ -168,7 +172,7 @@ fn open_resume_partial_with(
         .look()
         .with_context(|| format!("looking at {}", dst.display()))?;
     after_a_destination_is_looked_at(dst);
-    match seen {
+    let seen = match seen {
         // cr-ecm26-1: nothing there: the partial is made exclusively from
         // this look on. An open after it could adopt a file made in between.
         None => {
@@ -186,17 +190,17 @@ fn open_resume_partial_with(
         // cr-ecm27-3: a link at the name — come there since the chain was
         // followed — is left as it is, and the file fails: replaced, the
         // link was overwritten.
-        Some((mode, _)) if is_link(mode) => {
+        Some(seen) if is_link(seen.mode) => {
             eyre::bail!(
                 "{} became a link while it was being had; it is left as it is",
                 dst.display()
             );
         }
-        Some((mode, owner)) if !is_regular(mode) || !reusable(mode, owner) => {
-            return fresh(&resolved);
+        Some(seen) if !is_regular(seen.mode) || !reusable(seen.mode, seen.owner) => {
+            return fresh(&resolved, seen);
         }
-        Some(_) => {}
-    }
+        Some(seen) => seen,
+    };
     // cr-ecm25-4: where nothing stands, the partial is made staged —
     // private, at its length, its cleanup's handle had — and takes the name
     // only while nothing does. Opened by the name to be made, an empty file
@@ -226,7 +230,7 @@ fn open_resume_partial_with(
             match resolved.open(libc::O_RDONLY | libc::O_NONBLOCK) {
                 Ok(file) => (file, false),
                 Err(unread) if unread.kind() == std::io::ErrorKind::PermissionDenied => {
-                    return fresh(&resolved);
+                    return fresh(&resolved, seen);
                 }
                 Err(_) => {
                     return Err(refused)
@@ -243,7 +247,7 @@ fn open_resume_partial_with(
     // cr-ecm26-5: and what was opened is a regular file, or it is replaced.
     if !found.is_file() {
         drop(file);
-        return fresh(&resolved);
+        return fresh(&resolved, Entry::of(&found));
     }
     // cr-ecm22-4: a source of mode 0000 is a mode known, and the most
     // private of all — it was taken for no mode, and the destination's
@@ -309,7 +313,7 @@ fn open_resume_partial_with(
         }
     }
     drop(file);
-    fresh(&resolved)
+    fresh(&resolved, Entry::of(&found))
 }
 
 /// Whether `mode` (type bits included) is a regular file's.
@@ -393,6 +397,12 @@ pub(crate) static LINK_FAULTS: std::sync::Mutex<Vec<std::path::PathBuf>> =
 pub(crate) static STAGED_UNLINK_FAULTS: std::sync::Mutex<Vec<std::path::PathBuf>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Test seam (cr-ecm29-2): the exchange refused, as a filesystem without one
+/// refuses it. By path. Production never sets it.
+#[cfg(all(test, unix))]
+pub(crate) static EXCHANGE_FAULTS: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
 #[cfg(unix)]
 fn faulted(_faults: &str, _dst: &Path) -> bool {
     #[cfg(test)]
@@ -400,6 +410,7 @@ fn faulted(_faults: &str, _dst: &Path) -> bool {
         let faults = match _faults {
             "rename" => &RENAME_FAULTS,
             "link" => &LINK_FAULTS,
+            "exchange" => &EXCHANGE_FAULTS,
             _ => &STAGED_UNLINK_FAULTS,
         };
         if faults
@@ -532,7 +543,14 @@ pub fn fresh_partial_ready<T>(
     within: Option<&Path>,
     ready: impl FnOnce(&File) -> Result<T>,
 ) -> Result<(File, T)> {
-    resolve_destination(dst, within)?.fresh(dst, unfinished, ready)
+    let resolved = resolve_destination(dst, within)?;
+    match resolved
+        .look()
+        .with_context(|| format!("looking at {}", dst.display()))?
+    {
+        None => resolved.fresh_exclusive(dst, unfinished, ready),
+        Some(seen) => resolved.fresh(dst, unfinished, seen, ready),
+    }
 }
 
 /// cr-ecm24-1: where a resume's partial is had — ONE resolution for every
@@ -663,13 +681,17 @@ impl Resolved {
     /// exists, made READY (cr-ecm22-1: its length; cr-ecm23-1: what `ready`
     /// learns of it), and only then renamed over it. If it cannot be, what
     /// stands there is as it was.
+    ///
+    /// cr-ecm29-2: `seen` is what the caller's look found at the name: that
+    /// is what is replaced, or nothing is (see [`Self::publish_replacing`]).
     pub(crate) fn fresh<T>(
         &self,
         dst: &Path,
         unfinished: u64,
+        seen: Entry,
         ready: impl FnOnce(&File) -> Result<T>,
     ) -> Result<(File, T)> {
-        self.fresh_as(dst, unfinished, ready, false)
+        self.fresh_as(dst, unfinished, ready, Some(seen))
     }
 
     /// cr-ecm25-2: [`Self::fresh`] where nothing stands at the name: it takes
@@ -682,40 +704,14 @@ impl Resolved {
         unfinished: u64,
         ready: impl FnOnce(&File) -> Result<T>,
     ) -> Result<(File, T)> {
-        self.fresh_as(dst, unfinished, ready, true)
+        self.fresh_as(dst, unfinished, ready, None)
     }
 
     /// What stands at the name in the held directory, itself — its mode
-    /// (type bits included) and its owner — or nothing.
-    pub(crate) fn look(&self) -> std::io::Result<Option<(u32, u32)>> {
-        #[cfg(not(target_os = "linux"))]
-        use libc::{fstatat, stat};
-        #[cfg(target_os = "linux")]
-        use libc::{fstatat64 as fstatat, stat64 as stat};
+    /// (type bits included), its owner, and which it is — or nothing.
+    pub(crate) fn look(&self) -> std::io::Result<Option<Entry>> {
         use std::os::unix::io::AsRawFd as _;
-        let mut found = std::mem::MaybeUninit::<stat>::uninit();
-        // SAFETY: the held directory is open for the length of the call, the
-        // name is NUL-terminated and outlives it, and `found` is a writable
-        // record the call fills on success.
-        let looked = unsafe {
-            fstatat(
-                self.directory.as_raw_fd(),
-                self.name.as_ptr(),
-                found.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if looked == 0 {
-            // SAFETY: the call succeeded, so the record is filled in.
-            let found = unsafe { found.assume_init() };
-            #[allow(clippy::unnecessary_cast)]
-            return Ok(Some((found.st_mode as u32, found.st_uid as u32)));
-        }
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::NotFound {
-            return Ok(None);
-        }
-        Err(error)
+        entry_at(self.directory.as_raw_fd(), &self.name)
     }
 
     fn fresh_as<T>(
@@ -723,7 +719,7 @@ impl Resolved {
         dst: &Path,
         unfinished: u64,
         ready: impl FnOnce(&File) -> Result<T>,
-        exclusive: bool,
+        occupant: Option<Entry>,
     ) -> Result<(File, T)> {
         use std::os::unix::fs::PermissionsExt as _;
         use std::os::unix::io::AsRawFd as _;
@@ -731,30 +727,26 @@ impl Resolved {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         before_a_fresh_partial_is_made(dst);
         let held = self.directory.as_raw_fd();
-        // cr-ecm28-2: what this partial is to replace, looked at now: it is
-        // what is replaced, or nothing is. Nothing there: it takes the name
-        // only while nothing does. A link there — come since the chain was
-        // followed — or a directory is left as it is, and the file fails.
-        let expected = if exclusive {
-            None
-        } else {
-            match self
-                .occupant()
-                .with_context(|| format!("looking at {}", dst.display()))?
-            {
-                None => return self.fresh_as(dst, unfinished, ready, true),
-                Some((mode, ..)) if is_link(mode) => eyre::bail!(
+        // cr-ecm28-2, cr-ecm29-2: what this partial is to replace is what the
+        // caller's look found at the name — `occupant`, carried from that
+        // first look through publication: it is what is replaced, or nothing
+        // is. Looked at again here, a file come there since became what was
+        // replaced. No occupant: the partial takes the name only while
+        // nothing has it. A link there, or a directory, is left as it is, and
+        // the file fails.
+        if let Some(seen) = occupant {
+            if is_link(seen.mode) {
+                eyre::bail!(
                     "{} became a link while it was being had; it is left as it is",
                     dst.display()
-                ),
-                Some((mode, ..)) if is_directory(mode) => {
-                    return Err(std::io::Error::from_raw_os_error(libc::EISDIR)).with_context(
-                        || format!("putting a fresh partial in place of {}", dst.display()),
-                    )
-                }
-                Some((_, device, inode)) => Some((device, inode)),
+                );
             }
-        };
+            if is_directory(seen.mode) {
+                return Err(std::io::Error::from_raw_os_error(libc::EISDIR)).with_context(|| {
+                    format!("putting a fresh partial in place of {}", dst.display())
+                });
+            }
+        }
         // cr-ecm28-3: staged in a directory of its own — made private (700)
         // in the destination's directory, held, and checked to be this run's
         // — so no other user can put anything in the staged name's place to
@@ -843,76 +835,51 @@ impl Resolved {
                 )));
             }
         };
-        if exclusive {
+        let exclusively = |file: File, readied: T| {
             let published =
                 self.publish_exclusive(dst, file, readied, stage.as_raw_fd(), staged, &unmade);
             if published.is_ok() {
                 stage_gone();
             }
-            return published;
-        }
-        self.publish_replacing(dst, stage.as_raw_fd(), staged, expected, &unmade)?;
-        stage_gone();
-        Ok((file, readied))
-    }
-
-    /// What stands at the name in the held directory, itself: its mode
-    /// (type bits included), device and inode — or nothing.
-    fn occupant(&self) -> std::io::Result<Option<(u32, u64, u64)>> {
-        #[cfg(not(target_os = "linux"))]
-        use libc::{fstatat, stat};
-        #[cfg(target_os = "linux")]
-        use libc::{fstatat64 as fstatat, stat64 as stat};
-        use std::os::unix::io::AsRawFd as _;
-        let mut found = std::mem::MaybeUninit::<stat>::uninit();
-        // SAFETY: the held directory is open for the length of the call, the
-        // name is NUL-terminated and outlives it, and `found` is a writable
-        // record the call fills on success.
-        let looked = unsafe {
-            fstatat(
-                self.directory.as_raw_fd(),
-                self.name.as_ptr(),
-                found.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
+            published
         };
-        if looked == 0 {
-            // SAFETY: the call succeeded, so the record is filled in.
-            let found = unsafe { found.assume_init() };
-            #[allow(clippy::unnecessary_cast)]
-            return Ok(Some((
-                found.st_mode as u32,
-                found.st_dev as u64,
-                found.st_ino as u64,
-            )));
+        let Some(seen) = occupant else {
+            return exclusively(file, readied);
+        };
+        let expected = seen.identity;
+        match self.publish_replacing(dst, stage.as_raw_fd(), staged, expected, &unmade)? {
+            Replacing::Done => {
+                stage_gone();
+                Ok((file, readied))
+            }
+            // cr-ecm29-2: nothing stands there any more: the partial takes
+            // the name only while nothing has it.
+            Replacing::Vacant => exclusively(file, readied),
         }
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::NotFound {
-            return Ok(None);
-        }
-        Err(error)
     }
 
-    /// cr-ecm28-2: the staged partial put in the place of `expected` — what
-    /// stood at the name when it was begun — and of nothing else. On Linux it
-    /// is swapped in (`RENAME_EXCHANGE`) and what came out is looked at in the
-    /// private stage: the one expected, it goes; anything else — a link, or a
-    /// file, that came to stand there since — is swapped back, left as it is,
-    /// and the file fails. Renamed over it, such a link was overwritten.
-    /// Where there is no swap, it is renamed over what stands there.
+    /// cr-ecm28-2, cr-ecm29-2: the staged partial put in the place of
+    /// `expected` — which entry stood at the name when the caller looked —
+    /// and of nothing else. On Linux it is swapped in (`RENAME_EXCHANGE`) and
+    /// what came out is looked at in the private stage: the one expected, it
+    /// goes; anything else — a link, or a file, come there since — is
+    /// swapped back, left as it is, and the file fails. Nothing there any
+    /// more: nothing is done ([`Replacing::Vacant`]). Where there is no swap
+    /// — off Linux, or on a filesystem without one — nothing is replaced and
+    /// the file fails: renamed over it, whatever had come to stand there
+    /// since was replaced.
     fn publish_replacing(
         &self,
         dst: &Path,
         stage: std::os::unix::io::RawFd,
         staged: &std::ffi::CStr,
-        expected: Option<(u64, u64)>,
+        expected: (u64, u64),
         unmade: &impl Fn(),
-    ) -> Result<()> {
-        use std::os::unix::io::AsRawFd as _;
-        let held = self.directory.as_raw_fd();
-        let in_place = || format!("putting a fresh partial in place of {}", dst.display());
+    ) -> Result<Replacing> {
         #[cfg(target_os = "linux")]
         {
+            use std::os::unix::io::AsRawFd as _;
+            let held = self.directory.as_raw_fd();
             let swap = || -> std::io::Result<()> {
                 // SAFETY: both directories are open for the length of the
                 // call, and both names are NUL-terminated and outlive it.
@@ -929,13 +896,18 @@ impl Resolved {
                     _ => Err(std::io::Error::last_os_error()),
                 }
             };
-            match swap() {
+            let swapped = if faulted("exchange", dst) {
+                Err(std::io::Error::from_raw_os_error(libc::EINVAL))
+            } else {
+                swap()
+            };
+            match swapped {
                 Ok(()) => {
                     // cr-ecm29-7: looked at in the stage through its own
                     // descriptor. Looked at through `/proc`, a daemon with
                     // none put back what it was to replace, and failed.
                     let out = entry_at(stage, staged);
-                    let theirs = !matches!(out, Ok(Some(out)) if Some(out.identity) == expected);
+                    let theirs = !matches!(out, Ok(Some(out)) if out.identity == expected);
                     if theirs {
                         // Not what was to be replaced: it goes back.
                         let back = swap();
@@ -956,9 +928,13 @@ impl Resolved {
                     // What was replaced, now in the private stage, goes.
                     // SAFETY: as for the swap above.
                     unsafe { libc::unlinkat(stage, staged.as_ptr(), 0) };
-                    return Ok(());
+                    return Ok(Replacing::Done);
                 }
-                // The filesystem has no swap: a rename, below.
+                // cr-ecm29-2: nothing stands there any more.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(Replacing::Vacant);
+                }
+                // The filesystem has no swap: below.
                 Err(error)
                     if matches!(
                         error.raw_os_error(),
@@ -966,20 +942,29 @@ impl Resolved {
                     ) => {}
                 Err(error) => {
                     unmade();
-                    return Err(error).with_context(in_place);
+                    return Err(error).with_context(|| {
+                        format!("putting a fresh partial in place of {}", dst.display())
+                    });
                 }
             }
         }
-        let _ = expected;
-        // SAFETY: both directories are open for the length of the call, and
-        // both names are NUL-terminated and outlive it.
-        if unsafe { libc::renameat(stage, staged.as_ptr(), held, self.name.as_ptr()) } != 0 {
-            let error = std::io::Error::last_os_error();
-            unmade();
-            return Err(error).with_context(in_place);
-        }
-        Ok(())
+        let _ = (stage, staged, expected);
+        unmade();
+        eyre::bail!(
+            "{} is left as it is: this filesystem cannot swap a fresh partial in for it, and renamed over it, whatever had come to stand there since would be replaced",
+            dst.display()
+        )
     }
+}
+
+/// What became of a fresh partial put in the place of what stood at its
+/// name ([`Resolved::publish_replacing`]).
+#[cfg(unix)]
+enum Replacing {
+    /// It stands there, and what it replaced is gone.
+    Done,
+    /// Nothing stood there any more: nothing was done.
+    Vacant,
 }
 
 #[cfg(unix)]
@@ -1134,6 +1119,19 @@ pub(crate) struct Entry {
     pub(crate) mode: u32,
     pub(crate) owner: u32,
     pub(crate) identity: (u64, u64),
+}
+
+#[cfg(unix)]
+impl Entry {
+    /// What `found` says of the file it was had of.
+    fn of(found: &std::fs::Metadata) -> Entry {
+        use std::os::unix::fs::MetadataExt as _;
+        Entry {
+            mode: found.mode(),
+            owner: found.uid(),
+            identity: (found.dev(), found.ino()),
+        }
+    }
 }
 
 /// What stands at `name` in the directory `directory` — looked at itself,
@@ -1851,6 +1849,108 @@ mod tests {
         let partial = std::fs::metadata(&kept)?;
         assert_eq!(partial.len(), 9, "unfinished");
         assert_eq!(partial.mode() & 0o777, 0o600, "private");
+        Ok(())
+    }
+
+    /// A 0600 source of 4,096 bytes and, in a folder of its own, a 0644
+    /// destination holding its first 1,000 — wider than its source, so not
+    /// reused: a fresh partial is made to replace it.
+    #[cfg(unix)]
+    fn wider_destination(tmp: &Path) -> Result<(std::path::PathBuf, std::path::PathBuf, Vec<u8>)> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let src = tmp.join("src");
+        let data: Vec<u8> = (0..4096u32).map(|at| (at % 251) as u8).collect();
+        std::fs::write(&src, &data)?;
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))?;
+        let folder = tmp.join("folder");
+        std::fs::create_dir(&folder)?;
+        let dst = folder.join("dst");
+        std::fs::write(&dst, &data[..1000])?;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o644))?;
+        Ok((src, dst, data))
+    }
+
+    /// cr-ecm29-2: what a fresh partial replaces is what the first look
+    /// found: a file come to the name after it — before the partial is even
+    /// made — is left as it is, and the resume fails. Looked at again when
+    /// the partial was made, the newcomer became what was replaced.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_come_since_the_first_look_is_not_replaced() -> Result<()> {
+        let tmp = tempdir()?;
+        let (src, dst, data) = wider_destination(tmp.path())?;
+        {
+            let (at, aside) = (dst.clone(), tmp.path().join("theirs"));
+            BEFORE_A_FRESH_PARTIAL_IS_MADE_HOOKS.lock().unwrap().push((
+                dst.clone(),
+                std::sync::Arc::new(move |_: &Path| {
+                    std::fs::write(&aside, b"theirs").unwrap();
+                    std::fs::rename(&aside, &at).unwrap();
+                }),
+            ));
+        }
+        let copied = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024);
+        BEFORE_A_FRESH_PARTIAL_IS_MADE_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(at, _)| at != &dst);
+        assert!(copied.is_err(), "the resume fails");
+        assert_eq!(std::fs::read(&dst)?, b"theirs", "left as it is");
+        let left: Vec<_> =
+            std::fs::read_dir(dst.parent().unwrap())?.collect::<std::io::Result<_>>()?;
+        assert_eq!(left.len(), 1, "no stage left");
+        Ok(())
+    }
+
+    /// cr-ecm29-2: where the filesystem cannot swap a fresh partial in, a
+    /// destination it may not reuse is left as it is and the resume fails.
+    /// Renamed over it, whatever had come to stand there since was replaced.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn where_there_is_no_exchange_nothing_is_replaced() -> Result<()> {
+        let tmp = tempdir()?;
+        let (src, dst, data) = wider_destination(tmp.path())?;
+        EXCHANGE_FAULTS.lock().unwrap().push(dst.clone());
+        let copied = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024);
+        EXCHANGE_FAULTS.lock().unwrap().retain(|at| at != &dst);
+        let error = copied.expect_err("the resume fails");
+        assert!(format!("{error:#}").contains("cannot swap"), "{error:#}");
+        assert_eq!(std::fs::read(&dst)?, &data[..1000], "left as it is");
+        let left: Vec<_> =
+            std::fs::read_dir(dst.parent().unwrap())?.collect::<std::io::Result<_>>()?;
+        assert_eq!(left.len(), 1, "no stage left");
+        Ok(())
+    }
+
+    /// cr-ecm29-2: a destination gone while its fresh partial is staged
+    /// leaves the name to the partial, taken only while nothing has it, and
+    /// the resume completes. The exchange found nothing to swap, and the
+    /// file failed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_destination_gone_while_its_partial_is_staged_takes_the_partial() -> Result<()> {
+        let tmp = tempdir()?;
+        let (src, dst, data) = wider_destination(tmp.path())?;
+        {
+            let at = dst.clone();
+            BEFORE_A_FRESH_PARTIAL_IS_PUBLISHED_HOOKS
+                .lock()
+                .unwrap()
+                .push((
+                    dst.clone(),
+                    std::sync::Arc::new(move |_: &Path| std::fs::remove_file(&at).unwrap()),
+                ));
+        }
+        let copied = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024);
+        BEFORE_A_FRESH_PARTIAL_IS_PUBLISHED_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(at, _)| at != &dst);
+        copied?;
+        assert_eq!(std::fs::read(&dst)?, data);
+        let left: Vec<_> =
+            std::fs::read_dir(dst.parent().unwrap())?.collect::<std::io::Result<_>>()?;
+        assert_eq!(left.len(), 1, "no stage left");
         Ok(())
     }
 

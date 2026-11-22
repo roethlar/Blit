@@ -2875,16 +2875,14 @@ fn hold_whole(dst: &Path, total_size: u64, within: Option<&Path>) -> Result<Opti
     // cr-ecm27-3: a link at the name — come there since the chain was
     // followed — is left as it is, and the file fails: replaced, the link
     // was overwritten.
-    if seen.is_some_and(|(mode, _)| crate::copy::is_link(mode)) {
-        eyre::bail!(
+    // cr-ecm29-2: and what it found is what the fresh partial may replace.
+    let (file, identity) = match seen {
+        Some(seen) if crate::copy::is_link(seen.mode) => eyre::bail!(
             "{} became a link while it was being had; it is left as it is",
             dst.display()
-        );
-    }
-    let (file, identity) = if seen.is_some() {
-        resolved.fresh(dst, unfinished, ready)?
-    } else {
-        resolved.fresh_exclusive(dst, unfinished, ready)?
+        ),
+        Some(seen) => resolved.fresh(dst, unfinished, seen, ready)?,
+        None => resolved.fresh_exclusive(dst, unfinished, ready)?,
     };
     while_a_file_is_made(dst);
     Ok(Some(HeldPartial { file, identity }))
@@ -8726,6 +8724,65 @@ mod cr_win_1_tests {
             .unwrap();
         assert!(outcome.file_failed("late.bin"), "{outcome:?}");
         assert_eq!(std::fs::read(&late).unwrap(), b"theirs");
+    }
+
+    /// cr-ecm29-2: the wire's fresh partial replaces what its look found: a
+    /// file come to the name after it is left as it is, and the file fails.
+    /// Looked at again when the partial was made, the newcomer was replaced.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_wires_fresh_partial_leaves_a_file_come_since_its_look() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let at = dst.join("r.bin");
+        std::fs::write(&at, b"0123456789").unwrap();
+        sink.note_resume_baseline("r.bin", ResumeBaseline::Whole);
+        {
+            let (to, aside) = (at.clone(), tmp.path().join("theirs"));
+            crate::copy::BEFORE_A_FRESH_PARTIAL_IS_MADE_HOOKS
+                .lock()
+                .unwrap()
+                .push((
+                    at.clone(),
+                    std::sync::Arc::new(move |_: &std::path::Path| {
+                        std::fs::write(&aside, b"theirs").unwrap();
+                        std::fs::rename(&aside, &to).unwrap();
+                    }),
+                ));
+        }
+        let held = sink.hold_resume_partial("r.bin", 10).await;
+        crate::copy::BEFORE_A_FRESH_PARTIAL_IS_MADE_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(path, _)| path != &at);
+        held.unwrap();
+        assert_eq!(std::fs::read(&at).unwrap(), b"theirs", "left as it is");
+        assert_eq!(
+            std::fs::read_dir(&dst).unwrap().count(),
+            1,
+            "nothing left beside it"
+        );
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "r.bin".to_string(),
+                total_size: 10,
+                mtime_seconds: 0,
+                permissions: 0o600,
+                windows_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert!(outcome.file_failed("r.bin"), "{outcome:?}");
+        assert_eq!(std::fs::read(&at).unwrap(), b"theirs");
     }
 
     /// cr-ecm23-1: a fresh partial for the wire is known — which file it is

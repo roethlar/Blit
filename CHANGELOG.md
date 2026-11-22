@@ -281,7 +281,14 @@ part, and a job you can list, read, re-run and retry.
   bytes), is copied whole into a fresh one — and so is one this run
   cannot read, which failed the copy (locally; over the network it
   ended the transfer), and one with more than one name (a hard link),
-  whose other names would have changed with it.
+  whose other names would have changed with it. The fresh copy takes
+  the destination's place only while what stands there is what was
+  seen: anything put there meanwhile is left as it is, and that file
+  fails. Where the filesystem cannot swap two entries in one step
+  (Linux's `RENAME_EXCHANGE`, which not every network filesystem has;
+  blit does not yet use macOS's), such a destination is left as it is
+  and the file fails, rather than risk replacing something put there
+  meanwhile.
 - `check` of a single file against a destination of another name
   compares the two. With the source named in `--files-from`, or a
   pattern naming either file, it looked for one file's name on the
