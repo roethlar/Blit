@@ -2287,6 +2287,35 @@ fn keep_for_the_tail(file: std::fs::File) -> Option<std::fs::File> {
     }
 }
 
+/// Test seam (cr-ecm17-2): runs in a failed write's cleanup after its
+/// first removal failed and its handle was let go, before it tries again —
+/// where another hand can change what stands at the name. Prefix-keyed
+/// like the other hooks. Production never sets it.
+#[cfg(test)]
+pub(super) static BEFORE_SECOND_REMOVAL_HOOKS: std::sync::Mutex<
+    Vec<(std::path::PathBuf, AfterSourceOpenHook)>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn before_the_second_removal(dst: &Path) {
+    let hooks: Vec<AfterSourceOpenHook> = BEFORE_SECOND_REMOVAL_HOOKS
+        .lock()
+        .map(|g| {
+            g.iter()
+                .filter(|(prefix, _)| dst.starts_with(prefix))
+                .map(|(_, h)| Arc::clone(h))
+                .collect()
+        })
+        .unwrap_or_default();
+    for hook in hooks {
+        hook(dst);
+    }
+}
+
+#[cfg(not(test))]
+#[inline]
+fn before_the_second_removal(_dst: &Path) {}
+
 /// Test seam (cr-ecm15-1): runs once a run that keeps what exists has
 /// made a destination's name and before it writes — where another hand
 /// can put its own file under that name. Prefix-keyed like the copy
@@ -2422,19 +2451,53 @@ fn settle_failed_target(
             // arriving — is somebody's: the write's own copy is gone from
             // the name already, and nothing there is removed. (Where the
             // system does not say which file is which, as before.)
+            //
+            // cr-ecm17-2: and three cases, not two. The name may be the
+            // file held (removed, as ever); a LINK to it — a write through a
+            // link holds what the link names, and removing the name takes
+            // the link and leaves the partial, which was then reported
+            // removed: it is marked through the handle and reported left in
+            // place; or somebody else's file, left alone. Asked again
+            // before the second removal, for the name can change between.
             let held = handle
                 .as_ref()
                 .and_then(|file| file.metadata().ok())
                 .as_ref()
                 .and_then(file_identity);
-            if held.is_some_and(|held| identity_at(dst) != Some(held)) {
-                return REMOVED;
+            let followed_to_held = || {
+                held.is_some_and(|held| {
+                    std::fs::metadata(dst).ok().as_ref().and_then(file_identity) == Some(held)
+                })
+            };
+            let not_its_own = || held.is_some_and(|held| identity_at(dst) != Some(held));
+            if not_its_own() {
+                if !followed_to_held() {
+                    return REMOVED;
+                }
+                let note = match mark(handle.as_ref()) {
+                    Ok(()) => format!(
+                        "{INCOMPLETE_LEFT_IN_PLACE}: its name is a link to it, which is not \
+                         this run's to remove, so it was left one byte longer than the source"
+                    ),
+                    Err(mark_error) => format!(
+                        "{INCOMPLETE_LEFT_IN_PLACE}: its name is a link to it, and it could not \
+                         be marked unfinished ({mark_error})"
+                    ),
+                };
+                return Settled {
+                    note: Some(note),
+                    removed: false,
+                };
             }
             if remove().is_ok() {
                 return REMOVED;
             }
             let marked = mark(handle.as_ref());
             drop(handle);
+            before_the_second_removal(dst);
+            if not_its_own() {
+                return REMOVED;
+            }
             let remove_error = match remove() {
                 Ok(()) => return REMOVED,
                 Err(error) => error,
@@ -7437,6 +7500,15 @@ mod cr_win_1_tests {
                 b"somebody's file",
                 "ignore_existing={ignore_existing}: the file put there is whole"
             );
+            // cr-ecm17-2: and nothing of the record's is said to be left
+            // at the name — it is not there.
+            assert!(
+                !outcome.failures[0]
+                    .reason
+                    .contains(INCOMPLETE_LEFT_IN_PLACE),
+                "ignore_existing={ignore_existing}: {:?}",
+                outcome.failures
+            );
 
             // And a record nobody interferes with leaves nothing.
             let mut record = sink
@@ -7540,6 +7612,97 @@ mod cr_win_1_tests {
         // A run that keeps nothing: as ever.
         assert_eq!(write_shard_member(&member("plain"), false).ok(), Some(3));
         assert_eq!(std::fs::read(tmp.path().join("plain")).unwrap(), b"new");
+    }
+
+    /// cr-ecm17-2: a record written THROUGH a link (an ordinary run: the
+    /// open follows it) and given up. The link names the file the record
+    /// holds; removing the name takes the link and leaves the partial,
+    /// which was reported removed. It is marked through the handle — one
+    /// byte longer than the source — and reported left in place, and the
+    /// link stays.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_record_given_up_through_a_link_reports_its_partial_left() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("real.bin"), b"old").unwrap();
+        std::os::unix::fs::symlink("real.bin", dst.join("link.bin")).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig::default(),
+        );
+        let mut record = sink
+            .begin_record(&make_file_header("link.bin", 10))
+            .await
+            .expect("an ordinary run writes through the link");
+        record.write(b"0123").await.unwrap();
+        let outcome = record.abort("source: read error: injected").await.unwrap();
+        assert!(outcome.removed_incomplete().is_empty(), "{outcome:?}");
+        assert!(
+            outcome.failures[0]
+                .reason
+                .contains(INCOMPLETE_LEFT_IN_PLACE),
+            "{:?}",
+            outcome.failures
+        );
+        assert!(dst.join("link.bin").is_symlink(), "the link stays");
+        assert_eq!(
+            std::fs::metadata(dst.join("real.bin")).unwrap().len(),
+            11,
+            "the partial is marked one byte longer than the source"
+        );
+    }
+
+    /// cr-ecm17-2: a cleanup whose first removal failed asks again whose
+    /// file stands at the name before its second: another file moved
+    /// there between the two is left whole.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_removal_is_asked_whose_file_stands_there() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .is_ok_and(|out| out.stdout == b"0\n")
+        {
+            eprintln!("root removes whatever the folder's mode: nothing fails first");
+            return;
+        }
+        struct Hooked(PathBuf, PathBuf);
+        impl Drop for Hooked {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.1, std::fs::Permissions::from_mode(0o755));
+                if let Ok(mut hooks) = BEFORE_SECOND_REMOVAL_HOOKS.lock() {
+                    hooks.retain(|(prefix, _)| prefix != &self.0);
+                }
+            }
+        }
+        let tmp = tempdir().unwrap();
+        let folder = tmp.path().join("folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        let dest = folder.join("partial");
+        let held = std::fs::File::create(&dest).unwrap();
+        let theirs = tmp.path().join("theirs");
+        std::fs::write(&theirs, b"somebody's").unwrap();
+        // The first removal fails: the folder may not be written to.
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let _hooked = {
+            let (theirs, at, writable) = (theirs.clone(), dest.clone(), folder.clone());
+            BEFORE_SECOND_REMOVAL_HOOKS.lock().unwrap().push((
+                dest.clone(),
+                Arc::new(move |_: &Path| {
+                    std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                    std::fs::rename(&theirs, &at).unwrap();
+                }),
+            ));
+            Hooked(dest.clone(), folder.clone())
+        };
+        let settled = settle_failed_target(&dest, Some(held), 10, OnFailure::Remove);
+        assert!(settled.removed, "nothing of this write's is at the name");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"somebody's");
     }
 
     /// cr-ecm16-2: a target settled WITHOUT its writer's handle — a record
