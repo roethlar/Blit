@@ -7993,6 +7993,40 @@ mod cr_win_1_tests {
         assert_eq!(std::fs::read(&at).unwrap(), b"somebody's", "not marked");
     }
 
+    /// cr-ecm24-3: a wire resume into a destination that is one file — a pull
+    /// to an exact file path — holds a fresh partial in that file's place
+    /// and completes. Its directory, above the destination, was judged
+    /// outside it and the file failed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_resume_into_a_destination_that_is_one_file_completes() {
+        let tmp = tempdir().unwrap();
+        let at = tmp.path().join("one.bin");
+        std::fs::write(&at, b"0123456789").unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            at.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        sink.note_resume_baseline("", ResumeBaseline::Whole);
+        sink.hold_resume_partial("", 10).await.unwrap();
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: String::new(),
+                total_size: 10,
+                mtime_seconds: 0,
+                permissions: 0o600,
+                windows_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert!(!outcome.file_failed(""), "{outcome:?}");
+        assert_eq!(std::fs::metadata(&at).unwrap().len(), 10);
+    }
+
     /// cr-ecm23-3: a link at the destination whose chain ends outside it —
     /// at a name not there yet — is not followed out: the file fails, and
     /// nothing is made outside. The check by path passed it (what it names

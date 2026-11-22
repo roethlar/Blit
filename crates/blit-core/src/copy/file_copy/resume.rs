@@ -258,8 +258,11 @@ pub fn fresh_partial_ready<T>(
     };
     let directory = std::fs::canonicalize(&parent)
         .with_context(|| format!("finding the directory {} is in", target.display()))?;
+    // cr-ecm24-3: within it — or, when the destination is one file, that
+    // file itself, whose directory lies above it. Judged by its directory
+    // alone, a destination that is one file was refused its own place.
     if let Some(root) = within {
-        if !directory.starts_with(root) {
+        if !directory.starts_with(root) && directory.join(&name) != root {
             eyre::bail!(
                 "{} leads out of the destination, to {}",
                 dst.display(),
@@ -799,6 +802,27 @@ mod tests {
             0,
             "nothing elsewhere"
         );
+        Ok(())
+    }
+
+    /// cr-ecm24-3: a destination that is one file takes a fresh partial in
+    /// its own place — the file is the destination, its directory above it
+    /// — and a name beside it is still outside. Judged by its directory
+    /// alone, the file itself was refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_that_is_one_file_takes_a_fresh_partial() -> Result<()> {
+        let tmp = tempdir()?;
+        let dst = tmp.path().join("one.bin");
+        std::fs::write(&dst, b"old")?;
+        let root = std::fs::canonicalize(&dst)?;
+        let file = fresh_partial(&dst, 11, Some(&root))?;
+        assert_eq!(file.metadata()?.len(), 11);
+        assert_eq!(std::fs::metadata(&dst)?.len(), 11, "in its own place");
+        let beside = tmp.path().join("beside.bin");
+        std::fs::write(&beside, b"x")?;
+        assert!(fresh_partial(&beside, 11, Some(&root)).is_err(), "outside");
+        assert_eq!(std::fs::read(&beside)?, b"x");
         Ok(())
     }
 
