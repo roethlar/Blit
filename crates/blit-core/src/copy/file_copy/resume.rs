@@ -172,22 +172,37 @@ pub fn fresh_partial(dst: &Path) -> Result<File> {
         }
         _ => dst.to_path_buf(),
     };
-    let name = target
-        .file_name()
-        .ok_or_else(|| eyre::eyre!("{} names no file", dst.display()))?;
-    let beside = target.with_file_name(format!(
-        ".{}.blit-partial-{}-{}",
-        name.to_string_lossy(),
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&beside)
-        .with_context(|| format!("making a fresh partial for {}", dst.display()))?;
+    if target.file_name().is_none() {
+        eyre::bail!("{} names no file", dst.display());
+    }
+    // cr-ecm22-6: by a short name of blit's own beside it, whatever the
+    // destination is called — the destination's name in it made a name too
+    // long for a destination whose own name was the longest a name can be
+    // — and another is tried when that one is taken.
+    let mut tries = 0;
+    let (beside, file) = loop {
+        let beside = target.with_file_name(format!(
+            ".blit-partial-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&beside)
+        {
+            Ok(file) => break (beside, file),
+            Err(taken) if taken.kind() == std::io::ErrorKind::AlreadyExists && tries < 16 => {
+                tries += 1;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("making a fresh partial for {}", dst.display()))
+            }
+        }
+    };
     let placed = file
         .set_permissions(std::fs::Permissions::from_mode(0o600))
         .and_then(|()| std::fs::rename(&beside, &target));
@@ -573,6 +588,26 @@ mod tests {
                 0o644
             );
         }
+        Ok(())
+    }
+
+    /// cr-ecm22-6: a destination whose name is the longest a name can be
+    /// takes a fresh partial too: the name made beside it is blit's own and
+    /// short. It held the destination's name, and was too long to make.
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_of_the_longest_name_takes_a_fresh_partial() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let data = vec![7u8; 4096];
+        std::fs::write(&src, &data)?;
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))?;
+        let dst = tmp.path().join("n".repeat(255));
+        std::fs::write(&dst, &data[..1000])?;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o644))?;
+        resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024)?;
+        assert_eq!(std::fs::read(&dst)?, data);
         Ok(())
     }
 
