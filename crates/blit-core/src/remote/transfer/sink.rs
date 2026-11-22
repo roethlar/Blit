@@ -2642,21 +2642,20 @@ fn hold_partial(
 #[cfg(unix)]
 fn hold_whole(dst: &Path, total_size: u64) -> Result<Option<(u64, u64)>> {
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-    if std::fs::symlink_metadata(dst).is_ok_and(|there| there.is_file()) {
-        std::fs::remove_file(dst).with_context(|| {
-            format!(
-                "replacing the resume partial {} with a fresh one",
-                dst.display()
-            )
-        })?;
-    }
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(dst)
-        .with_context(|| format!("making the resume partial {}", dst.display()))?;
+    // cr-ecm21-3: something there — a file, or a link to one — is replaced
+    // by a fresh private partial made beside it, and nothing of it is
+    // touched until that exists: it was removed, or cut to nothing through
+    // the link, before a permission failure could leave its bytes gone.
+    let file = if std::fs::symlink_metadata(dst).is_ok() {
+        crate::copy::fresh_partial(dst)?
+    } else {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(dst)
+            .with_context(|| format!("making the resume partial {}", dst.display()))?
+    };
     while_a_file_is_made(dst);
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .with_context(|| format!("making the resume partial {} private", dst.display()))?;
@@ -3259,8 +3258,11 @@ fn copy_and_stamp_opened(
         // could write but not take was cut to one byte longer than the
         // source. From here a failure marks the partial through a handle to
         // it, not whatever stands at the name.
-        let (held, held_len) = crate::copy::open_resume_partial(dst)
-            .with_context(|| format!("resume copy {}", header.relative_path))?;
+        let (held, held_len) = crate::copy::open_resume_partial(
+            dst,
+            Some(crate::wire_metadata::permissions_mode(src_meta)),
+        )
+        .with_context(|| format!("resume copy {}", header.relative_path))?;
         partial
             .arm_held(&held, OnFailure::KeepUnfinished { created })
             .with_context(|| format!("holding the resume partial {}", dst.display()))?;
@@ -7839,6 +7841,60 @@ mod cr_win_1_tests {
             .await
             .unwrap();
         assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+    }
+
+    /// cr-ecm21-3: a wire resume nothing was hashed of, through a link at
+    /// its name, replaces the file the link names with a fresh private
+    /// partial and keeps the link; and where no fresh partial can be put
+    /// beside it, it is left exactly as it stands. It was cut to nothing
+    /// through the link before its mode could be set.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_wire_partial_through_a_link_is_replaced_whole_or_not_at_all() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        struct Reopened(PathBuf);
+        impl Drop for Reopened {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        let real = dst.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("named.bin"), b"old content").unwrap();
+        std::os::unix::fs::symlink("real/named.bin", dst.join("link.bin")).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let before = std::fs::metadata(real.join("named.bin")).unwrap().ino();
+        sink.note_resume_baseline("link.bin", ResumeBaseline::Whole);
+        sink.hold_resume_partial("link.bin", 4).await.unwrap();
+        assert!(dst.join("link.bin").is_symlink(), "the link stays");
+        let named = std::fs::metadata(real.join("named.bin")).unwrap();
+        assert_ne!(named.ino(), before, "a fresh partial in its place");
+        assert_eq!(named.permissions().mode() & 0o777, 0o600);
+
+        std::fs::write(real.join("kept.bin"), b"kept as it was").unwrap();
+        std::os::unix::fs::symlink("real/kept.bin", dst.join("kept.bin")).unwrap();
+        let _reopened = Reopened(real.clone());
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::write(real.join("probe"), b"").is_ok() {
+            eprintln!("skipped: this process is not barred by a directory's mode");
+            return;
+        }
+        sink.note_resume_baseline("kept.bin", ResumeBaseline::Whole);
+        sink.hold_resume_partial("kept.bin", 4).await.unwrap();
+        assert_eq!(
+            std::fs::read(real.join("kept.bin")).unwrap(),
+            b"kept as it was",
+            "left as it stood"
+        );
     }
 
     /// cr-ecm20-1: a wire resume's hold, its blocks and its completion are

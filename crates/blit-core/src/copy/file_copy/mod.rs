@@ -5,7 +5,7 @@ pub mod resume;
 
 pub use mmap::mmap_copy_file;
 #[cfg(unix)]
-pub use resume::make_partial_private;
+pub use resume::{fresh_partial, make_partial_private};
 pub use resume::{
     open_resume_partial, resume_copy_file, resume_copy_from, resume_copy_into, ResumeCopyOutcome,
 };
