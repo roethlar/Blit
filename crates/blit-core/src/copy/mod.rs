@@ -13,6 +13,6 @@ pub use file_copy::{
     resume_copy_file, resume_copy_from, resume_copy_into, ResumeCopyOutcome,
 };
 #[cfg(unix)]
-pub use file_copy::{fresh_partial, make_partial_private};
+pub use file_copy::{fresh_partial, fresh_partial_ready, make_partial_private};
 #[cfg(windows)]
 pub use windows::windows_copyfile;

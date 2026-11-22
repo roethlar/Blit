@@ -2673,6 +2673,12 @@ impl HeldPartial {
     /// completion's check that the file is still the one at the name: one
     /// put there since was reported complete.
     fn of(file: std::fs::File, dst: &Path) -> Result<Self> {
+        let identity = Self::identity_of(&file, dst)?;
+        Ok(Self { file, identity })
+    }
+
+    /// Which file `file` is — the one held for `dst`.
+    fn identity_of(file: &std::fs::File, dst: &Path) -> Result<Option<(u64, u64)>> {
         let looked = identity_fault(dst).and_then(|()| file.metadata());
         let meta = match looked {
             Ok(meta) => meta,
@@ -2683,10 +2689,7 @@ impl HeldPartial {
                 )))
             }
         };
-        Ok(Self {
-            identity: file_identity(&meta),
-            file,
-        })
+        Ok(file_identity(&meta))
     }
 }
 
@@ -2763,16 +2766,23 @@ fn hold_whole(dst: &Path, total_size: u64) -> Result<Option<HeldPartial>> {
     // by a fresh private partial made beside it, and nothing of it is
     // touched until that exists: it was removed, or cut to nothing through
     // the link, before a permission failure could leave its bytes gone.
-    let file = if std::fs::symlink_metadata(dst).is_ok() {
-        crate::copy::fresh_partial(dst, total_size.saturating_add(1))?
-    } else {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(dst)
-            .with_context(|| format!("making the resume partial {}", dst.display()))?
-    };
+    if std::fs::symlink_metadata(dst).is_ok() {
+        // cr-ecm23-1: ready — private, at its length, and which file it is
+        // known — before it takes the name. Learned after, a look that
+        // failed left the destination replaced, and nothing held.
+        let (file, identity) =
+            crate::copy::fresh_partial_ready(dst, total_size.saturating_add(1), |file| {
+                HeldPartial::identity_of(file, dst)
+            })?;
+        while_a_file_is_made(dst);
+        return Ok(Some(HeldPartial { file, identity }));
+    }
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(dst)
+        .with_context(|| format!("making the resume partial {}", dst.display()))?;
     while_a_file_is_made(dst);
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .with_context(|| format!("making the resume partial {} private", dst.display()))?;
@@ -7967,6 +7977,51 @@ mod cr_win_1_tests {
             .unwrap();
         assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
         assert_eq!(std::fs::read(&at).unwrap(), b"somebody's", "not marked");
+    }
+
+    /// cr-ecm23-1: a fresh partial for the wire is known — which file it is
+    /// — before it takes the destination's place: a look that fails leaves
+    /// the destination as it stood, and the file fails. Learned after the
+    /// rename, it left the destination eleven bytes of nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fresh_partial_is_known_before_it_takes_the_name() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let at = dst.join("r.bin");
+        std::fs::write(&at, b"0123456789").unwrap();
+        sink.note_resume_baseline("r.bin", ResumeBaseline::Whole);
+        IDENTITY_FAULTS.lock().unwrap().push(at.clone());
+        let held = sink.hold_resume_partial("r.bin", 10).await;
+        IDENTITY_FAULTS.lock().unwrap().retain(|fault| fault != &at);
+        held.unwrap();
+        assert_eq!(std::fs::read(&at).unwrap(), b"0123456789", "as it stood");
+        assert_eq!(
+            std::fs::read_dir(&dst).unwrap().count(),
+            1,
+            "nothing left beside it"
+        );
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "r.bin".to_string(),
+                total_size: 10,
+                mtime_seconds: 0,
+                permissions: 0o600,
+                windows_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert!(outcome.file_failed("r.bin"), "{outcome:?}");
+        assert_eq!(std::fs::read(&at).unwrap(), b"0123456789");
     }
 
     /// cr-ecm22-3: a hold that cannot learn which file it holds fails the

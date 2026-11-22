@@ -173,6 +173,21 @@ pub fn make_partial_private(file: &File) -> std::io::Result<bool> {
 /// chain replaced by the partial, the file at its end left as it was.
 #[cfg(unix)]
 pub fn fresh_partial(dst: &Path, unfinished: u64) -> Result<File> {
+    fresh_partial_ready(dst, unfinished, |_| Ok(())).map(|(file, ())| file)
+}
+
+/// cr-ecm23-1: [`fresh_partial`], with `ready` run on the staged file —
+/// private and at its length — before it is renamed over the destination:
+/// what a caller must know of it (which file it is) is known before it
+/// takes the name, and an error there leaves the destination as it stood.
+/// Learned after the rename, a look that failed left the destination
+/// replaced by a partial nothing held.
+#[cfg(unix)]
+pub fn fresh_partial_ready<T>(
+    dst: &Path,
+    unfinished: u64,
+    ready: impl FnOnce(&File) -> Result<T>,
+) -> Result<(File, T)> {
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -222,16 +237,27 @@ pub fn fresh_partial(dst: &Path, unfinished: u64) -> Result<File> {
             }
         }
     };
-    let placed = file
+    let prepared = file
         .set_permissions(std::fs::Permissions::from_mode(0o600))
         .and_then(|()| file.set_len(unfinished))
-        .and_then(|()| std::fs::rename(&beside, &target));
-    if let Err(error) = placed {
+        .map_err(eyre::Report::new)
+        .and_then(|()| ready(&file));
+    let readied = match prepared {
+        Ok(readied) => readied,
+        Err(error) => {
+            let _ = std::fs::remove_file(&beside);
+            return Err(error.wrap_err(format!(
+                "making a fresh partial ready for {}",
+                dst.display()
+            )));
+        }
+    };
+    if let Err(error) = std::fs::rename(&beside, &target) {
         let _ = std::fs::remove_file(&beside);
         return Err(error)
             .with_context(|| format!("putting a fresh partial in place of {}", dst.display()));
     }
-    Ok(file)
+    Ok((file, readied))
 }
 
 /// Test seam (cr-ecm19-4): runs once a resume's partial is open and before
