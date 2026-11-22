@@ -1208,6 +1208,35 @@ impl FsTransferSink {
         }
     }
 
+    /// cr-ecm24-8: a resume record for `relative_path` has closed — failed,
+    /// or completed: what was noted for it goes, its raw name and its hold's
+    /// mark with its handle and its baseline. They stayed to the session's
+    /// end.
+    fn forget_record(&self, relative_path: &str) {
+        self.raw_names
+            .lock()
+            .expect("raw-names lock poisoned")
+            .remove(relative_path);
+        self.resume_held
+            .lock()
+            .expect("resume-held lock poisoned")
+            .remove(relative_path);
+    }
+
+    #[cfg(all(test, unix))]
+    fn records_noted(&self) -> (usize, usize) {
+        (
+            self.raw_names
+                .lock()
+                .expect("raw-names lock poisoned")
+                .len(),
+            self.resume_held
+                .lock()
+                .expect("resume-held lock poisoned")
+                .len(),
+        )
+    }
+
     /// The raw name bytes noted for `relative_path`, if any (contract v7).
     fn raw_name_for(&self, relative_path: &str) -> Option<Vec<u8>> {
         self.raw_names
@@ -1565,6 +1594,7 @@ impl TransferSink for FsTransferSink {
             .expect("resume-baselines lock poisoned")
             .remove(relative_path);
         let _ = self.take_resume_block_failure(relative_path);
+        self.forget_record(relative_path);
         Ok(SinkOutcome::failed(relative_path, reason))
     }
 
@@ -1660,7 +1690,7 @@ impl TransferSink for FsTransferSink {
                     .lock()
                     .expect("resume-files lock poisoned")
                     .remove(&relative_path);
-                if let Some(reason) = self.take_resume_block_failure(&relative_path) {
+                let closed = if let Some(reason) = self.take_resume_block_failure(&relative_path) {
                     // Finalizing here would stamp a stale file as
                     // converged (see `failed_resume_reasons`); the file
                     // fails once, and this is the record that names it.
@@ -1717,7 +1747,9 @@ impl TransferSink for FsTransferSink {
                         Ok(outcome) => outcome,
                         Err(error) => per_file_failure(&self.dst_root, &relative_path, error)?,
                     }
-                }
+                };
+                self.forget_record(&relative_path);
+                closed
             }
             // otp-7b: the composite resume payload is send-side only
             // (DataPlaneSink); the receive pipeline decodes per-block
@@ -8021,6 +8053,54 @@ mod cr_win_1_tests {
             .unwrap();
         assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
         assert_eq!(std::fs::read(&at).unwrap(), b"somebody's", "not marked");
+    }
+
+    /// cr-ecm24-8: a resume record that closes — failed by its source, or
+    /// completed — leaves nothing noted for it: its raw name and its hold's
+    /// mark go with its handle and baseline. They stayed to the session's
+    /// end.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_closed_record_leaves_nothing_noted_for_it() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        for (name, failed) in [("failed.bin", true), ("done.bin", false)] {
+            let at = dst.join(name);
+            std::fs::write(&at, b"0123456789").unwrap();
+            sink.note_raw_name(name, name.as_bytes());
+            sink.note_resume_baseline(
+                name,
+                ResumeBaseline::Hashed(crate::moved::Version::of(&std::fs::metadata(&at).unwrap())),
+            );
+            sink.hold_resume_partial(name, 10).await.unwrap();
+            if failed {
+                sink.fail_resume_record(name, "source: read error")
+                    .await
+                    .unwrap();
+            } else {
+                let outcome = sink
+                    .write_payload(PreparedPayload::FileBlockComplete {
+                        relative_path: name.to_string(),
+                        total_size: 10,
+                        mtime_seconds: 0,
+                        permissions: 0o600,
+                        windows_metadata: None,
+                    })
+                    .await
+                    .unwrap();
+                assert!(!outcome.file_failed(name), "{outcome:?}");
+            }
+        }
+        assert_eq!(sink.records_noted(), (0, 0), "nothing noted");
     }
 
     /// cr-ecm24-5: a hold with no word of the hashes that cannot make its
