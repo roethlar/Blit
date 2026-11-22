@@ -319,6 +319,22 @@ fn is_regular(mode: u32) -> bool {
     mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
 }
 
+/// Whether `mode` (type bits included) is a directory's.
+#[cfg(unix)]
+#[allow(clippy::unnecessary_cast)]
+fn is_directory(mode: u32) -> bool {
+    mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32
+}
+
+/// The path of the entry `name` in the stage `stage` holds, through the
+/// descriptor itself (Linux's `/proc/self/fd`), for a look at it.
+#[cfg(target_os = "linux")]
+fn stage_path(stage: std::os::unix::io::RawFd, name: &std::ffi::CStr) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStrExt as _;
+    std::path::Path::new(&format!("/proc/self/fd/{stage}"))
+        .join(std::ffi::OsStr::from_bytes(name.to_bytes()))
+}
+
 /// Whether `mode` (type bits included) is a link's.
 #[cfg(unix)]
 #[allow(clippy::unnecessary_cast)]
@@ -724,6 +740,30 @@ impl Resolved {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         before_a_fresh_partial_is_made(dst);
         let held = self.directory.as_raw_fd();
+        // cr-ecm28-2: what this partial is to replace, looked at now: it is
+        // what is replaced, or nothing is. Nothing there: it takes the name
+        // only while nothing does. A link there — come since the chain was
+        // followed — or a directory is left as it is, and the file fails.
+        let expected = if exclusive {
+            None
+        } else {
+            match self
+                .occupant()
+                .with_context(|| format!("looking at {}", dst.display()))?
+            {
+                None => return self.fresh_as(dst, unfinished, ready, true),
+                Some((mode, ..)) if is_link(mode) => eyre::bail!(
+                    "{} became a link while it was being had; it is left as it is",
+                    dst.display()
+                ),
+                Some((mode, ..)) if is_directory(mode) => {
+                    return Err(std::io::Error::from_raw_os_error(libc::EISDIR)).with_context(
+                        || format!("putting a fresh partial in place of {}", dst.display()),
+                    )
+                }
+                Some((_, device, inode)) => Some((device, inode)),
+            }
+        };
         // cr-ecm28-3: staged in a directory of its own — made private (700)
         // in the destination's directory, held, and checked to be this run's
         // — so no other user can put anything in the staged name's place to
@@ -807,18 +847,137 @@ impl Resolved {
             }
             return published;
         }
-        // SAFETY: both directories are open for the length of the call, and
-        // both names are NUL-terminated and outlive it.
-        if unsafe { libc::renameat(stage.as_raw_fd(), staged.as_ptr(), held, self.name.as_ptr()) }
-            != 0
-        {
-            let error = std::io::Error::last_os_error();
-            unmade();
-            return Err(error)
-                .with_context(|| format!("putting a fresh partial in place of {}", dst.display()));
-        }
+        self.publish_replacing(dst, stage.as_raw_fd(), staged, expected, &unmade)?;
         stage_gone();
         Ok((file, readied))
+    }
+
+    /// What stands at the name in the held directory, itself: its mode
+    /// (type bits included), device and inode — or nothing.
+    fn occupant(&self) -> std::io::Result<Option<(u32, u64, u64)>> {
+        #[cfg(not(target_os = "linux"))]
+        use libc::{fstatat, stat};
+        #[cfg(target_os = "linux")]
+        use libc::{fstatat64 as fstatat, stat64 as stat};
+        use std::os::unix::io::AsRawFd as _;
+        let mut found = std::mem::MaybeUninit::<stat>::uninit();
+        // SAFETY: the held directory is open for the length of the call, the
+        // name is NUL-terminated and outlives it, and `found` is a writable
+        // record the call fills on success.
+        let looked = unsafe {
+            fstatat(
+                self.directory.as_raw_fd(),
+                self.name.as_ptr(),
+                found.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if looked == 0 {
+            // SAFETY: the call succeeded, so the record is filled in.
+            let found = unsafe { found.assume_init() };
+            #[allow(clippy::unnecessary_cast)]
+            return Ok(Some((
+                found.st_mode as u32,
+                found.st_dev as u64,
+                found.st_ino as u64,
+            )));
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(None);
+        }
+        Err(error)
+    }
+
+    /// cr-ecm28-2: the staged partial put in the place of `expected` — what
+    /// stood at the name when it was begun — and of nothing else. On Linux it
+    /// is swapped in (`RENAME_EXCHANGE`) and what came out is looked at in the
+    /// private stage: the one expected, it goes; anything else — a link, or a
+    /// file, that came to stand there since — is swapped back, left as it is,
+    /// and the file fails. Renamed over it, such a link was overwritten.
+    /// Where there is no swap, it is renamed over what stands there.
+    fn publish_replacing(
+        &self,
+        dst: &Path,
+        stage: std::os::unix::io::RawFd,
+        staged: &std::ffi::CStr,
+        expected: Option<(u64, u64)>,
+        unmade: &impl Fn(),
+    ) -> Result<()> {
+        use std::os::unix::io::AsRawFd as _;
+        let held = self.directory.as_raw_fd();
+        let in_place = || format!("putting a fresh partial in place of {}", dst.display());
+        #[cfg(target_os = "linux")]
+        {
+            let swap = || -> std::io::Result<()> {
+                // SAFETY: both directories are open for the length of the
+                // call, and both names are NUL-terminated and outlive it.
+                match unsafe {
+                    libc::renameat2(
+                        stage,
+                        staged.as_ptr(),
+                        held,
+                        self.name.as_ptr(),
+                        libc::RENAME_EXCHANGE,
+                    )
+                } {
+                    0 => Ok(()),
+                    _ => Err(std::io::Error::last_os_error()),
+                }
+            };
+            match swap() {
+                Ok(()) => {
+                    let out = std::fs::symlink_metadata(stage_path(stage, staged));
+                    let theirs = out
+                        .as_ref()
+                        .map(|meta| {
+                            use std::os::unix::fs::MetadataExt as _;
+                            Some((meta.dev(), meta.ino())) != expected
+                        })
+                        .unwrap_or(true);
+                    if theirs {
+                        // Not what was to be replaced: it goes back.
+                        let back = swap();
+                        unmade();
+                        return match back {
+                            Ok(()) => Err(eyre::eyre!(
+                                "something else came to stand at {} while a fresh partial was made for it; it is left as it is",
+                                dst.display()
+                            )),
+                            Err(error) => Err(error).with_context(|| {
+                                format!(
+                                    "putting back what came to stand at {}: it is in the private directory beside it",
+                                    dst.display()
+                                )
+                            }),
+                        };
+                    }
+                    // What was replaced, now in the private stage, goes.
+                    // SAFETY: as for the swap above.
+                    unsafe { libc::unlinkat(stage, staged.as_ptr(), 0) };
+                    return Ok(());
+                }
+                // The filesystem has no swap: a rename, below.
+                Err(error)
+                    if matches!(
+                        error.raw_os_error(),
+                        Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
+                    ) => {}
+                Err(error) => {
+                    unmade();
+                    return Err(error).with_context(in_place);
+                }
+            }
+        }
+        let _ = expected;
+        // SAFETY: both directories are open for the length of the call, and
+        // both names are NUL-terminated and outlive it.
+        if unsafe { libc::renameat(stage, staged.as_ptr(), held, self.name.as_ptr()) } != 0 {
+            let error = std::io::Error::last_os_error();
+            unmade();
+            return Err(error).with_context(in_place);
+        }
+        Ok(())
     }
 }
 
@@ -1605,6 +1764,53 @@ mod tests {
         let partial = std::fs::metadata(&kept)?;
         assert_eq!(partial.len(), 9, "unfinished");
         assert_eq!(partial.mode() & 0o777, 0o600, "private");
+        Ok(())
+    }
+
+    /// cr-ecm28-2: what a fresh partial replaces is what stood there when it
+    /// was begun: a link that takes the name while the partial is staged is
+    /// swapped back, left as it is, and the resume fails. Renamed over it,
+    /// the link was overwritten.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_link_that_takes_the_name_while_a_partial_is_staged_is_left() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let data = vec![7u8; 4096];
+        std::fs::write(&src, &data)?;
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))?;
+        let dst = tmp.path().join("dst");
+        std::fs::write(&dst, &data[..1000])?;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o644))?;
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::write(&elsewhere, b"elsewhere")?;
+        {
+            let (at, to) = (dst.clone(), elsewhere.clone());
+            BEFORE_A_FRESH_PARTIAL_IS_PUBLISHED_HOOKS
+                .lock()
+                .unwrap()
+                .push((
+                    dst.clone(),
+                    std::sync::Arc::new(move |_: &Path| {
+                        std::fs::remove_file(&at).unwrap();
+                        std::os::unix::fs::symlink(&to, &at).unwrap();
+                    }),
+                ));
+        }
+        let copied = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024);
+        BEFORE_A_FRESH_PARTIAL_IS_PUBLISHED_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(at, _)| at != &dst);
+        assert!(copied.is_err(), "the resume fails");
+        assert!(
+            std::fs::symlink_metadata(&dst)?.file_type().is_symlink(),
+            "left a link"
+        );
+        assert_eq!(std::fs::read(&elsewhere)?, b"elsewhere");
+        let left: Vec<_> = std::fs::read_dir(tmp.path())?.collect::<std::io::Result<_>>()?;
+        assert_eq!(left.len(), 3, "src, the link and elsewhere: no stage left");
         Ok(())
     }
 
