@@ -59,6 +59,8 @@ impl Looked {
     }
 }
 
+#[cfg(unix)]
+pub(crate) use imp::directory_unlinked;
 pub(crate) use imp::{Directory, Listed, Start};
 
 /// An entry a directory lists: its name, and its kind where the listing
@@ -294,6 +296,13 @@ mod imp {
             held = open_at(held.as_raw_fd(), &c_name(name)?, flags | libc::O_NOFOLLOW)?;
         }
         Ok(held)
+    }
+
+    /// cr-ecm23-3: the directory at an absolute path with no link in it,
+    /// held — opened from `/` one name at a time, never through a link —
+    /// for a file to be made and named in it.
+    pub(crate) fn directory_unlinked(path: &Path) -> io::Result<OwnedFd> {
+        open_unlinked(path, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC)
     }
 
     /// cr-uv10-1: the entry at an absolute path with no link in it, itself:

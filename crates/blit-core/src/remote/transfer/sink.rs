@@ -1513,9 +1513,12 @@ impl TransferSink for FsTransferSink {
             .lock()
             .expect("resume-baselines lock poisoned")
             .remove(relative_path);
-        let held = tokio::task::spawn_blocking(move || hold_partial(&dst, total_size, baseline))
-            .await
-            .context("sink worker panicked")?;
+        let within = self.canonical_dst_root.clone();
+        let held = tokio::task::spawn_blocking(move || {
+            hold_partial(&dst, total_size, baseline, within.as_deref())
+        })
+        .await
+        .context("sink worker panicked")?;
         match held {
             Ok(Some(file)) => {
                 self.resume_files
@@ -2262,7 +2265,7 @@ fn write_file_payload(
     // Past the containment check every remaining failure — this file's
     // own parent mkdir, the source read, the copy, its named streams and
     // its attributes — belongs to exactly this file.
-    match copy_resolved_file_payload(&src, &dst, header, config) {
+    match copy_resolved_file_payload(&src, &dst, header, config, canonical_dst_root) {
         Ok(outcome) => Ok(outcome),
         Err(failed) if is_unrepresentable_name_failure(&failed.error) => Ok(SinkOutcome::failed(
             &header.relative_path,
@@ -2292,7 +2295,7 @@ fn copy_root_file_payload(
     header: &FileHeader,
     config: &FsSinkConfig,
 ) -> std::result::Result<SinkOutcome, FailedWrite> {
-    copy_resolved_file_payload(src_root, dst_root, header, config)
+    copy_resolved_file_payload(src_root, dst_root, header, config, None)
 }
 
 /// Test seam (ssc-4, A12): runs after the local copy opened its source
@@ -2739,15 +2742,16 @@ fn hold_partial(
     dst: &Path,
     total_size: u64,
     baseline: Option<ResumeBaseline>,
+    within: Option<&Path>,
 ) -> Result<Option<HeldPartial>> {
     hold_fault(dst)?;
     #[cfg(unix)]
     match baseline {
-        Some(ResumeBaseline::Whole) => return hold_whole(dst, total_size),
+        Some(ResumeBaseline::Whole) => return hold_whole(dst, total_size, within),
         Some(ResumeBaseline::Hashed(version)) => return hold_hashed(dst, total_size, &version),
         None => {}
     }
-    let _ = baseline;
+    let _ = (baseline, within);
     let held = hold_partial_unfinished(dst, total_size);
     // cr-ecm23-2: on Unix every block and the completion go through what
     // the hold holds, so a hold that cannot be had is the file's failure:
@@ -2772,7 +2776,7 @@ fn hold_partial(
 }
 
 #[cfg(unix)]
-fn hold_whole(dst: &Path, total_size: u64) -> Result<Option<HeldPartial>> {
+fn hold_whole(dst: &Path, total_size: u64, within: Option<&Path>) -> Result<Option<HeldPartial>> {
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     // cr-ecm21-3: something there — a file, or a link to one — is replaced
     // by a fresh private partial made beside it, and nothing of it is
@@ -2783,7 +2787,7 @@ fn hold_whole(dst: &Path, total_size: u64) -> Result<Option<HeldPartial>> {
         // known — before it takes the name. Learned after, a look that
         // failed left the destination replaced, and nothing held.
         let (file, identity) =
-            crate::copy::fresh_partial_ready(dst, total_size.saturating_add(1), |file| {
+            crate::copy::fresh_partial_ready(dst, total_size.saturating_add(1), within, |file| {
                 HeldPartial::identity_of(file, dst)
             })?;
         while_a_file_is_made(dst);
@@ -3275,6 +3279,7 @@ fn copy_resolved_file_payload(
     dst: &Path,
     header: &FileHeader,
     config: &FsSinkConfig,
+    within: Option<&Path>,
 ) -> std::result::Result<SinkOutcome, FailedWrite> {
     use eyre::eyre;
     // R58-F4: dry-run must be side-effect-free. Bail before the
@@ -3319,6 +3324,7 @@ fn copy_resolved_file_payload(
         header,
         config,
         &mut partial,
+        within,
     );
     landed.map_err(|error| partial.settle(error))
 }
@@ -3343,6 +3349,7 @@ fn probe_destination_writable(dst: &Path) -> Result<()> {
 /// The copy cascade and metadata tail of [`copy_resolved_file_payload`],
 /// arming `partial` the moment the target is touched so the caller can
 /// settle any failure from here on (cr-ssc4-2, cr-win-1).
+#[allow(clippy::too_many_arguments)]
 fn copy_and_stamp_opened(
     src_file: &mut std::fs::File,
     src_meta: &std::fs::Metadata,
@@ -3351,6 +3358,7 @@ fn copy_and_stamp_opened(
     header: &FileHeader,
     config: &FsSinkConfig,
     partial: &mut PartialTarget<'_>,
+    within: Option<&Path>,
 ) -> Result<SinkOutcome> {
     use eyre::eyre;
     let mut did_copy = false;
@@ -3394,6 +3402,7 @@ fn copy_and_stamp_opened(
             dst,
             Some(crate::wire_metadata::permissions_mode(src_meta)),
             header.size,
+            within,
         )
         .with_context(|| format!("resume copy {}", header.relative_path))?;
         partial
@@ -7982,6 +7991,49 @@ mod cr_win_1_tests {
             .unwrap();
         assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
         assert_eq!(std::fs::read(&at).unwrap(), b"somebody's", "not marked");
+    }
+
+    /// cr-ecm23-3: a link at the destination whose chain ends outside it —
+    /// at a name not there yet — is not followed out: the file fails, and
+    /// nothing is made outside. The check by path passed it (what it names
+    /// does not exist, so its directory was judged), and the fresh partial
+    /// was made where the chain ended.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fresh_partial_is_not_made_outside_the_destination() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        std::os::unix::fs::symlink("../outside/new", dst.join("r.bin")).unwrap();
+        sink.note_resume_baseline("r.bin", ResumeBaseline::Whole);
+        sink.hold_resume_partial("r.bin", 10).await.unwrap();
+        assert_eq!(
+            std::fs::read_dir(&outside).unwrap().count(),
+            0,
+            "nothing made outside"
+        );
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "r.bin".to_string(),
+                total_size: 10,
+                mtime_seconds: 0,
+                permissions: 0o600,
+                windows_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert!(outcome.file_failed("r.bin"), "{outcome:?}");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
     }
 
     /// cr-ecm23-2: a hold with no word of the hashes whose first look at the

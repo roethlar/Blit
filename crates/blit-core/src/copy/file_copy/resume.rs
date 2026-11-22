@@ -86,6 +86,7 @@ pub fn open_resume_partial(
     dst: &Path,
     source_mode: Option<u32>,
     src_len: u64,
+    within: Option<&Path>,
 ) -> Result<(File, u64)> {
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     let open = |options: &mut OpenOptions| options.read(true).write(true).mode(0o600).open(dst);
@@ -144,7 +145,7 @@ pub fn open_resume_partial(
         return Ok((file, len));
     }
     drop(file);
-    Ok((fresh_partial(dst, src_len.saturating_add(1))?, 0))
+    Ok((fresh_partial(dst, src_len.saturating_add(1), within)?, 0))
 }
 
 /// The user this run is to the system — its effective user id. Test seam
@@ -200,9 +201,14 @@ pub fn make_partial_private(file: &File) -> std::io::Result<bool> {
 /// file opening the name reaches, which a resume in place patches — and
 /// every link of it kept. One link was followed, and the next link of the
 /// chain replaced by the partial, the file at its end left as it was.
+///
+/// cr-ecm23-3: and it is made in the directory the chain ends in, HELD,
+/// and only when that lies `within` the destination's root (canonical),
+/// when one is given: a link there to a name outside it made the file
+/// outside. See [`fresh_partial_ready`].
 #[cfg(unix)]
-pub fn fresh_partial(dst: &Path, unfinished: u64) -> Result<File> {
-    fresh_partial_ready(dst, unfinished, |_| Ok(())).map(|(file, ())| file)
+pub fn fresh_partial(dst: &Path, unfinished: u64, within: Option<&Path>) -> Result<File> {
+    fresh_partial_ready(dst, unfinished, within, |_| Ok(())).map(|(file, ())| file)
 }
 
 /// cr-ecm23-1: [`fresh_partial`], with `ready` run on the staged file —
@@ -215,9 +221,11 @@ pub fn fresh_partial(dst: &Path, unfinished: u64) -> Result<File> {
 pub fn fresh_partial_ready<T>(
     dst: &Path,
     unfinished: u64,
+    within: Option<&Path>,
     ready: impl FnOnce(&File) -> Result<T>,
 ) -> Result<(File, T)> {
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::io::{AsRawFd as _, FromRawFd as _, OwnedFd};
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let mut target = dst.to_path_buf();
@@ -235,36 +243,70 @@ pub fn fresh_partial_ready<T>(
             _ => named,
         };
     }
-    if target.file_name().is_none() {
+    let Some(name) = target.file_name().map(std::ffi::OsStr::to_os_string) else {
         eyre::bail!("{} names no file", dst.display());
+    };
+    // cr-ecm23-3: the partial is made in the directory the chain ends in,
+    // HELD: found by its path with no link in it, that directory lies
+    // within the destination — a link there to a name outside it made the
+    // file outside — and it is opened from `/` one name at a time, never
+    // through a link, so a folder on its way replaced since cannot move
+    // where the file is made or named.
+    let parent = match target.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let directory = std::fs::canonicalize(&parent)
+        .with_context(|| format!("finding the directory {} is in", target.display()))?;
+    if let Some(root) = within {
+        if !directory.starts_with(root) {
+            eyre::bail!(
+                "{} leads out of the destination, to {}",
+                dst.display(),
+                target.display()
+            );
+        }
     }
+    let held = crate::held::directory_unlinked(&directory)
+        .with_context(|| format!("holding the directory {}", directory.display()))?;
+    before_a_fresh_partial_is_made(dst);
+    let in_held = held.as_raw_fd();
+    let named = c_string(&name)?;
     // cr-ecm22-6: by a short name of blit's own beside it, whatever the
     // destination is called — the destination's name in it made a name too
     // long for a destination whose own name was the longest a name can be
     // — and another is tried when that one is taken.
     let mut tries = 0;
-    let (beside, file) = loop {
-        let beside = target.with_file_name(format!(
+    let (staged, file) = loop {
+        let staged = c_string(std::ffi::OsStr::new(&format!(
             ".blit-partial-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&beside)
-        {
-            Ok(file) => break (beside, file),
-            Err(taken) if taken.kind() == std::io::ErrorKind::AlreadyExists && tries < 16 => {
-                tries += 1;
-            }
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("making a fresh partial for {}", dst.display()))
-            }
+        )))?;
+        // SAFETY: `in_held` is an open directory for the length of the
+        // call, and `staged` is a NUL-terminated name that outlives it.
+        let made = unsafe {
+            libc::openat(
+                in_held,
+                staged.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600 as libc::c_uint,
+            )
+        };
+        if made >= 0 {
+            // SAFETY: `made` is an open descriptor nothing else owns.
+            break (staged, File::from(unsafe { OwnedFd::from_raw_fd(made) }));
         }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::AlreadyExists && tries < 16 {
+            tries += 1;
+            continue;
+        }
+        return Err(error).with_context(|| format!("making a fresh partial for {}", dst.display()));
+    };
+    let unmade = || {
+        // SAFETY: as for `openat` above.
+        unsafe { libc::unlinkat(in_held, staged.as_ptr(), 0) };
     };
     let prepared = file
         .set_permissions(std::fs::Permissions::from_mode(0o600))
@@ -274,19 +316,58 @@ pub fn fresh_partial_ready<T>(
     let readied = match prepared {
         Ok(readied) => readied,
         Err(error) => {
-            let _ = std::fs::remove_file(&beside);
+            unmade();
             return Err(error.wrap_err(format!(
                 "making a fresh partial ready for {}",
                 dst.display()
             )));
         }
     };
-    if let Err(error) = std::fs::rename(&beside, &target) {
-        let _ = std::fs::remove_file(&beside);
+    // SAFETY: `in_held` is open for the length of the call, and both names
+    // are NUL-terminated and outlive it.
+    if unsafe { libc::renameat(in_held, staged.as_ptr(), in_held, named.as_ptr()) } != 0 {
+        let error = std::io::Error::last_os_error();
+        unmade();
         return Err(error)
             .with_context(|| format!("putting a fresh partial in place of {}", dst.display()));
     }
     Ok((file, readied))
+}
+
+#[cfg(unix)]
+fn c_string(name: &std::ffi::OsStr) -> Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt as _;
+    std::ffi::CString::new(name.as_bytes())
+        .map_err(|error| eyre::eyre!("a name with a NUL in it: {error}"))
+}
+
+/// Test seam (cr-ecm23-3): runs once a fresh partial's directory is held
+/// and before the partial is made in it — for a test to replace that
+/// directory's path. Keyed by the destination's path. Production never
+/// sets it.
+#[cfg(all(test, unix))]
+pub(crate) static BEFORE_A_FRESH_PARTIAL_IS_MADE_HOOKS: std::sync::Mutex<
+    Vec<(std::path::PathBuf, PartialOpenedHook)>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn before_a_fresh_partial_is_made(_dst: &Path) {
+    #[cfg(test)]
+    {
+        let hooks: Vec<PartialOpenedHook> = BEFORE_A_FRESH_PARTIAL_IS_MADE_HOOKS
+            .lock()
+            .map(|hooks| {
+                hooks
+                    .iter()
+                    .filter(|(at, _)| at == _dst)
+                    .map(|(_, hook)| std::sync::Arc::clone(hook))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for hook in hooks {
+            hook(_dst);
+        }
+    }
 }
 
 /// Test seam (cr-ecm19-4): runs once a resume's partial is open and before
@@ -326,6 +407,7 @@ pub fn open_resume_partial(
     dst: &Path,
     _source_mode: Option<u32>,
     _src_len: u64,
+    _within: Option<&Path>,
 ) -> Result<(File, u64)> {
     let dst_len = std::fs::metadata(dst).map(|m| m.len()).unwrap_or(0);
     let file = OpenOptions::new()
@@ -362,7 +444,7 @@ pub fn resume_copy_from(
     };
     #[cfg(not(unix))]
     let source_mode = None;
-    let (dst_file, dst_len) = open_resume_partial(dst, source_mode, src_len)?;
+    let (dst_file, dst_len) = open_resume_partial(dst, source_mode, src_len, None)?;
     resume_copy_into(src_file, src_len, dst_file, dst_len, dst, block_size)
 }
 
@@ -667,6 +749,56 @@ mod tests {
                 0o644
             );
         }
+        Ok(())
+    }
+
+    /// cr-ecm23-3: a fresh partial is made in the directory it was found in,
+    /// held: that directory's path replaced by a link to another, before the
+    /// partial is made, moves nothing — the partial is made and named in the
+    /// directory held, and nothing lands in the other.
+    #[cfg(unix)]
+    #[test]
+    fn a_fresh_partial_is_made_in_the_directory_it_holds() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let data = vec![7u8; 4096];
+        std::fs::write(&src, &data)?;
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))?;
+        let folder = tmp.path().join("folder");
+        let moved = tmp.path().join("moved");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir(&folder)?;
+        std::fs::create_dir(&elsewhere)?;
+        let dst = folder.join("dst");
+        std::fs::write(&dst, &data[..1000])?;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o644))?;
+        {
+            let (folder, moved, elsewhere) = (folder.clone(), moved.clone(), elsewhere.clone());
+            BEFORE_A_FRESH_PARTIAL_IS_MADE_HOOKS.lock().unwrap().push((
+                dst.clone(),
+                std::sync::Arc::new(move |_: &Path| {
+                    std::fs::rename(&folder, &moved).unwrap();
+                    std::os::unix::fs::symlink(&elsewhere, &folder).unwrap();
+                }),
+            ));
+        }
+        let copied = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024);
+        BEFORE_A_FRESH_PARTIAL_IS_MADE_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(at, _)| at != &dst);
+        copied?;
+        assert_eq!(
+            std::fs::read(moved.join("dst"))?,
+            data,
+            "in the directory held"
+        );
+        assert_eq!(
+            std::fs::read_dir(&elsewhere)?.count(),
+            0,
+            "nothing elsewhere"
+        );
         Ok(())
     }
 
