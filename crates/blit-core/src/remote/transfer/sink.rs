@@ -1273,6 +1273,7 @@ impl FsTransferSink {
     async fn create_stream_destination(
         &self,
         dst: &Path,
+        source_size: u64,
         windows_metadata: Option<&crate::generated::WindowsFileMetadata>,
     ) -> Result<Made> {
         let parent_readiness = match dst.parent() {
@@ -1306,6 +1307,7 @@ impl FsTransferSink {
                         file: Some(file),
                         dst,
                         identity,
+                        source_size,
                     };
                     while_a_file_is_made(&made.dst);
                     Ok(made)
@@ -1699,7 +1701,7 @@ impl TransferSink for FsTransferSink {
         // reports the failure at commit (A16). A fatal class ends the
         // session here; there is no next record to stay aligned with.
         let prepared = self
-            .create_stream_destination(&dst, header.windows_metadata.as_ref())
+            .create_stream_destination(&dst, header.size, header.windows_metadata.as_ref())
             .await;
         // cr-ecm18-1: claimed, with nothing awaited between, by the writer
         // whose guard removes what it made — the file it made, by which
@@ -2322,6 +2324,11 @@ struct Made {
     file: Option<std::fs::File>,
     dst: PathBuf,
     identity: Option<(u64, u64)>,
+    /// cr-ecm19-3: the size of the file the record is: one that cannot be
+    /// removed is left one byte longer than THAT, so that no comparison
+    /// takes it for a copy. Settled as of no size, a record of one byte
+    /// was left as one byte, and skipped by the next run as copied.
+    source_size: u64,
 }
 
 impl Made {
@@ -2337,7 +2344,7 @@ impl Drop for Made {
             let _ = settle_failed_target_known(
                 &self.dst,
                 Some(file),
-                0,
+                self.source_size,
                 OnFailure::Remove,
                 self.identity,
             );
@@ -7914,6 +7921,80 @@ mod cr_win_1_tests {
             assert!(
                 !name.exists(),
                 "ignore_existing={ignore_existing}: a record cancelled there leaves nothing"
+            );
+        }
+    }
+
+    /// cr-ecm19-3: and one that cannot be removed — its directory closed to
+    /// removals while it was being made — is left one byte longer than its
+    /// source, for no comparison to take it for a copy. It was left as long
+    /// as a source of no bytes: one byte, which a record of one byte is.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_record_cancelled_where_its_file_stays_is_left_longer_than_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        struct Hooked(PathBuf, PathBuf);
+        impl Drop for Hooked {
+            fn drop(&mut self) {
+                if let Ok(mut hooks) = WHILE_A_FILE_IS_MADE_HOOKS.lock() {
+                    hooks.retain(|(prefix, _)| prefix != &self.0);
+                }
+                let _ = std::fs::set_permissions(&self.1, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        // A process that may remove from a directory closed to it proves
+        // nothing here.
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let unbarred = std::fs::write(dst.join("probe"), b"").is_ok();
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if unbarred {
+            eprintln!("skipped: this process is not barred by a directory's mode");
+            return;
+        }
+        for size in [1u64, 10] {
+            let name = dst.join(format!("cancelled-{size}.bin"));
+            let (reached, made) = std::sync::mpsc::channel::<()>();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let released = Arc::new(std::sync::Mutex::new(released));
+            let _hooked = {
+                let reached = std::sync::Mutex::new(reached);
+                let dir = dst.clone();
+                WHILE_A_FILE_IS_MADE_HOOKS.lock().unwrap().push((
+                    name.clone(),
+                    Arc::new(move |_: &Path| {
+                        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555))
+                            .unwrap();
+                        let _ = reached.lock().unwrap().send(());
+                        let _ = released.lock().unwrap().recv();
+                    }),
+                ));
+                Hooked(name.clone(), dst.clone())
+            };
+            let sink = FsTransferSink::new(
+                tmp.path().to_path_buf(),
+                dst.clone(),
+                FsSinkConfig::default(),
+            );
+            let header = make_file_header(&format!("cancelled-{size}.bin"), size);
+            let made = tokio::task::spawn_blocking(move || made.recv());
+            tokio::select! {
+                _ = sink.begin_record(&header) => panic!("the record began before it could be cancelled"),
+                _ = made => {}
+            }
+            release.send(()).unwrap();
+            let mut waited = 0;
+            while std::fs::metadata(&name).unwrap().len() == 0 && waited < 200 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                waited += 1;
+            }
+            drop(_hooked);
+            assert_eq!(
+                std::fs::metadata(&name).unwrap().len(),
+                size + 1,
+                "a record of {size} bytes"
             );
         }
     }
