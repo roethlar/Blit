@@ -1,9 +1,9 @@
 # cr-ecm23-2: a hold with no word of the hashes dropped its error
 
 **Severity**: HIGH — a hold whose first look failed held nothing, and the completion opened the name and reported the file written
-**Status**: Fixed on Unix, awaiting review; the Windows half stays with cr-ecm22-3's (blocked)
+**Status**: Reviewed, found incomplete — `combined-r25` (Codex openreview, 2026-11-22) reviewed `c89b1eb1..19025839` — the six `combined-r24` fixes — with `guard_confirmed: true`. "On the Unix sink path without a recorded hash baseline, a failed `set_permissions(0600)` only logs a warning. The sink can then patch a file whose permissions it failed to restrict. Propagate that error through the file's completion." The remaining work is cr-ecm24-5; the Windows half stays open, blocked
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm23-2`)
+**Commit**: `99c909fe`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r24` over `24d4064f..c89b1eb1` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r24.codex.md`. It completes cr-ecm22-3 (`eb283420`).
 
 ## Evidence

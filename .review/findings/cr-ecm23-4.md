@@ -1,9 +1,9 @@
 # cr-ecm23-4: a resume reused a destination another user owns
 
 **Severity**: HIGH — a run as root resumed a private source in place into another user's `0600` file, and that user, its owner, could read the bytes as they landed
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r25` (Codex openreview, 2026-11-22) reviewed `c89b1eb1..19025839` — the six `combined-r24` fixes — with `guard_confirmed: true`: "The effective-user ownership check, decoding the Unix mode from the wire header, learning the staged file's identity before rename, and sending zero-block failures to the sink are all sound."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm23-4`)
+**Commit**: `84e56bc9`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r24` over `24d4064f..c89b1eb1` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r24.codex.md`. It completes cr-ecm22-4 (`8c1f1363`).
 
 ## Evidence

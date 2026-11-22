@@ -1,9 +1,9 @@
 # cr-ecm23-6: a record failed before its first block was reported without the sink
 
 **Severity**: MEDIUM — a resume record the source closed failed before sending a block left what the sink had noted for the file (its hash baseline) to the session's end
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r25` (Codex openreview, 2026-11-22) reviewed `c89b1eb1..19025839` — the six `combined-r24` fixes — with `guard_confirmed: true`: "The effective-user ownership check, decoding the Unix mode from the wire header, learning the staged file's identity before rename, and sending zero-block failures to the sink are all sound." What a closed record leaves beside its baseline is cr-ecm24-8's
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm23-6`)
+**Commit**: `a3b73d30`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r24` over `24d4064f..c89b1eb1` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r24.codex.md`. It completes cr-ecm22-5 (`bdc472dd`).
 
 ## Evidence

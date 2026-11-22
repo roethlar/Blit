@@ -1,9 +1,9 @@
 # cr-ecm23-5: a Windows source without its metadata counted as mode 0000
 
 **Severity**: MEDIUM — a Windows source sent with `--drop-windows-metadata` was taken for a Unix file of mode 0000, so a destination others could read was never reused and every block was sent again
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r25` (Codex openreview, 2026-11-22) reviewed `c89b1eb1..19025839` — the six `combined-r24` fixes — with `guard_confirmed: true`: "The effective-user ownership check, decoding the Unix mode from the wire header, learning the staged file's identity before rename, and sending zero-block failures to the sink are all sound."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm23-5`)
+**Commit**: `42ac8552`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r24` over `24d4064f..c89b1eb1` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r24.codex.md`. It completes cr-ecm22-4 (`8c1f1363`), which brought it in.
 
 ## Evidence

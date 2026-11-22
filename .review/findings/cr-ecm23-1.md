@@ -1,9 +1,9 @@
 # cr-ecm23-1: a wire resume's fresh partial took the destination's place before its identity was known
 
 **Severity**: HIGH — a hold whose look at its fresh partial failed left the destination replaced by eleven bytes of nothing, and nothing held
-**Status**: Fixed on Unix, awaiting review
+**Status**: Verified on Unix — `combined-r25` (Codex openreview, 2026-11-22) reviewed `c89b1eb1..19025839` — the six `combined-r24` fixes — with `guard_confirmed: true`: "The effective-user ownership check, decoding the Unix mode from the wire header, learning the staged file's identity before rename, and sending zero-block failures to the sink are all sound."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm23-1`)
+**Commit**: `399adf58`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r24` over `24d4064f..c89b1eb1` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r24.codex.md`. It completes cr-ecm22-3 (`eb283420`).
 
 ## Evidence

@@ -1,0 +1,25 @@
+I would keep block-level resume and use one operation to acquire the destination for both local copies and wire receives. The goal is to reuse matching blocks while keeping partials private, preserving the previous destination until its replacement is ready, and reporting each failed file exactly once. That operation should resolve the selected target before creating anything and return the verified handle used for patching and completion. The existing public copy helpers can keep their signatures as wrappers.
+
+**Verdict `acceptable_with_changes`.** The effective-user ownership check, decoding the Unix mode from the wire header, learning the staged file’s identity before rename, and sending zero-block failures to the sink are all sound. The following changes are material.
+
+| Severity | Required change | Evidence |
+|---|---|---|
+| High | Validate containment before the first local creating open. | `open_resume_partial` opens with `create(true)` before consulting `within`. A dangling destination link can therefore create a file outside the selected tree. The newly created `0600` file can immediately pass the reuse check. Resolve and hold the final parent for this path too. [resume.rs:98](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/copy/file_copy/resume.rs:98) |
+| High | Finish local handle acquisition before publishing a replacement. | Injecting `EMFILE` at the cleanup-handle duplication left nine zero bytes in place of the original eight-byte file, before any source bytes were written. Acquire the necessary handles while the file is staged, or carry one handle through the operation. [sink.rs:3408](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:3408) |
+| High | Represent an exact-file destination by its verified parent and leaf. | A resumed loopback pull from a `0600` source to an existing `0644` target succeeded at base and exited 2 at head. The canonical root is the file itself, so testing whether its parent starts with that root rejects the requested target. [sink.rs:1516](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:1516) · [resume.rs:262](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/copy/file_copy/resume.rs:262) |
+| High | Decide whole-file fallback before requiring read access to the old file. | An unreadable `0004` destination in a writable directory aborted the entire pull during hash acquisition at both revisions. Its metadata already established that a `0600` source required a fresh copy. Select that fallback before opening for hashing, and revalidate the handle when reuse is possible. [transfer_session/mod.rs:6687](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/transfer_session/mod.rs:6687) |
+| High | Treat failure to make a partial private as a failed hold. | On the Unix sink path without a recorded hash baseline, a failed `set_permissions(0600)` only logs a warning. The sink can then patch a file whose permissions it failed to restrict. Propagate that error through the file’s completion. [sink.rs:2905](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:2905) |
+| Medium | Preserve directory-only pathname semantics. | The base rejected `absent/`. The head created a regular file named `absent` because `file_name()` discarded the trailing slash before `renameat`. Preserve the directory requirement when resolving the final name, including a link target ending in `/` or `/.`. [resume.rs:246](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/copy/file_copy/resume.rs:246) |
+| Medium | Open the held parent with search rights. | A fresh replacement in a `0300` directory succeeded at base and failed with `EACCES` at head. The operation needs write and search permission. The new `O_RDONLY` open also demands permission to list the directory. Use the existing `TO_SEARCH` flags. [held.rs:305](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/held.rs:305) |
+| Medium | Release all per-record state on terminal paths. | After a failed zero-block record with a raw filename and a failed record with a held partial, I measured zero saved baselines and file handles, but one raw-name mapping and one `resume_held` marker. Drain those entries when each record closes. [sink.rs:1558](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:1558) |
+
+Linux formatting and strict workspace Clippy passed. The restored head’s workspace suite passed **2,000 tests with 2 ignored**. Windows GNU cross-target Clippy passed. Runtime verification was on Linux only.
+
+For the independent guard, restoring the previous mode-decoding rule made the wire-header test fail with `Some(0)` where it expected `None`. I restored the pinned source blob, forced recompilation, and observed the same test pass. Reading `AGENTS.md` and resolving the requested head both succeeded. I removed the disposable export.
+
+```text
+base: c89b1eb136a6afe84b963c803ea246d3533d8e3d
+head: 19025839f231d4a95afc9d3c35deda59966a6ec4
+capability_ok: true
+guard_confirmed: true
+```

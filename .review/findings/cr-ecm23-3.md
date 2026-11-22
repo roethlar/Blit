@@ -1,9 +1,9 @@
 # cr-ecm23-3: the end of a chain of links was not held within the destination
 
 **Severity**: HIGH — a resume through a link whose chain ends at a name outside the destination, not there yet, made its fresh partial there: an unfinished file outside the selected tree
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r25` (Codex openreview, 2026-11-22) reviewed `c89b1eb1..19025839` — the six `combined-r24` fixes — with `guard_confirmed: true`. "`open_resume_partial` opens with `create(true)` before consulting `within`. A dangling destination link can therefore create a file outside the selected tree. The newly created `0600` file can immediately pass the reuse check. Resolve and hold the final parent for this path too." "A resumed loopback pull from a `0600` source to an existing `0644` target succeeded at base and exited 2 at head. The canonical root is the file itself, so testing whether its parent starts with that root rejects the requested target." "The base rejected `absent/`. The head created a regular file named `absent` because `file_name()` discarded the trailing slash before `renameat`. Preserve the directory requirement when resolving the final name, including a link target ending in `/` or `/.`." "A fresh replacement in a `0300` directory succeeded at base and failed with `EACCES` at head. The operation needs write and search permission. The new `O_RDONLY` open also demands permission to list the directory. Use the existing `TO_SEARCH` flags." The remaining work is cr-ecm24-1, -3, -6 and -7; three of them are faults it brought in
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm23-3`)
+**Commit**: `6bf9c2f9`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r24` over `24d4064f..c89b1eb1` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r24.codex.md`. It completes cr-ecm22-2 (`2678a740`).
 
 ## Evidence
