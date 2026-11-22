@@ -3196,10 +3196,12 @@ impl<'a> PartialTarget<'a> {
     /// cr-ecm20-4: a handle that cannot be held for it is an error, before
     /// anything is written — it was let go quietly, and the failure was
     /// settled by name after all.
-    fn arm_held(&mut self, held: &std::fs::File, on_failure: OnFailure) -> std::io::Result<()> {
-        self.held = Some(held.try_clone()?);
+    /// cr-ecm24-2: with the handle had for it while the partial was had —
+    /// a duplicate taken here, after a fresh partial had replaced the
+    /// destination, could be refused with nothing held to undo it.
+    fn arm_held(&mut self, held: std::fs::File, on_failure: OnFailure) {
+        self.held = Some(held);
         self.armed = Some(on_failure);
-        Ok(())
     }
 
     /// Armed to remove on failure the file this write made and holds
@@ -3410,16 +3412,14 @@ fn copy_and_stamp_opened(
         // could write but not take was cut to one byte longer than the
         // source. From here a failure marks the partial through a handle to
         // it, not whatever stands at the name.
-        let (held, held_len) = crate::copy::open_resume_partial(
+        let (held, cleanup, held_len) = crate::copy::open_resume_partial_held(
             dst,
             Some(crate::wire_metadata::permissions_mode(src_meta)),
             header.size,
             within,
         )
         .with_context(|| format!("resume copy {}", header.relative_path))?;
-        partial
-            .arm_held(&held, OnFailure::KeepUnfinished { created })
-            .with_context(|| format!("holding the resume partial {}", dst.display()))?;
+        partial.arm_held(cleanup, OnFailure::KeepUnfinished { created });
         // cr-ecm20-4: and the handle it is written through is kept for the
         // tail: its time is given through it, and it is delivered only
         // while it is what the name holds.

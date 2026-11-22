@@ -90,6 +90,36 @@ pub fn open_resume_partial(
     src_len: u64,
     within: Option<&Path>,
 ) -> Result<(File, u64)> {
+    open_resume_partial_with(dst, source_mode, src_len, within, false)
+        .map(|(file, _, len)| (file, len))
+}
+
+/// cr-ecm24-2: [`open_resume_partial`], with a second handle to the partial
+/// for the caller's cleanup — had before anything of the destination is
+/// changed or replaced: a fresh partial's while it is staged. Taken after,
+/// a handle the system refused (`EMFILE`) left a fresh partial in the
+/// destination's place, the destination's bytes gone, and nothing held to
+/// undo it.
+#[cfg(unix)]
+pub fn open_resume_partial_held(
+    dst: &Path,
+    source_mode: Option<u32>,
+    src_len: u64,
+    within: Option<&Path>,
+) -> Result<(File, File, u64)> {
+    let (file, cleanup, len) = open_resume_partial_with(dst, source_mode, src_len, within, true)?;
+    let cleanup = cleanup.ok_or_else(|| eyre::eyre!("no second handle to {}", dst.display()))?;
+    Ok((file, cleanup, len))
+}
+
+#[cfg(unix)]
+fn open_resume_partial_with(
+    dst: &Path,
+    source_mode: Option<u32>,
+    src_len: u64,
+    within: Option<&Path>,
+    cleanup: bool,
+) -> Result<(File, Option<File>, u64)> {
     use std::os::unix::fs::MetadataExt as _;
     // cr-ecm24-1: had where the chain of links at the name ends — checked
     // against the destination, in the directory held — never by the name:
@@ -150,12 +180,42 @@ pub fn open_resume_partial(
             again
         };
         let len = file.metadata()?.len();
-        return Ok((file, len));
+        let kept = cleanup
+            .then(|| keep_handle(&file, dst))
+            .transpose()
+            .with_context(|| format!("holding the partial {}", dst.display()))?;
+        return Ok((file, kept, len));
     }
     drop(file);
-    let (file, ()) = resolved.fresh(dst, src_len.saturating_add(1), |_| Ok(()))?;
-    Ok((file, 0))
+    let (file, kept) = resolved.fresh(dst, src_len.saturating_add(1), |file| {
+        cleanup
+            .then(|| keep_handle(file, dst))
+            .transpose()
+            .map_err(eyre::Report::new)
+    })?;
+    Ok((file, kept, 0))
 }
+
+/// A second handle to `file`, the partial for `dst`. Test seam
+/// (cr-ecm24-2): a test may have it refused, by path — a process out of
+/// descriptors (`EMFILE`), which no test makes for real. Production never
+/// sets it.
+#[cfg(unix)]
+fn keep_handle(file: &File, _dst: &Path) -> std::io::Result<File> {
+    #[cfg(test)]
+    if KEEP_FAULTS
+        .lock()
+        .is_ok_and(|faults| faults.iter().any(|at| at == _dst))
+    {
+        return Err(std::io::Error::from_raw_os_error(libc::EMFILE));
+    }
+    file.try_clone()
+}
+
+/// The paths a test has [`keep_handle`] refused for.
+#[cfg(all(test, unix))]
+pub(crate) static KEEP_FAULTS: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// The user this run is to the system — its effective user id. Test seam
 /// (cr-ecm23-4): a test may make the run another user for one path — root,
@@ -509,6 +569,22 @@ fn while_a_partial_is_opened(_dst: &Path) {
             hook(_dst);
         }
     }
+}
+
+/// [`open_resume_partial`], with a second handle to the partial for the
+/// caller's cleanup (cr-ecm24-2).
+#[cfg(not(unix))]
+pub fn open_resume_partial_held(
+    dst: &Path,
+    source_mode: Option<u32>,
+    src_len: u64,
+    within: Option<&Path>,
+) -> Result<(File, File, u64)> {
+    let (file, len) = open_resume_partial(dst, source_mode, src_len, within)?;
+    let cleanup = file
+        .try_clone()
+        .with_context(|| format!("holding the partial {}", dst.display()))?;
+    Ok((file, cleanup, len))
 }
 
 /// The partial a resume patches, and how much of it there already is.
@@ -908,6 +984,31 @@ mod tests {
             std::fs::read_dir(&elsewhere)?.count(),
             0,
             "nothing elsewhere"
+        );
+        Ok(())
+    }
+
+    /// cr-ecm24-2: a resume refused the second handle its caller's cleanup
+    /// needs leaves the destination as it stood: the handle is had while the
+    /// fresh partial is staged. Taken after, a refusal (`EMFILE`) left nine
+    /// bytes of nothing where an eight-byte file had been.
+    #[cfg(unix)]
+    #[test]
+    fn a_resume_refused_its_cleanup_handle_leaves_the_destination() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir()?;
+        let dst = tmp.path().join("dst");
+        std::fs::write(&dst, b"8 bytes!")?;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o644))?;
+        KEEP_FAULTS.lock().unwrap().push(dst.clone());
+        let had = open_resume_partial_held(&dst, Some(0o100600), 8, None);
+        KEEP_FAULTS.lock().unwrap().retain(|at| at != &dst);
+        assert!(had.is_err());
+        assert_eq!(std::fs::read(&dst)?, b"8 bytes!", "as it stood");
+        assert_eq!(
+            std::fs::read_dir(tmp.path())?.count(),
+            1,
+            "nothing beside it"
         );
         Ok(())
     }

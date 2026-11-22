@@ -14,7 +14,8 @@ pub(crate) use file_copy::resume::{effective_user, resolve_destination};
 pub use file_copy::resume::{DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE};
 pub use file_copy::{
     copy_file, copy_opened, copy_opened_into, mmap_copy_file, open_resume_partial,
-    resume_copy_file, resume_copy_from, resume_copy_into, ResumeCopyOutcome,
+    open_resume_partial_held, resume_copy_file, resume_copy_from, resume_copy_into,
+    ResumeCopyOutcome,
 };
 #[cfg(unix)]
 pub use file_copy::{fresh_partial, fresh_partial_ready, make_partial_private};
