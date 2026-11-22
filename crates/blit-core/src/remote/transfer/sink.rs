@@ -2668,10 +2668,45 @@ struct HeldPartial {
 
 #[cfg(unix)]
 impl HeldPartial {
-    fn of(file: std::fs::File) -> Self {
-        let identity = file.metadata().ok().as_ref().and_then(file_identity);
-        Self { file, identity }
+    /// cr-ecm22-3: which file it is, or no hold — the file fails, and its
+    /// completion with it. A look that failed was dropped, and with it the
+    /// completion's check that the file is still the one at the name: one
+    /// put there since was reported complete.
+    fn of(file: std::fs::File, dst: &Path) -> Result<Self> {
+        let looked = identity_fault(dst).and_then(|()| file.metadata());
+        let meta = match looked {
+            Ok(meta) => meta,
+            Err(error) => {
+                return Err(eyre::Report::new(error).wrap_err(format!(
+                    "learning which file the resume partial {} is",
+                    dst.display()
+                )))
+            }
+        };
+        Ok(Self {
+            identity: file_identity(&meta),
+            file,
+        })
     }
+}
+
+/// Test seam (cr-ecm22-3): a hold's look at which file it holds fails, by
+/// its path — an `fstat` that fails, which no test can make for real.
+/// Production never sets it.
+#[cfg(all(test, unix))]
+pub(crate) static IDENTITY_FAULTS: std::sync::Mutex<Vec<PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn identity_fault(_dst: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if IDENTITY_FAULTS
+        .lock()
+        .is_ok_and(|faults| faults.iter().any(|at| at == _dst))
+    {
+        return Err(std::io::Error::other("a look that failed"));
+    }
+    Ok(())
 }
 
 /// What the block hashes a destination sent for one resumed file were made
@@ -2713,7 +2748,7 @@ fn hold_partial(
     let held = hold_partial_unfinished(dst, total_size);
     // Elsewhere than Unix the partial is written by its name, as before.
     #[cfg(unix)]
-    return Ok(held.map(HeldPartial::of));
+    return held.map(|file| HeldPartial::of(file, dst)).transpose();
     #[cfg(not(unix))]
     {
         drop(held);
@@ -2743,7 +2778,7 @@ fn hold_whole(dst: &Path, total_size: u64) -> Result<Option<HeldPartial>> {
         .with_context(|| format!("making the resume partial {} private", dst.display()))?;
     mark_unfinished(&file, total_size)
         .with_context(|| format!("marking {} unfinished", dst.display()))?;
-    Ok(Some(HeldPartial::of(file)))
+    HeldPartial::of(file, dst).map(Some)
 }
 
 #[cfg(unix)]
@@ -2789,7 +2824,7 @@ fn hold_hashed(
         mark_unfinished(&file, total_size)
             .with_context(|| format!("marking {} unfinished", dst.display()))?;
     }
-    Ok(Some(HeldPartial::of(file)))
+    HeldPartial::of(file, dst).map(Some)
 }
 
 /// Test seam (cr-ecm21-5): a hold that fails with this kind of error, by
@@ -7932,6 +7967,61 @@ mod cr_win_1_tests {
             .unwrap();
         assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
         assert_eq!(std::fs::read(&at).unwrap(), b"somebody's", "not marked");
+    }
+
+    /// cr-ecm22-3: a hold that cannot learn which file it holds fails the
+    /// file: its completion is refused. The look's failure was dropped, and
+    /// with it the completion's check that the file is still the one at the
+    /// name — reported complete, whatever stood there.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hold_that_cannot_tell_its_file_fails_it() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        for (name, baseline) in [
+            ("hashed.bin", true),
+            ("whole.bin", false),
+            ("none.bin", false),
+        ] {
+            let at = dst.join(name);
+            std::fs::write(&at, b"0123456789").unwrap();
+            if name != "none.bin" {
+                sink.note_resume_baseline(
+                    name,
+                    if baseline {
+                        ResumeBaseline::Hashed(crate::moved::Version::of(
+                            &std::fs::metadata(&at).unwrap(),
+                        ))
+                    } else {
+                        ResumeBaseline::Whole
+                    },
+                );
+            }
+            IDENTITY_FAULTS.lock().unwrap().push(at.clone());
+            let held = sink.hold_resume_partial(name, 10).await;
+            IDENTITY_FAULTS.lock().unwrap().retain(|fault| fault != &at);
+            held.unwrap();
+            let outcome = sink
+                .write_payload(PreparedPayload::FileBlockComplete {
+                    relative_path: name.to_string(),
+                    total_size: 10,
+                    mtime_seconds: 0,
+                    permissions: 0o600,
+                    windows_metadata: None,
+                })
+                .await
+                .unwrap();
+            assert!(outcome.file_failed(name), "{name}: {outcome:?}");
+        }
     }
 
     /// cr-ecm22-5: a record the source closes failed lets its partial go —
