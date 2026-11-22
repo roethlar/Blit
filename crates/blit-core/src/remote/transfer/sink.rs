@@ -902,6 +902,14 @@ pub trait TransferSink: Send + Sync {
         Ok(())
     }
 
+    /// cr-ecm20-2: what the block hashes this end sent for
+    /// `relative_path` were made of — the file as it was hashed, or none,
+    /// every block to come. The hold before the first block goes by it.
+    /// Sinks without a filesystem ignore it.
+    fn note_resume_baseline(&self, relative_path: &str, baseline: ResumeBaseline) {
+        let _ = (relative_path, baseline);
+    }
+
     /// Open one single-file record (contract v7). Returns `Err` only for
     /// the session-fatal classes (path safety, destination root, volume,
     /// transport); a failure attributable to this one file — the
@@ -1067,6 +1075,9 @@ pub struct FsTransferSink {
     /// Resume partials already held unfinished this session
     /// ([`TransferSink::hold_resume_partial`] runs before every block).
     resume_held: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// cr-ecm20-2: what each resumed file's hashes were made of, until its
+    /// hold.
+    resume_baselines: std::sync::Mutex<std::collections::HashMap<String, ResumeBaseline>>,
     /// Successful parent-directory readiness, shared by every receive
     /// worker that owns this session sink. The map lock only protects
     /// lookup/insertion; each parent has its own async once-cell so first
@@ -1126,6 +1137,7 @@ impl FsTransferSink {
             small_file_probe: None,
             failed_resume_reasons: std::sync::Mutex::new(std::collections::HashMap::new()),
             resume_held: std::sync::Mutex::new(std::collections::HashSet::new()),
+            resume_baselines: std::sync::Mutex::new(std::collections::HashMap::new()),
             raw_names: std::sync::Mutex::new(std::collections::HashMap::new()),
             ready_parents: std::sync::Mutex::new(std::collections::HashMap::new()),
             containment: crate::path_safety::ContainedPathCache::new(),
@@ -1217,6 +1229,14 @@ impl FsTransferSink {
             .lock()
             .expect("failed-resume-reasons lock poisoned")
             .remove(relative_path)
+    }
+
+    /// cr-ecm20-2: whether a failure is held for `relative_path`'s resume.
+    fn resume_failed(&self, relative_path: &str) -> bool {
+        self.failed_resume_reasons
+            .lock()
+            .expect("failed-resume-reasons lock poisoned")
+            .contains_key(relative_path)
     }
 
     async fn create_parent_directory(&self, parent: &Path) -> Result<()> {
@@ -1456,10 +1476,28 @@ impl TransferSink for FsTransferSink {
             "block-hold",
         )
         .await?;
-        tokio::task::spawn_blocking(move || hold_partial_unfinished(&dst, total_size))
+        let baseline = self
+            .resume_baselines
+            .lock()
+            .expect("resume-baselines lock poisoned")
+            .remove(relative_path);
+        let held = tokio::task::spawn_blocking(move || hold_partial(&dst, total_size, baseline))
             .await
             .context("sink worker panicked")?;
+        if let Err(error) = held {
+            // cr-ecm20-2: a partial that cannot be had safely is not
+            // written: its blocks are passed over, and the file fails at
+            // its completion record.
+            self.hold_resume_block_failure(relative_path, &error);
+        }
         Ok(())
+    }
+
+    fn note_resume_baseline(&self, relative_path: &str, baseline: ResumeBaseline) {
+        self.resume_baselines
+            .lock()
+            .expect("resume-baselines lock poisoned")
+            .insert(relative_path.to_string(), baseline);
     }
 
     async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
@@ -1487,6 +1525,12 @@ impl TransferSink for FsTransferSink {
                     "block-write",
                 )
                 .await?;
+                // cr-ecm20-2: a partial that could not be had safely, or
+                // whose block failed already, is written no more: the file
+                // fails once, at its completion record.
+                if self.resume_failed(&relative_path) {
+                    return Ok(SinkOutcome::default());
+                }
                 match patch_file_block(&dst, offset, bytes).await {
                     Ok(outcome) => outcome,
                     Err(error)
@@ -2492,6 +2536,97 @@ enum OnFailure {
 /// block it already landed.
 fn mark_unfinished(file: &std::fs::File, source_size: u64) -> std::io::Result<()> {
     file.set_len(source_size.saturating_add(1))
+}
+
+/// What the block hashes a destination sent for one resumed file were made
+/// of (cr-ecm20-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeBaseline {
+    /// The file there, as it was when it was hashed: blocks that match it
+    /// are not sent.
+    Hashed(crate::moved::Version),
+    /// Nothing was hashed: every block is sent, into a fresh partial.
+    Whole,
+}
+
+/// cr-ecm20-2: hold a resume partial for its first block as the hashes
+/// sent for it say. Hashed: the file is patched in place, so it is made
+/// private and writable by its owner (600) through what holds it first —
+/// or not written at all. Nothing hashed: a file there is not reused, for
+/// a reader who has it open would read what the blocks write; it is
+/// replaced by a fresh private partial (a link standing at the name is
+/// written through, as ever, to a file made private). An error is the
+/// file's: its blocks are passed over and it fails at its completion.
+/// With no word of the hashes, as before.
+fn hold_partial(dst: &Path, total_size: u64, baseline: Option<ResumeBaseline>) -> Result<()> {
+    #[cfg(unix)]
+    match baseline {
+        Some(ResumeBaseline::Whole) => return hold_whole(dst, total_size),
+        Some(ResumeBaseline::Hashed(_)) => return hold_hashed(dst, total_size),
+        None => {}
+    }
+    let _ = baseline;
+    hold_partial_unfinished(dst, total_size);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn hold_whole(dst: &Path, total_size: u64) -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    if std::fs::symlink_metadata(dst).is_ok_and(|there| there.is_file()) {
+        std::fs::remove_file(dst).with_context(|| {
+            format!(
+                "replacing the resume partial {} with a fresh one",
+                dst.display()
+            )
+        })?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(dst)
+        .with_context(|| format!("making the resume partial {}", dst.display()))?;
+    while_a_file_is_made(dst);
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("making the resume partial {} private", dst.display()))?;
+    mark_unfinished(&file, total_size)
+        .with_context(|| format!("marking {} unfinished", dst.display()))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn hold_hashed(dst: &Path, total_size: u64) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    // Had as it was hashed — to be read — made private and writable
+    // through that, and only then opened to be written: the same file.
+    let held = std::fs::File::open(dst)
+        .with_context(|| format!("opening the resume partial {}", dst.display()))?;
+    while_a_file_is_made(dst);
+    held.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .with_context(|| {
+            format!(
+                "making the resume partial {} private before it is patched",
+                dst.display()
+            )
+        })?;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(dst)
+        .with_context(|| format!("opening the resume partial {}", dst.display()))?;
+    let (was, now) = (held.metadata()?, file.metadata()?);
+    if (was.dev(), was.ino()) != (now.dev(), now.ino()) {
+        eyre::bail!(
+            "the resume partial {} changed while it was made private",
+            dst.display()
+        );
+    }
+    if now.is_file() && now.len() <= total_size {
+        mark_unfinished(&file, total_size)
+            .with_context(|| format!("marking {} unfinished", dst.display()))?;
+    }
+    Ok(())
 }
 
 /// cr-win-1: hold a resume partial one byte longer than its source before
@@ -7495,6 +7630,104 @@ mod cr_win_1_tests {
             .unwrap();
         assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
         assert_eq!(std::fs::read(&at).unwrap(), b"somebody's", "untouched");
+    }
+
+    /// cr-ecm20-2: the writer makes a wire resume's partial safe before a
+    /// block patches it. One that was hashed is made private (600) in
+    /// place; one nothing was hashed of is replaced by a fresh private
+    /// partial — a reader who had it open keeps only what it held; and one
+    /// that can be had neither way is not written at all, and fails at its
+    /// completion record.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_wire_partial_is_made_safe_by_its_writer_or_not_written() {
+        use std::io::Read as _;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        struct Reopened(PathBuf);
+        impl Drop for Reopened {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let mode_of = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+        let hashed = dst.join("hashed.bin");
+        std::fs::write(&hashed, b"0123456789").unwrap();
+        std::fs::set_permissions(&hashed, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let before = std::fs::metadata(&hashed).unwrap();
+        sink.note_resume_baseline(
+            "hashed.bin",
+            ResumeBaseline::Hashed(crate::moved::Version::of(&before)),
+        );
+        sink.hold_resume_partial("hashed.bin", 10).await.unwrap();
+        assert_eq!(mode_of(&hashed), 0o600, "made private in place");
+        assert_eq!(std::fs::metadata(&hashed).unwrap().ino(), before.ino());
+        assert_eq!(std::fs::metadata(&hashed).unwrap().len(), 11);
+
+        let whole = dst.join("whole.bin");
+        std::fs::write(&whole, b"old content").unwrap();
+        std::fs::set_permissions(&whole, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let before = std::fs::metadata(&whole).unwrap().ino();
+        let mut reader = std::fs::File::open(&whole).unwrap();
+        sink.note_resume_baseline("whole.bin", ResumeBaseline::Whole);
+        sink.hold_resume_partial("whole.bin", 10).await.unwrap();
+        assert_ne!(
+            std::fs::metadata(&whole).unwrap().ino(),
+            before,
+            "a fresh partial"
+        );
+        assert_eq!(mode_of(&whole), 0o600);
+        let mut held = Vec::new();
+        reader.read_to_end(&mut held).unwrap();
+        assert_eq!(held, b"old content", "the reader keeps what it held");
+
+        let closed = dst.join("closed");
+        std::fs::create_dir_all(&closed).unwrap();
+        std::fs::write(closed.join("kept.bin"), b"kept as it was").unwrap();
+        let _reopened = Reopened(closed.clone());
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::write(closed.join("probe"), b"").is_ok() {
+            eprintln!("skipped: this process is not barred by a directory's mode");
+            return;
+        }
+        sink.note_resume_baseline("closed/kept.bin", ResumeBaseline::Whole);
+        sink.hold_resume_partial("closed/kept.bin", 4)
+            .await
+            .unwrap();
+        sink.write_payload(PreparedPayload::FileBlock {
+            relative_path: "closed/kept.bin".to_string(),
+            offset: 0,
+            bytes: b"new!".to_vec(),
+        })
+        .await
+        .unwrap();
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "closed/kept.bin".to_string(),
+                total_size: 4,
+                mtime_seconds: 0,
+                permissions: 0o644,
+                windows_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        assert_eq!(
+            std::fs::read(closed.join("kept.bin")).unwrap(),
+            b"kept as it was",
+            "not written"
+        );
     }
 
     /// cr-ecm19-4: a partial the wire resume works on is private and

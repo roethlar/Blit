@@ -4900,6 +4900,7 @@ async fn destination_session_inner(
                     } else {
                         diff_chunk_and_send_needs(
                             transport,
+                            sink.as_ref(),
                             chunk,
                             dst_root,
                             canonical_dst_root.as_deref(),
@@ -4999,6 +5000,7 @@ async fn destination_session_inner(
                 } else {
                     diff_chunk_and_send_needs(
                         transport,
+                        sink.as_ref(),
                         chunk,
                         dst_root,
                         canonical_dst_root.as_deref(),
@@ -5991,6 +5993,7 @@ async fn diff_chunk_and_apply_local(
 #[allow(clippy::too_many_arguments)]
 async fn diff_chunk_and_send_needs(
     transport: &mut FrameTransport,
+    sink: &dyn TransferSink,
     chunk: Vec<FileHeader>,
     dst_root: &Path,
     canonical_dst_root: Option<&Path>,
@@ -6110,14 +6113,16 @@ async fn diff_chunk_and_send_needs(
         if !*resume {
             continue;
         }
-        let hashes = compute_resume_block_hashes(
+        let (hashes, baseline) = compute_resume_block_hashes(
             dst_root,
             canonical_dst_root,
             &header.relative_path,
             header.raw_relative_path.as_deref(),
+            header.permissions,
             resume_block_size,
         )
         .await?;
+        sink.note_resume_baseline(&header.relative_path, baseline);
         // The resume grant was retained in the ledger with its
         // NeedBatch above (otp-7b ordering: the data-plane receive
         // validates arriving block records against it on another task,
@@ -6658,8 +6663,10 @@ async fn compute_resume_block_hashes(
     canonical_dst_root: Option<&Path>,
     relative_path: &str,
     raw_relative_path: Option<&[u8]>,
+    source_mode: u32,
     block_size: usize,
-) -> Result<Vec<Vec<u8>>> {
+) -> Result<(Vec<Vec<u8>>, crate::remote::transfer::sink::ResumeBaseline)> {
+    use crate::remote::transfer::sink::ResumeBaseline;
     // cr-ssc5-2: hash the file the blocks will be applied to — by its raw
     // bytes when the name carries them (contract v7), exactly as the sink
     // resolves the record — never the lossy-text path beside it.
@@ -6677,21 +6684,22 @@ async fn compute_resume_block_hashes(
             "resume path '{relative_path}' escapes the destination root: {err:#}"
         ))
     })?;
-    tokio::task::spawn_blocking(move || -> Result<Vec<Vec<u8>>> {
+    tokio::task::spawn_blocking(move || -> Result<(Vec<Vec<u8>>, ResumeBaseline)> {
         use std::io::Read;
+        let whole = || Ok((Vec::new(), ResumeBaseline::Whole));
         // Re-stat inside the claim: a partial that vanished, stopped
         // being a regular file, or grew past the hash-count cap since
         // the diff yields the empty list — the full-transfer fallback
         // (D1) — never an error and never an oversized frame (review F1).
         match std::fs::metadata(&dst) {
             Ok(meta) if meta.is_file() && resume_hash_list_fits(meta.len(), block_size) => {}
-            Ok(_) => return Ok(Vec::new()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Ok(_) => return whole(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return whole(),
             Err(e) => return Err(eyre::eyre!("stat {} for block hashes: {e}", dst.display())),
         }
         let mut file = match std::fs::File::open(&dst) {
             Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return whole(),
             Err(e) => {
                 return Err(eyre::eyre!(
                     "opening {} for block hashes: {e}",
@@ -6699,23 +6707,31 @@ async fn compute_resume_block_hashes(
                 ))
             }
         };
-        // cr-ecm19-4: the file the blocks will patch is made private and
-        // writable by its owner (600) through the handle it is hashed
-        // through, BEFORE it is hashed: a destination of mode 644 stayed
-        // 644 while blocks of the source landed in it. One whose mode this
-        // run may not set is not reused — removed, and none of it hashed:
-        // every block is sent, into a fresh private partial. One that can
-        // be neither is hashed and patched as it stands, as a copy into it
-        // would write it.
+        // cr-ecm20-2: hashing changes nothing — it changed the file's mode,
+        // or removed it, before the source had sent a byte; the writer
+        // makes the partial safe before a block patches it (`hold_partial`).
+        // Whether the file is reused is decided here, without a write: one
+        // this run does not own, whose mode it may not set, or one that
+        // grants others what the source does not — a reader who has it open
+        // would read what the blocks write — is not hashed, and every block
+        // comes, into a fresh private partial.
         #[cfg(unix)]
-        match crate::copy::make_partial_private(&file, &dst) {
-            Ok(true) => {}
-            Ok(false) => return Ok(Vec::new()),
-            Err(error) => log::warn!(
-                "the resume partial {} could not be made private: {error}",
-                dst.display()
-            ),
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let found = file
+                .metadata()
+                .map_err(|e| eyre::eyre!("stat {} for block hashes: {e}", dst.display()))?;
+            // SAFETY: `geteuid` has no preconditions and cannot fail.
+            let me = unsafe { libc::geteuid() };
+            let ours = me == 0 || found.uid() == me;
+            let others = found.mode() & 0o077;
+            let wider = source_mode != 0 && others & !(source_mode & 0o077) != 0;
+            if !ours || wider {
+                return whole();
+            }
         }
+        #[cfg(not(unix))]
+        let _ = source_mode;
         let mut hashes = Vec::new();
         let mut buf = vec![0u8; block_size];
         loop {
@@ -6736,13 +6752,19 @@ async fn compute_resume_block_hashes(
             // A file growing concurrently with this read could blow past
             // the stat-time cap check — degrade, don't overshoot.
             if hashes.len() as u64 > MAX_RESUME_BLOCK_HASHES {
-                return Ok(Vec::new());
+                return whole();
             }
             if filled < block_size {
                 break;
             }
         }
-        Ok(hashes)
+        let hashed = file
+            .metadata()
+            .map_err(|e| eyre::eyre!("stat {} for block hashes: {e}", dst.display()))?;
+        Ok((
+            hashes,
+            ResumeBaseline::Hashed(crate::moved::Version::of(&hashed)),
+        ))
     })
     .await
     .map_err(|err| eyre::eyre!("resume hash task panicked: {err}"))?
@@ -10995,31 +11017,49 @@ mod own_incomplete_copy_tests {
         );
     }
 
-    /// cr-ecm19-4: the file a wire resume's blocks will patch is made
-    /// private (600) through the handle it is hashed through, before it is
-    /// hashed: a destination of mode 644 stayed 644 while blocks of the
-    /// source landed in it.
+    /// cr-ecm20-2: hashing a wire resume's partial changes nothing — its
+    /// mode, its name, the time it was last changed — for the source may
+    /// send nothing after it. A file of mode 644 is hashed as it stands;
+    /// for a source more private than it, it is not hashed at all, and
+    /// every block will come into a fresh partial.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_resume_partial_is_made_private_before_it_is_hashed() {
-        use std::os::unix::fs::PermissionsExt as _;
+    async fn hashing_a_resume_partial_changes_nothing() {
+        use crate::remote::transfer::sink::ResumeBaseline;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
-        std::fs::write(root.join("r.bin"), vec![3u8; 5000]).unwrap();
-        std::fs::set_permissions(root.join("r.bin"), std::fs::Permissions::from_mode(0o644))
-            .unwrap();
-        let hashes = compute_resume_block_hashes(&root, None, "r.bin", None, 1024)
-            .await
-            .unwrap();
+        let at = root.join("r.bin");
+        std::fs::write(&at, vec![3u8; 5000]).unwrap();
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let before = std::fs::metadata(&at).unwrap();
+        let unchanged = || {
+            let now = std::fs::metadata(&at).unwrap();
+            assert_eq!(now.mode() & 0o777, 0o644);
+            assert_eq!(now.ino(), before.ino());
+            assert_eq!(
+                (now.ctime(), now.ctime_nsec()),
+                (before.ctime(), before.ctime_nsec()),
+                "nothing about it changed"
+            );
+        };
+        let (hashes, baseline) =
+            compute_resume_block_hashes(&root, None, "r.bin", None, 0o644, 1024)
+                .await
+                .unwrap();
         assert_eq!(hashes.len(), 5);
-        assert_eq!(
-            std::fs::metadata(root.join("r.bin"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
+        assert!(
+            matches!(baseline, ResumeBaseline::Hashed(_)),
+            "{baseline:?}"
         );
+        unchanged();
+        let (hashes, baseline) =
+            compute_resume_block_hashes(&root, None, "r.bin", None, 0o600, 1024)
+                .await
+                .unwrap();
+        assert!(hashes.is_empty());
+        assert_eq!(baseline, ResumeBaseline::Whole);
+        unchanged();
     }
 
     /// cr-uv8-1: and it reads only the file it SAW. Another file put at a

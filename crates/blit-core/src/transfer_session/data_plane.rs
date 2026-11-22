@@ -2224,6 +2224,14 @@ impl TransferSink for NeedListSink {
             .await
     }
 
+    fn note_resume_baseline(
+        &self,
+        relative_path: &str,
+        baseline: crate::remote::transfer::sink::ResumeBaseline,
+    ) {
+        self.inner.note_resume_baseline(relative_path, baseline);
+    }
+
     fn can_store_raw_names(&self) -> bool {
         self.inner.can_store_raw_names()
     }

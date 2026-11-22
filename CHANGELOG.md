@@ -276,7 +276,9 @@ part, and a job you can list, read, re-run and retry.
   and one of a read-only source could not be written by the retry. A
   destination already there is patched in place, as ever, and is its
   owner's alone meanwhile — over the network too; one whose mode this
-  run may not set is replaced by a fresh one.
+  run may not set, or that others may read where its source may not
+  (a reader who has it open would read the new bytes), is copied whole
+  into a fresh one.
 - `check` of a single file against a destination of another name
   compares the two. With the source named in `--files-from`, or a
   pattern naming either file, it looked for one file's name on the
