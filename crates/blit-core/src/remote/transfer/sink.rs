@@ -2702,7 +2702,7 @@ fn hold_whole(dst: &Path, total_size: u64) -> Result<Option<HeldPartial>> {
     // touched until that exists: it was removed, or cut to nothing through
     // the link, before a permission failure could leave its bytes gone.
     let file = if std::fs::symlink_metadata(dst).is_ok() {
-        crate::copy::fresh_partial(dst)?
+        crate::copy::fresh_partial(dst, total_size.saturating_add(1))?
     } else {
         std::fs::OpenOptions::new()
             .write(true)
@@ -3316,6 +3316,7 @@ fn copy_and_stamp_opened(
         let (held, held_len) = crate::copy::open_resume_partial(
             dst,
             Some(crate::wire_metadata::permissions_mode(src_meta)),
+            header.size,
         )
         .with_context(|| format!("resume copy {}", header.relative_path))?;
         partial

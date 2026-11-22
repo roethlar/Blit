@@ -48,6 +48,7 @@ filetime = "0.2"
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.14"
 walkdir = "2.5"
+libc = "0.2"
 
 [lints]
 workspace = true

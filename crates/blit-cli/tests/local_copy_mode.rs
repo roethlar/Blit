@@ -87,3 +87,51 @@ fn a_local_copy_gives_every_file_its_sources_mode() {
         }
     }
 }
+
+/// cr-ecm22-1: a resume whose fresh partial cannot be made ready — here a
+/// file-size limit refuses its length — leaves the destination as it
+/// stood. The partial was renamed into place first, and the destination
+/// was left an empty file.
+#[test]
+fn a_resume_that_cannot_ready_its_partial_leaves_the_destination() {
+    use std::os::unix::process::CommandExt as _;
+    let ctx = TestContext::new();
+    let source = ctx.workspace.join("source");
+    let target = ctx.workspace.join("target");
+    fs::create_dir_all(&source).unwrap();
+    fs::create_dir_all(&target).unwrap();
+    fs::write(source.join("big.bin"), vec![b'x'; 300 * 1024]).unwrap();
+    fs::set_permissions(source.join("big.bin"), fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(target.join("big.bin"), b"eighteen bytes ok!").unwrap();
+    fs::set_permissions(target.join("big.bin"), fs::Permissions::from_mode(0o644)).unwrap();
+    let mut cmd = Command::new(&ctx.cli_bin);
+    cmd.arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .arg("copy")
+        .arg("--resume")
+        .arg(format!("{}/", source.display()))
+        .arg(format!("{}/", target.display()));
+    // SAFETY: the closure runs in the child before it executes blit, and
+    // calls only `setrlimit` and `signal`, which are safe to call there.
+    unsafe {
+        cmd.pre_exec(|| {
+            let limit = libc::rlimit {
+                rlim_cur: 256 * 1024,
+                rlim_max: 256 * 1024,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+    let output = run_with_timeout(cmd, Duration::from_secs(120));
+    assert!(!output.status.success(), "the limit refuses the copy");
+    assert_eq!(
+        fs::read(target.join("big.bin")).unwrap(),
+        b"eighteen bytes ok!",
+        "left as it stood: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

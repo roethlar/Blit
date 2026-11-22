@@ -82,7 +82,11 @@ pub fn resume_copy_file(src: &Path, dst: &Path, block_size: usize) -> Result<Res
 /// the source's bytes as they land: a fresh partial is made in its place
 /// ([`fresh_partial`]), and nothing of it is touched until that exists.
 #[cfg(unix)]
-pub fn open_resume_partial(dst: &Path, source_mode: Option<u32>) -> Result<(File, u64)> {
+pub fn open_resume_partial(
+    dst: &Path,
+    source_mode: Option<u32>,
+    src_len: u64,
+) -> Result<(File, u64)> {
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     let open = |options: &mut OpenOptions| options.read(true).write(true).mode(0o600).open(dst);
     // cr-ecm20-3: a partial there already that this run may read but not
@@ -133,7 +137,7 @@ pub fn open_resume_partial(dst: &Path, source_mode: Option<u32>) -> Result<(File
         return Ok((file, len));
     }
     drop(file);
-    Ok((fresh_partial(dst)?, 0))
+    Ok((fresh_partial(dst, src_len.saturating_add(1))?, 0))
 }
 
 /// cr-ecm19-4: make the partial `file` private and writable by its owner
@@ -157,7 +161,12 @@ pub fn make_partial_private(file: &File) -> std::io::Result<bool> {
 /// be made, what stands there is as it was: it was removed, or cut to
 /// nothing through the link, before the new one could be had.
 #[cfg(unix)]
-pub fn fresh_partial(dst: &Path) -> Result<File> {
+///
+/// cr-ecm22-1: and it is READY first — its mode, and its length
+/// (`unfinished`: one byte longer than its source) — before it takes the
+/// destination's place: renamed first, a length the system then refused left
+/// the destination an empty file.
+pub fn fresh_partial(dst: &Path, unfinished: u64) -> Result<File> {
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -205,6 +214,7 @@ pub fn fresh_partial(dst: &Path) -> Result<File> {
     };
     let placed = file
         .set_permissions(std::fs::Permissions::from_mode(0o600))
+        .and_then(|()| file.set_len(unfinished))
         .and_then(|()| std::fs::rename(&beside, &target));
     if let Err(error) = placed {
         let _ = std::fs::remove_file(&beside);
@@ -247,7 +257,11 @@ fn while_a_partial_is_opened(_dst: &Path) {
 
 /// The partial a resume patches, and how much of it there already is.
 #[cfg(not(unix))]
-pub fn open_resume_partial(dst: &Path, _source_mode: Option<u32>) -> Result<(File, u64)> {
+pub fn open_resume_partial(
+    dst: &Path,
+    _source_mode: Option<u32>,
+    _src_len: u64,
+) -> Result<(File, u64)> {
     let dst_len = std::fs::metadata(dst).map(|m| m.len()).unwrap_or(0);
     let file = OpenOptions::new()
         .read(true)
@@ -283,7 +297,7 @@ pub fn resume_copy_from(
     };
     #[cfg(not(unix))]
     let source_mode = None;
-    let (dst_file, dst_len) = open_resume_partial(dst, source_mode)?;
+    let (dst_file, dst_len) = open_resume_partial(dst, source_mode, src_len)?;
     resume_copy_into(src_file, src_len, dst_file, dst_len, dst, block_size)
 }
 
