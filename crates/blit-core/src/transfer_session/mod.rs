@@ -6678,21 +6678,43 @@ async fn compute_resume_block_hashes(
         // being a regular file, or grew past the hash-count cap since
         // the diff yields the empty list — the full-transfer fallback
         // (D1) — never an error and never an oversized frame (review F1).
+        // cr-ecm20-2, cr-ecm23-4, cr-ecm22-4: whether the file may be reused
+        // — one this run's user owns, granting others nothing its source
+        // does not; elsewhere than Unix, any.
+        let reusable = |meta: &std::fs::Metadata| -> bool {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt as _;
+                let ours = meta.uid() == crate::copy::effective_user(&dst);
+                let others = meta.mode() & 0o077;
+                // A source of mode 0000 is a mode known (cr-ecm22-4); only
+                // one whose header carries none is not asked (cr-ecm23-5).
+                let wider = source_mode.is_some_and(|source| others & !(source & 0o077) != 0);
+                ours && !wider
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (meta, source_mode);
+                true
+            }
+        };
+        // cr-ecm24-4: asked of what was seen of the file BEFORE it is opened
+        // to be read — one that may not be reused is sent whole unopened —
+        // and one that cannot be opened to be read is sent whole too: its
+        // hashes cannot be had, and it is that one file's matter. Opened
+        // first, a destination this run could not read ended the transfer.
         match std::fs::metadata(&dst) {
-            Ok(meta) if meta.is_file() && resume_hash_list_fits(meta.len(), block_size) => {}
+            Ok(meta) if meta.is_file() && resume_hash_list_fits(meta.len(), block_size) => {
+                if !reusable(&meta) {
+                    return whole();
+                }
+            }
             Ok(_) => return whole(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return whole(),
             Err(e) => return Err(eyre::eyre!("stat {} for block hashes: {e}", dst.display())),
         }
-        let mut file = match std::fs::File::open(&dst) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return whole(),
-            Err(e) => {
-                return Err(eyre::eyre!(
-                    "opening {} for block hashes: {e}",
-                    dst.display()
-                ))
-            }
+        let Ok(mut file) = std::fs::File::open(&dst) else {
+            return whole();
         };
         // cr-ecm20-2: hashing changes nothing — it changed the file's mode,
         // or removed it, before the source had sent a byte; the writer
@@ -6708,22 +6730,10 @@ async fn compute_resume_block_hashes(
         let found = file
             .metadata()
             .map_err(|e| eyre::eyre!("stat {} for block hashes: {e}", dst.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            // cr-ecm23-4: a file this run's user owns — root's run too: one
-            // another owns stays theirs, readable by them whatever its mode.
-            let ours = found.uid() == crate::copy::effective_user(&dst);
-            let others = found.mode() & 0o077;
-            // A source of mode 0000 is a mode known (cr-ecm22-4); only one
-            // whose header carries none is not asked (cr-ecm23-5).
-            let wider = source_mode.is_some_and(|source| others & !(source & 0o077) != 0);
-            if !ours || wider {
-                return whole();
-            }
+        // And asked again of the file opened, which the hashes are of.
+        if !reusable(&found) {
+            return whole();
         }
-        #[cfg(not(unix))]
-        let _ = source_mode;
         // cr-ecm21-2: the hashes are of the file AS IT WAS BEFORE THEY WERE
         // READ, unchanged to the last of them — read no further than the
         // size it had — or none are sent. A block written once it was
@@ -11144,6 +11154,34 @@ mod own_incomplete_copy_tests {
             .unwrap();
         assert_eq!(hashes.len(), 5, "no mode to ask");
         unchanged();
+    }
+
+    /// cr-ecm24-4: a destination this run cannot read is sent whole and the
+    /// transfer goes on — one whose mode says it is not reused (0004, for a
+    /// 0600 source), and one that would be (its own, 0200) but cannot be
+    /// read. Opened to be hashed first, each ended the transfer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_destination_this_run_cannot_read_is_sent_whole() {
+        use crate::remote::transfer::sink::ResumeBaseline;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        for (name, mode) in [("others.bin", 0o004), ("own.bin", 0o200)] {
+            let at = root.join(name);
+            std::fs::write(&at, vec![3u8; 5000]).unwrap();
+            if std::fs::metadata(&at).unwrap().uid() == 0 {
+                // Root reads any file: nothing to show.
+                return;
+            }
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(mode)).unwrap();
+            let (hashes, baseline) =
+                compute_resume_block_hashes(&root, None, name, None, Some(0o100600), 1024)
+                    .await
+                    .unwrap_or_else(|error| panic!("{name}: {error:#}"));
+            assert!(hashes.is_empty(), "{name}");
+            assert_eq!(baseline, ResumeBaseline::Whole, "{name}");
+        }
     }
 
     /// cr-ecm23-4: a wire resume reuses only a file this run's user owns —
