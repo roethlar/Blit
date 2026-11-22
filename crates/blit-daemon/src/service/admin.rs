@@ -133,11 +133,12 @@ fn start_is_contained(module_root: &Path, start_abs: PathBuf) -> Result<Readable
     //
     // cr-uv9-1: and nothing at a way to it — a folder above it made a file
     // (`Not a directory`) — is the same: it was refused as no way out.
-    match fs::symlink_metadata(module_root) {
-        Err(error) if matches!(error.kind(), NotFound | NotADirectory) => {
-            return Ok(Readable::Gone(error))
-        }
-        _ => {}
+    // cr-uv10-3: and so is anything else that keeps the root from being
+    // looked at — a folder above it this daemon may not search
+    // (`Permission denied`): the error is the verb's to tell, for the
+    // start it was asked about.
+    if let Err(error) = fs::symlink_metadata(module_root) {
+        return Ok(Readable::Gone(error));
     }
     // The module itself, however it was typed, is in the module. Judged
     // by its ancestors — as what is no directory, typed as one, is — a
@@ -1784,6 +1785,28 @@ mod typed_operand_tests {
             ),
             "a folder above the module made a file"
         );
+        use std::os::unix::fs::PermissionsExt as _;
+        // cr-uv10-3: and one a folder above which may not be searched is
+        // told with that error too — it was refused as a way out.
+        let barred = top.join("barred").join("module");
+        fs::create_dir_all(&barred).unwrap();
+        let above = top.join("barred");
+        fs::set_permissions(&above, fs::Permissions::from_mode(0o000)).unwrap();
+        let looked = fs::symlink_metadata(&barred);
+        let told = start_is_contained(&barred, start("").below(&barred));
+        fs::set_permissions(&above, fs::Permissions::from_mode(0o755)).unwrap();
+        if looked.is_ok() {
+            eprintln!("skipped: this process is not barred by a directory's mode");
+        } else {
+            assert!(
+                matches!(
+                    told,
+                    Ok(Readable::Gone(ref error))
+                        if error.kind() == std::io::ErrorKind::PermissionDenied
+                ),
+                "a folder above the module that may not be searched: {told:?}"
+            );
+        }
         // By a way out of the module: refused, whatever cannot be looked
         // up beyond the link that leaves it.
         for typed in ["out", "out/", "out/ring/x", "out/missing"] {
