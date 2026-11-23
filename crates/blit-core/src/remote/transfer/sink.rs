@@ -2801,6 +2801,18 @@ pub enum ResumeBaseline {
     Hashed(crate::moved::Version),
     /// Nothing was hashed: every block is sent, into a fresh partial.
     Whole,
+    /// cr-ecm30-1: nothing was hashed, and this is what was found at the
+    /// name when that was decided — the file as it stood, or nothing: the
+    /// fresh partial replaces that and nothing else. Anything else there by
+    /// the first block is left as it is, and the file fails.
+    WholeOf(Option<crate::moved::Version>),
+}
+
+impl ResumeBaseline {
+    /// Whether nothing was hashed: every block comes.
+    pub fn is_whole(&self) -> bool {
+        matches!(self, Self::Whole | Self::WholeOf(_))
+    }
 }
 
 /// cr-ecm20-2: hold a resume partial for its first block as the hashes
@@ -2824,7 +2836,10 @@ fn hold_partial(
     hold_fault(dst)?;
     #[cfg(unix)]
     match baseline {
-        Some(ResumeBaseline::Whole) => return hold_whole(dst, total_size, within),
+        Some(ResumeBaseline::Whole) => return hold_whole(dst, total_size, within, None),
+        Some(ResumeBaseline::WholeOf(found)) => {
+            return hold_whole(dst, total_size, within, Some(found))
+        }
         Some(ResumeBaseline::Hashed(version)) => return hold_hashed(dst, total_size, &version),
         None => {}
     }
@@ -2853,7 +2868,12 @@ fn hold_partial(
 }
 
 #[cfg(unix)]
-fn hold_whole(dst: &Path, total_size: u64, within: Option<&Path>) -> Result<Option<HeldPartial>> {
+fn hold_whole(
+    dst: &Path,
+    total_size: u64,
+    within: Option<&Path>,
+    compared: Option<Option<crate::moved::Version>>,
+) -> Result<Option<HeldPartial>> {
     // cr-ecm21-3, D-2026-11-23-1: something there — a file, or a link to
     // one — is replaced by a fresh private partial made in place: what
     // stands there is removed while it is still what was seen, and the
@@ -2872,6 +2892,24 @@ fn hold_whole(dst: &Path, total_size: u64, within: Option<&Path>) -> Result<Opti
     let seen = resolved
         .look()
         .with_context(|| format!("looking at {}", dst.display()))?;
+    // cr-ecm30-1: what was found at the name when the file was compared —
+    // the file as it stood, or nothing — is what this hold may replace:
+    // anything else there by now is left as it is, and the file fails.
+    // Looked at only here, a file come there after the comparison was taken
+    // for what prompted it, and replaced.
+    if let Some(found) = compared {
+        let same = match (found, seen) {
+            (None, None) => true,
+            (Some(version), Some(entry)) => entry.version == version,
+            _ => false,
+        };
+        if !same {
+            eyre::bail!(
+                "something else came to stand at {} after it was compared; it is left as it is",
+                dst.display()
+            );
+        }
+    }
     // cr-ecm27-3: a link at the name — come there since the chain was
     // followed — is left as it is, and the file fails: replaced, the link
     // was overwritten.
@@ -8724,6 +8762,56 @@ mod cr_win_1_tests {
             .unwrap();
         assert!(outcome.file_failed("late.bin"), "{outcome:?}");
         assert_eq!(std::fs::read(&late).unwrap(), b"theirs");
+    }
+
+    /// cr-ecm30-1: a wire resume sent whole carries what decided it — the
+    /// file found at the name, or nothing — and its hold replaces that and
+    /// nothing else: a file come to the name after the comparison, in place
+    /// of the one compared or where there was none, is left as it is, and
+    /// the file fails. Looked at only by the hold, the newcomer was taken
+    /// for what prompted the whole-file send, and replaced.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_wires_whole_resume_leaves_what_came_after_the_comparison() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let replaced = dst.join("replaced.bin");
+        std::fs::write(&replaced, b"0123456789").unwrap();
+        let compared = crate::moved::Version::of(&std::fs::metadata(&replaced).unwrap());
+        std::fs::write(tmp.path().join("theirs"), b"theirs").unwrap();
+        std::fs::rename(tmp.path().join("theirs"), &replaced).unwrap();
+        sink.note_resume_baseline("replaced.bin", ResumeBaseline::WholeOf(Some(compared)));
+        let appeared = dst.join("appeared.bin");
+        std::fs::write(&appeared, b"appeared").unwrap();
+        sink.note_resume_baseline("appeared.bin", ResumeBaseline::WholeOf(None));
+        for (name, at, theirs) in [
+            ("replaced.bin", &replaced, &b"theirs"[..]),
+            ("appeared.bin", &appeared, &b"appeared"[..]),
+        ] {
+            sink.hold_resume_partial(name, 10).await.unwrap();
+            assert_eq!(std::fs::read(at).unwrap(), theirs, "{name}: left as it is");
+            let outcome = sink
+                .write_payload(PreparedPayload::FileBlockComplete {
+                    relative_path: name.to_string(),
+                    total_size: 10,
+                    mtime_seconds: 0,
+                    permissions: 0o600,
+                    windows_metadata: None,
+                })
+                .await
+                .unwrap();
+            assert!(outcome.file_failed(name), "{name}: {outcome:?}");
+            assert_eq!(std::fs::read(at).unwrap(), theirs, "{name}");
+        }
     }
 
     /// cr-ecm29-2: the wire's fresh partial replaces what its look found: a

@@ -725,7 +725,9 @@ impl Resolved {
             let now = entry_at(held, &self.name)
                 .with_context(|| format!("looking at {}", dst.display()))?;
             match now {
-                Some(now) if now.identity == seen.identity => {
+                // cr-ecm30-1: the file as it was seen — not only which
+                // number it had.
+                Some(now) if now.version == seen.version => {
                     // SAFETY: `held` is open for the length of the call, and
                     // the name is NUL-terminated and outlives it.
                     if unsafe { libc::unlinkat(held, self.name.as_ptr(), 0) } != 0 {
@@ -805,6 +807,11 @@ pub(crate) struct Entry {
     pub(crate) mode: u32,
     pub(crate) owner: u32,
     pub(crate) identity: (u64, u64),
+    /// cr-ecm30-1: the entry as it stood — its size, its times and which it
+    /// is: what a removal must find again, unchanged, to take it. A device
+    /// and number alone may be another file's, given the number once the
+    /// first is gone.
+    pub(crate) version: crate::moved::Version,
 }
 
 #[cfg(unix)]
@@ -816,6 +823,7 @@ impl Entry {
             mode: found.mode(),
             owner: found.uid(),
             identity: (found.dev(), found.ino()),
+            version: crate::moved::Version::of(found),
         }
     }
 }
@@ -851,6 +859,16 @@ fn entry_at(
             mode: found.st_mode as u32,
             owner: found.st_uid as u32,
             identity: (found.st_dev as u64, found.st_ino as u64),
+            // As `crate::moved::Version::of` reads the same times.
+            version: crate::moved::Version {
+                size: found.st_size as u64,
+                mtime_nanos: i128::from(found.st_mtime) * 1_000_000_000
+                    + i128::from(found.st_mtime_nsec),
+                ctime_nanos: i128::from(found.st_ctime) * 1_000_000_000
+                    + i128::from(found.st_ctime_nsec),
+                device: found.st_dev as u64,
+                inode: found.st_ino as u64,
+            },
         }));
     }
     let error = std::io::Error::last_os_error();
@@ -1523,6 +1541,38 @@ mod tests {
         let left: Vec<_> =
             std::fs::read_dir(dst.parent().unwrap())?.collect::<std::io::Result<_>>()?;
         assert_eq!(left.len(), 1, "no stage left");
+        Ok(())
+    }
+
+    /// cr-ecm30-1: what a fresh partial replaces is the file as it was seen,
+    /// not only the number it had: one written since — the same number,
+    /// grown by a byte — is left as it is, and the resume fails. Asked only
+    /// its device and number, a file given the number of one gone matched.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_changed_since_it_was_seen_is_not_removed() -> Result<()> {
+        use std::io::Write as _;
+        let tmp = tempdir()?;
+        let (src, dst, data) = wider_destination(tmp.path())?;
+        {
+            let at = dst.clone();
+            BEFORE_A_FRESH_PARTIAL_IS_MADE_HOOKS.lock().unwrap().push((
+                dst.clone(),
+                std::sync::Arc::new(move |_: &Path| {
+                    let mut grown = std::fs::OpenOptions::new().append(true).open(&at).unwrap();
+                    grown.write_all(b"!").unwrap();
+                }),
+            ));
+        }
+        let copied = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024);
+        BEFORE_A_FRESH_PARTIAL_IS_MADE_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(at, _)| at != &dst);
+        assert!(copied.is_err(), "the resume fails");
+        let mut kept = data[..1000].to_vec();
+        kept.push(b'!');
+        assert_eq!(std::fs::read(&dst)?, kept, "left as it is");
         Ok(())
     }
 

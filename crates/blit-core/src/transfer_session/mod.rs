@@ -6699,6 +6699,15 @@ async fn compute_resume_block_hashes(
     tokio::task::spawn_blocking(move || -> Result<(Vec<Vec<u8>>, ResumeBaseline)> {
         use std::io::Read;
         let whole = || Ok((Vec::new(), ResumeBaseline::Whole));
+        // cr-ecm30-1: and where a look decided it, what that found — the
+        // file as it stood, or nothing — goes with it, for the hold to
+        // replace that and nothing else.
+        let whole_of = |found: Option<&std::fs::Metadata>| {
+            Ok((
+                Vec::new(),
+                ResumeBaseline::WholeOf(found.map(crate::moved::Version::of)),
+            ))
+        };
         // Re-stat inside the claim: a partial that vanished, stopped
         // being a regular file, or grew past the hash-count cap since
         // the diff yields the empty list — the full-transfer fallback
@@ -6730,18 +6739,20 @@ async fn compute_resume_block_hashes(
         // and one that cannot be opened to be read is sent whole too: its
         // hashes cannot be had, and it is that one file's matter. Opened
         // first, a destination this run could not read ended the transfer.
-        match std::fs::metadata(&dst) {
+        let seen = match std::fs::metadata(&dst) {
             Ok(meta) if meta.is_file() && resume_hash_list_fits(meta.len(), block_size) => {
                 if !reusable(&meta) {
-                    return whole();
+                    return whole_of(Some(&meta));
                 }
+                meta
             }
-            Ok(_) => return whole(),
+            Ok(meta) => return whole_of(Some(&meta)),
+            Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => return whole_of(None),
             // cr-ecm27-2: a look that fails — the file gone, a folder on its
             // way become a file (`ENOTDIR`), or anything else of this one
             // file's — sends it whole. It ended the transfer.
             Err(_) => return whole(),
-        }
+        };
         // cr-ecm28-1: opened without waiting — a FIFO put in the file's place
         // after the look cannot hold the hashing — and what was opened is a
         // regular file (asked below), or the file comes whole.
@@ -6757,7 +6768,7 @@ async fn compute_resume_block_hashes(
             open.open(&dst)
         };
         let Ok(mut file) = opened else {
-            return whole();
+            return whole_of(Some(&seen));
         };
         // cr-ecm20-2: hashing changes nothing — it changed the file's mode,
         // or removed it, before the source had sent a byte; the writer
@@ -6776,7 +6787,7 @@ async fn compute_resume_block_hashes(
         };
         // And asked again of the file opened, which the hashes are of.
         if !found.is_file() || !reusable(&found) {
-            return whole();
+            return whole_of(Some(&found));
         }
         // cr-ecm21-2: the hashes are of the file AS IT WAS BEFORE THEY WERE
         // READ, unchanged to the last of them — read no further than the
@@ -11234,7 +11245,7 @@ mod own_incomplete_copy_tests {
                 .await
                 .unwrap();
         assert!(hashes.is_empty());
-        assert_eq!(baseline, ResumeBaseline::Whole);
+        assert!(baseline.is_whole(), "{baseline:?}");
         unchanged();
         // cr-ecm22-4: a source of mode 0000 is more private still; one that
         // carries no mode — a Windows source — is not asked.
@@ -11243,7 +11254,7 @@ mod own_incomplete_copy_tests {
                 .await
                 .unwrap();
         assert!(hashes.is_empty(), "0000 is a mode");
-        assert_eq!(baseline, ResumeBaseline::Whole);
+        assert!(baseline.is_whole(), "{baseline:?}");
         let (hashes, _) = compute_resume_block_hashes(&root, None, "r.bin", None, None, 1024)
             .await
             .unwrap();
@@ -11256,7 +11267,6 @@ mod own_incomplete_copy_tests {
     /// hashes are dropped. The error ended the transfer.
     #[tokio::test]
     async fn a_read_that_fails_while_hashing_sends_the_file_whole() {
-        use crate::remote::transfer::sink::ResumeBaseline;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         let at = root.join("r.bin");
@@ -11275,7 +11285,7 @@ mod own_incomplete_copy_tests {
             .retain(|(path, _)| path != &at);
         let (hashes, baseline) = hashed.unwrap();
         assert!(hashes.is_empty(), "its unfinished hashes dropped");
-        assert_eq!(baseline, ResumeBaseline::Whole);
+        assert!(baseline.is_whole(), "{baseline:?}");
     }
 
     /// cr-ecm26-3: the look after a destination's hashes, failing, sends the
@@ -11283,7 +11293,6 @@ mod own_incomplete_copy_tests {
     /// the transfer, every other file with it.
     #[tokio::test]
     async fn a_failed_look_after_hashing_sends_the_file_whole() {
-        use crate::remote::transfer::sink::ResumeBaseline;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         let at = root.join("r.bin");
@@ -11305,7 +11314,7 @@ mod own_incomplete_copy_tests {
             .retain(|(path, _)| path != &at);
         let (hashes, baseline) = hashed.unwrap();
         assert!(hashes.is_empty(), "unverified hashes dropped");
-        assert_eq!(baseline, ResumeBaseline::Whole);
+        assert!(baseline.is_whole(), "{baseline:?}");
     }
 
     /// cr-ecm27-2: the first looks at a destination, failing, send the file
@@ -11314,7 +11323,6 @@ mod own_incomplete_copy_tests {
     /// transfer, every other file with it.
     #[tokio::test]
     async fn a_failed_first_look_sends_the_file_whole() {
-        use crate::remote::transfer::sink::ResumeBaseline;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         std::fs::write(root.join("album"), b"a file now").unwrap();
@@ -11323,7 +11331,7 @@ mod own_incomplete_copy_tests {
                 .await
                 .unwrap();
         assert!(hashes.is_empty(), "a folder become a file");
-        assert_eq!(baseline, ResumeBaseline::Whole);
+        assert!(baseline.is_whole(), "{baseline:?}");
 
         let at = root.join("r.bin");
         std::fs::write(&at, vec![3u8; 5000]).unwrap();
@@ -11344,7 +11352,7 @@ mod own_incomplete_copy_tests {
             .retain(|(path, _)| path != &at);
         let (hashes, baseline) = hashed.unwrap();
         assert!(hashes.is_empty(), "the opened file's look failed");
-        assert_eq!(baseline, ResumeBaseline::Whole);
+        assert!(baseline.is_whole(), "{baseline:?}");
     }
 
     /// cr-ecm28-5: a destination with a second name is not hashed for reuse:
@@ -11353,7 +11361,6 @@ mod own_incomplete_copy_tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_destination_with_a_second_name_is_sent_whole() {
-        use crate::remote::transfer::sink::ResumeBaseline;
         use std::os::unix::fs::PermissionsExt as _;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
@@ -11366,7 +11373,41 @@ mod own_incomplete_copy_tests {
                 .await
                 .unwrap();
         assert!(hashes.is_empty(), "two names: not reused");
-        assert_eq!(baseline, ResumeBaseline::Whole);
+        assert!(baseline.is_whole(), "{baseline:?}");
+    }
+
+    /// cr-ecm30-1: a whole-file resume decided by a look carries what that
+    /// look found — the file as it stood, or nothing — for the hold to
+    /// replace that and nothing else.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn what_decided_a_whole_resume_goes_with_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let at = root.join("wide.bin");
+        std::fs::write(&at, vec![3u8; 5000]).unwrap();
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let (_, baseline) =
+            compute_resume_block_hashes(&root, None, "wide.bin", None, Some(0o100600), 1024)
+                .await
+                .unwrap();
+        assert_eq!(
+            baseline,
+            crate::remote::transfer::sink::ResumeBaseline::WholeOf(Some(
+                crate::moved::Version::of(&std::fs::metadata(&at).unwrap())
+            )),
+            "the file as it stood"
+        );
+        let (_, baseline) =
+            compute_resume_block_hashes(&root, None, "absent.bin", None, Some(0o100600), 1024)
+                .await
+                .unwrap();
+        assert_eq!(
+            baseline,
+            crate::remote::transfer::sink::ResumeBaseline::WholeOf(None),
+            "nothing"
+        );
     }
 
     /// cr-ecm29-4: the checksum comparison's open of a destination does not
@@ -11404,7 +11445,6 @@ mod own_incomplete_copy_tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_fifo_put_in_a_hashed_files_place_does_not_hold_the_hashing() {
-        use crate::remote::transfer::sink::ResumeBaseline;
         use std::os::unix::fs::PermissionsExt as _;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
@@ -11439,7 +11479,7 @@ mod own_incomplete_copy_tests {
         };
         let (hashes, baseline) = hashed.unwrap();
         assert!(hashes.is_empty());
-        assert_eq!(baseline, ResumeBaseline::Whole);
+        assert!(baseline.is_whole(), "{baseline:?}");
     }
 
     /// cr-ecm24-4: a destination this run cannot read is sent whole and the
@@ -11449,7 +11489,6 @@ mod own_incomplete_copy_tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_destination_this_run_cannot_read_is_sent_whole() {
-        use crate::remote::transfer::sink::ResumeBaseline;
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
@@ -11466,7 +11505,7 @@ mod own_incomplete_copy_tests {
                     .await
                     .unwrap_or_else(|error| panic!("{name}: {error:#}"));
             assert!(hashes.is_empty(), "{name}");
-            assert_eq!(baseline, ResumeBaseline::Whole, "{name}");
+            assert!(baseline.is_whole(), "{name}: {baseline:?}");
         }
     }
 
@@ -11476,7 +11515,6 @@ mod own_incomplete_copy_tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_wire_resume_reuses_only_a_file_this_run_owns() {
-        use crate::remote::transfer::sink::ResumeBaseline;
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
@@ -11501,7 +11539,7 @@ mod own_incomplete_copy_tests {
             .retain(|(path, _)| path != &at);
         let (hashes, baseline) = hashed.unwrap();
         assert!(hashes.is_empty(), "another's, to a run as root");
-        assert_eq!(baseline, ResumeBaseline::Whole);
+        assert!(baseline.is_whole(), "{baseline:?}");
     }
 
     /// cr-ecm23-5: a source's mode is known by the mode its header carries —
@@ -11732,7 +11770,7 @@ mod own_incomplete_copy_tests {
                 .await
                 .unwrap();
         assert!(hashes.is_empty(), "{} hashes", hashes.len());
-        assert_eq!(baseline, ResumeBaseline::Whole);
+        assert!(baseline.is_whole(), "{baseline:?}");
     }
 
     /// cr-uv8-1: and it reads only the file it SAW. Another file put at a
