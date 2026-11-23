@@ -9,6 +9,9 @@
 ## Evidence
 "The non-Unix path discards the new baseline, and local resume still opens an existing NTFS file for writing without checking its link count. Resuming one name can change another backup snapshot. Use handle-based identity and link-count checks on both paths and exercise them on Windows." (`crates/blit-core/src/remote/transfer/sink.rs`, `hold_partial` off Unix; `crates/blit-core/src/copy/file_copy/resume.rs`, the local acquisition off Unix.)
 
+## Restated
+`combined-r33` (Codex openreview, 2026-11-23) reviewed `714ed0b7..70efef8a` — the `combined-r32` fixes — with `guard_confirmed: true` restated it as cr-ecm32-4: "The receiver discards the comparison baseline on Windows. Blocks skipped because they matched the old file can therefore leave unrelated bytes in a replacement. Local resume also opens an NTFS destination for writing without checking its link count, so another backup name can change with it. Check file identity and link count through Windows handles, retain the validated handle for writes, and exercise both cases on Windows." Still blocked.
+
 ## What it needs (not done)
 - What cr-ecm29-3's record says: the link count through the opened handle (`GetFileInformationByHandle`, `nNumberOfLinks`) on both paths, a destination with more than one name not reused.
 - And off Unix, `hold_partial` honouring `ResumeBaseline::WholeOf { leaf, end }`: the file found there (its identity through the handle — volume serial and file index), or nothing, and nothing else replaced.

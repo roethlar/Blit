@@ -1,9 +1,9 @@
 # cr-ecm31-3: a partial the cleanup could not remove was left unmarked and unreported
 
 **Severity**: MEDIUM — a fresh partial whose first look at itself failed was left at no length, an empty file that could look finished. A partial whose readying failed and whose removal then failed (its directory barred, say) was left without a word: the error named only the preparation, and lookup and unlink errors were dropped.
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r33` (Codex openreview, 2026-11-23) reviewed `714ed0b7..70efef8a` — the `combined-r32` fixes — with `guard_confirmed: true`: "The change correctly retains a destination version after a hash read fails, marks a stranded Unix partial through its own handle, and keeps old inodes alive during identity tests." "In a focused eight-byte resume, a failed first metadata read left a correctly marked nine-byte partial. The failure message named it, but the summary's `left_in_place` list was empty. Propagate the retained-file status into the path set consumed by job records and retries." The remaining work is cr-ecm32-5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm31-3`)
+**Commit**: `89ca4eaa`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r32` over `93ecf7b2..714ed0b7` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r32.codex.md`. It completes cr-ecm30-8 (`f4b1249b`).
 
 ## Evidence

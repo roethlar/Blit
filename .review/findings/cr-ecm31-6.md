@@ -1,9 +1,9 @@
 # cr-ecm31-6: the release note did not state the accepted limits, and a fresh-inode guard could be fooled
 
 **Severity**: MEDIUM — the `--resume` entry of `CHANGELOG.md` did not state the two limits the owner accepted (D-2026-11-23-1, D-2026-11-23-2); and guards that a fresh partial has a new inode compared numbers with the old file released, which a filesystem may hand straight back (ext4)
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r33` (Codex openreview, 2026-11-23) reviewed `714ed0b7..70efef8a` — the `combined-r32` fixes — with `guard_confirmed: true`: "The change correctly retains a destination version after a hash read fails, marks a stranded Unix partial through its own handle, and keeps old inodes alive during identity tests."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm31-6`)
+**Commit**: `0394a283`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r32` over `93ecf7b2..714ed0b7` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r32.codex.md`. It completes cr-ecm30-8 (`f4b1249b`).
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-ecm31-2: the comparison's look followed links, and a file simply gone was taken for a conflict
 
 **Severity**: HIGH — the wire's comparison looked at a destination through its links. A link to nothing, put at a name found empty, passed the hold's check for nothing, and the partial was made where the link pointed: another name in the destination. And a file found, then simply gone, was taken for a conflict, so the copy of its replacement failed.
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r33` (Codex openreview, 2026-11-23) reviewed `714ed0b7..70efef8a` — the `combined-r32` fixes — with `guard_confirmed: true`: "The change correctly retains a destination version after a hash read fails, marks a stranded Unix partial through its own handle, and keeps old inodes alive during identity tests." "I confirmed that an `ENOTDIR` while following a successfully observed symlink discards the leaf observation and returns `Whole`. The receiver can then replace whatever arrives before the first block. I also confirmed that redirecting an intermediate symlink between two different empty names produces identical baselines, allowing creation at the new name. Carry the resolved parent identity and final name, distinguish a failed lookup from observed absence, and fail that file when the comparison cannot justify the write." The remaining work is cr-ecm32-1
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm31-2`)
+**Commit**: `31eac5d2`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r32` over `93ecf7b2..714ed0b7` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r32.codex.md`. It completes cr-ecm30-1 (`125231cb`).
 
 ## Evidence
