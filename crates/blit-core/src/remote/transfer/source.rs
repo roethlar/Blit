@@ -740,8 +740,10 @@ fn spawn_manifest_task(
 }
 
 /// The scan's per-file readability probe: can the file be opened at all?
+/// cr-ecm32-3: without waiting, and only a regular file — a FIFO put in a
+/// file's place held the scan, waiting for a writer.
 fn open_for_scan(path: &Path) -> std::io::Result<()> {
-    std::fs::File::open(path).map(drop)
+    crate::copy::open_regular(path).map(drop)
 }
 
 /// cr-uv8-1: the moment between a move's walk looking at a file with
@@ -2340,5 +2342,37 @@ mod raw_name_filter_tests {
             kept(&["dir/?.txt"], headers()).await,
             ["\u{fffd}.txt", "a.txt", "abc.txt"]
         );
+    }
+}
+
+/// cr-ecm32-3: the scan's probe does not wait on a FIFO put in a file's
+/// place: it is refused at once. Opened as any file is, it waited for a
+/// writer, and the scan with it.
+#[cfg(all(test, unix))]
+mod fifo_scan_tests {
+    use super::*;
+
+    #[test]
+    fn the_scans_probe_does_not_wait_on_a_fifo() {
+        let fifo = |at: &std::path::Path| {
+            let name = std::ffi::CString::new(at.as_os_str().as_encoded_bytes()).unwrap();
+            // SAFETY: `name` is a NUL-terminated path that outlives the call.
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join("pipe.bin");
+        fifo(&at);
+        let (done, waited) = std::sync::mpsc::channel();
+        {
+            let at = at.clone();
+            std::thread::spawn(move || {
+                let _ = done.send(open_for_scan(&at).is_err());
+            });
+        }
+        let Ok(refused) = waited.recv_timeout(std::time::Duration::from_secs(20)) else {
+            let _ = std::fs::OpenOptions::new().write(true).open(&at);
+            panic!("the scan's probe waited on the FIFO");
+        };
+        assert!(refused, "a FIFO is no file to send");
     }
 }

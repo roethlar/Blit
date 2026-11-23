@@ -194,23 +194,8 @@ pub fn hash_reader(reader: &mut dyn Read, ty: ChecksumType) -> Result<Vec<u8>> {
 /// writer, and the comparison with it: the local `--checksum` copy's, the
 /// wire's, `check`'s. One opener for every comparison that hashes a file.
 pub(crate) fn open_regular_file(path: &Path) -> Result<File> {
-    let mut open = std::fs::OpenOptions::new();
-    open.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        open.custom_flags(libc::O_NONBLOCK);
-    }
-    let file = open
-        .open(path)
-        .with_context(|| format!("open {}", path.display()))?;
-    let found = file
-        .metadata()
-        .with_context(|| format!("looking at {}", path.display()))?;
-    if !found.is_file() {
-        eyre::bail!("{} is not a regular file", path.display());
-    }
-    Ok(file)
+    // cr-ecm32-3: the opener every source a transfer reads goes through.
+    crate::copy::open_regular(path).with_context(|| format!("open {}", path.display()))
 }
 
 /// Hash a whole file with the given algorithm — opened through

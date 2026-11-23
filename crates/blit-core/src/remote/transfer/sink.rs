@@ -3529,7 +3529,9 @@ fn copy_resolved_file_payload(
         return Ok(SinkOutcome::written(1, 0));
     }
 
-    let mut src_file = std::fs::File::open(src).map_err(|e| eyre!("source: cannot open: {e}"))?;
+    // cr-ecm32-3: without waiting, and only a regular file.
+    let mut src_file =
+        crate::copy::open_regular(src).map_err(|e| eyre!("source: cannot open: {e}"))?;
     let src_meta = src_file
         .metadata()
         .map_err(|e| eyre!("source: cannot stat: {e}"))?;
@@ -8849,6 +8851,46 @@ mod cr_win_1_tests {
             .unwrap();
         assert!(outcome.file_failed("late.bin"), "{outcome:?}");
         assert_eq!(std::fs::read(&late).unwrap(), b"theirs");
+    }
+
+    /// cr-ecm32-3: a local copy whose source is a FIFO — put in a file's
+    /// place after the scan, no one writing it — does not wait on it: the
+    /// file fails. Opened as any file is, it waited for a writer, and the
+    /// copy with it.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_a_local_source_does_not_hold_the_copy() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        let at = src.join("pipe.bin");
+        let name = std::ffi::CString::new(at.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `name` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+        let (done, waited) = std::sync::mpsc::channel();
+        {
+            let (src, dst) = (src.clone(), dst.clone());
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let failed = runtime.block_on(async {
+                    let sink = FsTransferSink::new(src, dst, FsSinkConfig::default());
+                    sink.write_payload(PreparedPayload::File(make_file_header("pipe.bin", 0)))
+                        .await
+                        .map(|outcome| outcome.files_failed_total)
+                });
+                let _ = done.send(failed.map_err(|error| format!("{error:#}")));
+            });
+        }
+        let Ok(failed) = waited.recv_timeout(std::time::Duration::from_secs(20)) else {
+            let _ = std::fs::OpenOptions::new().write(true).open(&at);
+            panic!("the copy waited on the FIFO");
+        };
+        assert_eq!(failed, Ok(1), "the file fails");
     }
 
     /// cr-ecm32-2: a local copy's cleanup is armed for the file it opened

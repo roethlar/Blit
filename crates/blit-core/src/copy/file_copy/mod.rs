@@ -236,6 +236,37 @@ impl<R: std::io::Read> std::io::Read for SourceRead<R> {
     }
 }
 
+/// cr-ecm32-3: `path` opened to be read without waiting — a FIFO there,
+/// with no one writing it, opens at once instead of waiting for a writer.
+/// What was opened is the caller's to check; see [`open_regular`].
+pub fn open_to_read(path: &Path) -> std::io::Result<File> {
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        open.custom_flags(libc::O_NONBLOCK);
+    }
+    open.open(path)
+}
+
+/// cr-ecm32-3: `path` opened to be read — without waiting ([`open_to_read`])
+/// — and kept only if what was opened is a regular file: a FIFO, or a
+/// device, is no file to send or hash. The one opener for a source a
+/// transfer reads: the scan's probe, the local copy's, the tar packer's,
+/// the checksum's. Opened as any file is, a FIFO waited for a writer, and
+/// the transfer with it; a device was read as a file.
+pub fn open_regular(path: &Path) -> std::io::Result<File> {
+    let file = open_to_read(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    Ok(file)
+}
+
 /// cr-ecm31-4: `dst` made, or opened, to be written from its start —
 /// without waiting: a FIFO at the name that no one reads is refused at once
 /// — and kept only if what was opened is a regular file: a FIFO with a
@@ -504,6 +535,39 @@ mod mode_tests {
     //! carry bytes and nothing else.
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// cr-ecm32-3: a source opened to be read does not wait on a FIFO and is
+    /// a regular file, or it is refused: a FIFO no one writes, and a device.
+    /// Opened as any file is, the FIFO waited for a writer; the device was
+    /// read as a file.
+    #[test]
+    fn a_source_opened_to_be_read_is_a_regular_file_had_without_waiting() {
+        let fifo = |at: &std::path::Path| {
+            let name = std::ffi::CString::new(at.as_os_str().as_encoded_bytes()).unwrap();
+            // SAFETY: `name` is a NUL-terminated path that outlives the call.
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join("pipe.bin");
+        fifo(&at);
+        let (done, waited) = std::sync::mpsc::channel();
+        {
+            let at = at.clone();
+            std::thread::spawn(move || {
+                let _ = done.send(open_regular(&at).is_err());
+            });
+        }
+        let Ok(refused) = waited.recv_timeout(std::time::Duration::from_secs(20)) else {
+            // A writer lets the waiting open go, so the test can end.
+            let _ = std::fs::OpenOptions::new().write(true).open(&at);
+            panic!("the open waited on the FIFO");
+        };
+        assert!(refused, "a FIFO is no file to read");
+        assert!(
+            open_regular(std::path::Path::new("/dev/null")).is_err(),
+            "a device is no file to read"
+        );
+    }
 
     /// cr-ecm32-2: a file opened to be written is checked before it is cut:
     /// a check that fails leaves what stood there whole; one that passes

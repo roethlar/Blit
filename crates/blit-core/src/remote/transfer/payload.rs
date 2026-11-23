@@ -451,18 +451,26 @@ impl MemberOpenError {
 /// The production member opener: `File::open` + `metadata().len()` on
 /// that handle, the handle as the reader; each stage's failure keeps its
 /// identity (cr-fix1-2).
+///
+/// cr-ecm32-3: opened without waiting, and a member only if it is a regular
+/// file: a FIFO no one writes held the packer, waiting for a writer, and a
+/// device (`/dev/null`) was packed as a file.
 pub fn open_member_from_fs(path: &Path) -> Result<OpenedMember, MemberOpenError> {
-    let file = std::fs::File::open(path).map_err(|error| MemberOpenError {
+    let file = crate::copy::open_to_read(path).map_err(|error| MemberOpenError {
         stage: MemberOpenStage::Open,
         error,
     })?;
-    let len = file
-        .metadata()
-        .map_err(|error| MemberOpenError {
-            stage: MemberOpenStage::Stat,
-            error,
-        })?
-        .len();
+    let found = file.metadata().map_err(|error| MemberOpenError {
+        stage: MemberOpenStage::Stat,
+        error,
+    })?;
+    if !found.is_file() {
+        return Err(MemberOpenError {
+            stage: MemberOpenStage::Open,
+            error: std::io::Error::other(format!("{} is not a regular file", path.display())),
+        });
+    }
+    let len = found.len();
     Ok(OpenedMember {
         len,
         reader: Box::new(file),
@@ -583,4 +591,40 @@ pub fn build_tar_shard_with(
 /// single file) whose size no longer matches its manifest header.
 pub fn changed_size_reason(manifest: u64, now: u64) -> String {
     format!("source: changed size during transfer (manifest {manifest} bytes, now {now})")
+}
+
+/// cr-ecm32-3: the tar packer's member opener does not wait on a FIFO and
+/// takes no device for a file: each is refused, the member's failure.
+/// Opened as any file is, the FIFO held the packer; `/dev/null` was packed.
+#[cfg(all(test, unix))]
+mod member_open_tests {
+    use super::*;
+
+    #[test]
+    fn the_packer_takes_only_a_regular_file_without_waiting() {
+        let fifo = |at: &std::path::Path| {
+            let name = std::ffi::CString::new(at.as_os_str().as_encoded_bytes()).unwrap();
+            // SAFETY: `name` is a NUL-terminated path that outlives the call.
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join("pipe.bin");
+        fifo(&at);
+        let (done, waited) = std::sync::mpsc::channel();
+        {
+            let at = at.clone();
+            std::thread::spawn(move || {
+                let _ = done.send(open_member_from_fs(&at).is_err());
+            });
+        }
+        let Ok(refused) = waited.recv_timeout(std::time::Duration::from_secs(20)) else {
+            let _ = std::fs::OpenOptions::new().write(true).open(&at);
+            panic!("the packer waited on the FIFO");
+        };
+        assert!(refused, "a FIFO is no member");
+        assert!(
+            open_member_from_fs(Path::new("/dev/null")).is_err(),
+            "a device is no member"
+        );
+    }
 }
