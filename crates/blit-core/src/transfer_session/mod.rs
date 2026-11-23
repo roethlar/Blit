@@ -6719,6 +6719,23 @@ async fn compute_resume_block_hashes(
                 },
             ))
         };
+        // cr-ecm31-1: and where the hashing fails part-way, with the last
+        // trustworthy look at the file — the name itself, too, where that is
+        // the file and not a link to it. Sent as unknown, the hold looked for
+        // itself, and a file come to the name meanwhile was replaced.
+        let whole_at = |end: crate::moved::Version| {
+            let leaf = match leaf {
+                Some(was) if (was.device, was.inode) == (end.device, end.inode) => Some(end),
+                other => other,
+            };
+            Ok((
+                Vec::new(),
+                ResumeBaseline::WholeOf {
+                    leaf,
+                    end: Some(end),
+                },
+            ))
+        };
         // Re-stat inside the claim: a partial that vanished, stopped
         // being a regular file, or grew past the hash-count cap since
         // the diff yields the empty list — the full-transfer fallback
@@ -6794,7 +6811,7 @@ async fn compute_resume_block_hashes(
         // undo the decision.
         // cr-ecm27-2: and so does the first look at the file opened.
         let Ok(found) = hash_read_fault(&dst, usize::MAX - 1).and_then(|()| file.metadata()) else {
-            return whole();
+            return whole_of(Some(&seen));
         };
         // And asked again of the file opened, which the hashes are of.
         if !found.is_file() || !reusable(&found) {
@@ -6818,7 +6835,7 @@ async fn compute_resume_block_hashes(
                 let read = hash_read_fault(&dst, hashes.len())
                     .and_then(|()| bounded.read(&mut buf[filled..]));
                 let Ok(got) = read else {
-                    return whole();
+                    return whole_at(before);
                 };
                 if got == 0 {
                     break;
@@ -6833,7 +6850,7 @@ async fn compute_resume_block_hashes(
             // A file growing concurrently with this read could blow past
             // the stat-time cap check — degrade, don't overshoot.
             if hashes.len() as u64 > MAX_RESUME_BLOCK_HASHES {
-                return whole();
+                return whole_at(before);
             }
             if filled < block_size {
                 break;
@@ -6842,10 +6859,10 @@ async fn compute_resume_block_hashes(
         // cr-ecm26-3: the look after the hashes, failing, leaves them
         // unverified: the file comes whole. It ended the transfer.
         let Ok(after) = hash_read_fault(&dst, usize::MAX).and_then(|()| file.metadata()) else {
-            return whole();
+            return whole_at(before);
         };
         if crate::moved::Version::of(&after) != before {
-            return whole();
+            return whole_at(crate::moved::Version::of(&after));
         }
         Ok((hashes, ResumeBaseline::Hashed(before)))
     })
@@ -11297,6 +11314,43 @@ mod own_incomplete_copy_tests {
         let (hashes, baseline) = hashed.unwrap();
         assert!(hashes.is_empty(), "its unfinished hashes dropped");
         assert!(baseline.is_whole(), "{baseline:?}");
+    }
+
+    /// cr-ecm31-1: a hashing that fails part-way — a read on the second
+    /// block, or the look after the last — sends the file whole with what
+    /// it found, the file as it stood (the name itself being that file), for
+    /// the hold to replace that and nothing else. Sent as unknown, the hold
+    /// looked for itself, and a file come to the name meanwhile was
+    /// replaced.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hashing_that_fails_part_way_keeps_what_it_found() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        for (name, block) in [("read.bin", 1), ("after.bin", usize::MAX)] {
+            let at = root.join(name);
+            std::fs::write(&at, vec![3u8; 5000]).unwrap();
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let found = crate::moved::Version::of(&std::fs::metadata(&at).unwrap());
+            HASH_READ_FAULTS.lock().unwrap().push((at.clone(), block));
+            let hashed =
+                compute_resume_block_hashes(&root, None, name, None, Some(0o100600), 1024).await;
+            HASH_READ_FAULTS
+                .lock()
+                .unwrap()
+                .retain(|(path, _)| path != &at);
+            let (hashes, baseline) = hashed.unwrap();
+            assert!(hashes.is_empty(), "{name}");
+            assert_eq!(
+                baseline,
+                crate::remote::transfer::sink::ResumeBaseline::WholeOf {
+                    leaf: Some(found),
+                    end: Some(found),
+                },
+                "{name}: what it found"
+            );
+        }
     }
 
     /// cr-ecm26-3: the look after a destination's hashes, failing, sends the
