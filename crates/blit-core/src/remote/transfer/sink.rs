@@ -3427,6 +3427,10 @@ struct PartialTarget<'a> {
     /// cr-ecm19-1: the file a resume HAS, for its failure to be marked
     /// through — not whatever stands at the name by then.
     held: Option<std::fs::File>,
+    /// cr-ecm33-1: the write's open followed a link standing at the name,
+    /// as an ordinary copy's does: the name may be a link that leads to
+    /// `made`. An exclusive creation's never does.
+    follows: bool,
 }
 
 impl<'a> PartialTarget<'a> {
@@ -3437,6 +3441,7 @@ impl<'a> PartialTarget<'a> {
             armed: None,
             made: None,
             held: None,
+            follows: false,
         }
     }
 
@@ -3467,11 +3472,28 @@ impl<'a> PartialTarget<'a> {
         self.armed = Some(OnFailure::Remove);
     }
 
+    /// cr-ecm33-1: armed to remove on failure the file an ordinary copy
+    /// opened — through a link at the name, it may be — and that file and
+    /// no other.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn arm_opened(&mut self, opened: &std::fs::File) {
+        self.arm_made(opened);
+        self.follows = true;
+    }
+
     /// The file this write made no longer stands at its name: what does
-    /// is not this write's to touch.
+    /// is not this write's to touch. cr-ecm33-1: for a write whose open
+    /// followed a link, the name may be a link that leads to it.
     fn no_longer_its_own(&self) -> bool {
-        self.made
-            .is_some_and(|made| identity_at(self.dst) != Some(made))
+        self.made.is_some_and(|made| {
+            identity_at(self.dst) != Some(made)
+                && !(self.follows
+                    && std::fs::metadata(self.dst)
+                        .ok()
+                        .as_ref()
+                        .and_then(file_identity)
+                        == Some(made))
+        })
     }
 
     fn disarm(&mut self) {
@@ -3738,8 +3760,9 @@ fn copy_and_stamp_opened(
             let target = crate::copy::create_regular(dst).map_err(eyre::Report::new)?;
             // cr-ssc4-2: from here until the validated success, any exit
             // removes what was opened — and only while it stands at the
-            // name — so nothing partial can pass for a finished copy.
-            partial.arm_made(&target);
+            // name, or a link there leads to it — so nothing partial can
+            // pass for a finished copy.
+            partial.arm_opened(&target);
             crate::copy::copy_opened_into(src_file, &target, header.size, &sizer)?;
             opened = Some(target);
         }
@@ -3814,8 +3837,14 @@ fn copy_and_stamp_opened(
     // cr-ecm15-1: what was written is delivered only if it is what stands
     // at the name. Another file put there while this one was being
     // written is kept, and this file did not land.
+    // cr-ecm33-1: said as what it is: in a run that keeps what exists, the
+    // name taken; in any other, a file put there while this one was written.
     if partial.no_longer_its_own() {
-        return Err(eyre!(THE_NAME_IS_TAKEN));
+        return Err(eyre!(if config.ignore_existing {
+            THE_NAME_IS_TAKEN
+        } else {
+            REPLACED_WHILE_WRITTEN
+        }));
     }
     // cr-ecm20-4: and a resume is delivered only while what it wrote is
     // what the name holds, or a link there leads to it: a file renamed over
@@ -8977,6 +9006,32 @@ mod cr_win_1_tests {
             panic!("the copy waited on the FIFO");
         };
         assert_eq!(failed, Ok(1), "the file fails");
+    }
+
+    /// cr-ecm33-1: an ordinary local copy through a link standing at its
+    /// destination — to a file in the destination — lands in the file the
+    /// link names, keeps the link, and is delivered. Its completion asked
+    /// the name itself, found the link, and refused the copy as if the name
+    /// were taken (`--ignore-existing`'s words, the option off).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[tokio::test]
+    async fn an_ordinary_copy_through_a_destination_link_is_delivered() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("link.bin"), b"new bytes").unwrap();
+        std::fs::write(dst.join("real.bin"), b"old").unwrap();
+        std::os::unix::fs::symlink("real.bin", dst.join("link.bin")).unwrap();
+        let sink = FsTransferSink::new(src.clone(), dst.clone(), FsSinkConfig::default());
+        let outcome = sink
+            .write_payload(PreparedPayload::File(make_file_header("link.bin", 9)))
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_failed_total, 0, "{outcome:?}");
+        assert!(dst.join("link.bin").is_symlink(), "the link kept");
+        assert_eq!(std::fs::read(dst.join("real.bin")).unwrap(), b"new bytes");
     }
 
     /// cr-ecm32-2: a local copy's cleanup is armed for the file it opened
