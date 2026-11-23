@@ -12,6 +12,8 @@
 ## Restated
 `combined-r31` (Codex openreview, 2026-11-22) reviewed `fd603571..93ecf7b2` — the six `combined-r30` fixes — with `guard_confirmed: true` restated it within cr-ecm30-6: "On Windows, the previously admitted NTFS hard-link issue remains open. Local and wire resume need a handle-based link-count check before patching." It stays blocked: `10.1.10.77` timed out, `.222` and `.173` had no route (2026-11-22).
 
+`combined-r32` (Codex openreview, 2026-11-23) reviewed `93ecf7b2..714ed0b7` — the `combined-r31` round, the in-place rework of D-2026-11-23-1 among it — with `guard_confirmed: true` restated it as cr-ecm31-5: "The non-Unix path discards the new baseline, and local resume still opens an existing NTFS file for writing without checking its link count. Resuming one name can change another backup snapshot. Use handle-based identity and link-count checks on both paths and exercise them on Windows." Still blocked.
+
 ## What it needs (not done)
 - Off Unix (Windows), read the link count through the opened handle (`GetFileInformationByHandle`, `nNumberOfLinks`) in both places, and treat a destination with more than one name as not reusable: the wire hashes nothing for it, and the local resume makes it a fresh partial.
 - Guards that run on Windows: a hard-linked destination (`std::fs::hard_link`) resumed locally and over the wire leaves the other name's bytes as they were.

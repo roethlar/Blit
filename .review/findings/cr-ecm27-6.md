@@ -1,7 +1,7 @@
 # cr-ecm27-6: on macOS a volume with no second names fails a resume where nothing stood
 
 **Severity**: MEDIUM — where nothing stood at the name, a resume on a macOS volume that refuses hard links fails, though the volume may support `renameatx_np(RENAME_EXCL)`
-**Status**: Resolved by cr-ecm30-8 (`f4b1249b`, D-2026-11-23-1), awaiting review — macOS checked by cross-clippy only, never run
+**Status**: Verified on Unix — `combined-r32` (Codex openreview, 2026-11-23) reviewed `93ecf7b2..714ed0b7` — the `combined-r31` round, the in-place rework of D-2026-11-23-1 among it — with `guard_confirmed: true`: "The Unix implementation removes the staging directory and the dependency on atomic exchange. Creating the partial directly also preserves the destination directory's group inheritance. I would keep that design and the shared nonblocking checksum opener." (macOS by cross-clippy only, the reviewer's own and the agent's; never run on a Mac)
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: —
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r28` over `e025a3e2..10145127` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r28.codex.md`. It is the macOS half of cr-ecm26-1 (`7615d648`) and cr-ecm27-1.

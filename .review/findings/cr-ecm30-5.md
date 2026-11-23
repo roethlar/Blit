@@ -1,7 +1,7 @@
 # cr-ecm30-5: the local checksum comparison's open could wait on a FIFO
 
 **Severity**: HIGH — a local `--checksum` copy compares a same-size destination again in the sink through `checksum::hash_file`, which opened it with a blocking `File::open`; a FIFO put there after the metadata check held the copy indefinitely
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r32` (Codex openreview, 2026-11-23) reviewed `93ecf7b2..714ed0b7` — the `combined-r31` round, the in-place rework of D-2026-11-23-1 among it — with `guard_confirmed: true`: "The Unix implementation removes the staging directory and the dependency on atomic exchange. Creating the partial directly also preserves the destination directory's group inheritance. I would keep that design and the shared nonblocking checksum opener." "The manifest checksum still opens its filesystem source through a blocking open. A local copy can also reach a blocking writable probe when its destination is a FIFO. Either can stall the transfer indefinitely. Check for a regular file at the actual nonblocking opens and carry the verified handle forward." The remaining work is cr-ecm31-4
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: this commit (`Fix cr-ecm30-5`)
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r31` over `fd603571..93ecf7b2` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r31.codex.md`. It completes cr-ecm29-4 (`0971c1f9`).

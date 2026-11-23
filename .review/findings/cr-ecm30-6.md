@@ -1,7 +1,7 @@
 # cr-ecm30-6: macOS refuses every replacement, which the Unix CLI test expects to succeed; Windows still patches a hard-linked destination
 
 **Severity**: HIGH
-**Status**: macOS's half resolved by cr-ecm30-8 (`f4b1249b`), awaiting review; Windows's half NOT FIXED — blocked (it is cr-ecm29-3: no Windows host)
+**Status**: macOS's half verified by cross-clippy — `combined-r32` (Codex openreview, 2026-11-23) reviewed `93ecf7b2..714ed0b7` — the `combined-r31` round, the in-place rework of D-2026-11-23-1 among it — with `guard_confirmed: true`: "The Unix implementation removes the staging directory and the dependency on atomic exchange. Creating the partial directly also preserves the destination directory's group inheritance. I would keep that design and the shared nonblocking checksum opener."; Windows's half NOT FIXED — blocked, restated as cr-ecm31-5 (cr-ecm29-3: no Windows host)
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: `f4b1249b` (cr-ecm30-8), macOS's half
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r31` (Codex openreview over `fd603571..93ecf7b2`, 2026-11-22) (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r31.codex.md`.

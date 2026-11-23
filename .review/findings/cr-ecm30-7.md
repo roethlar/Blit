@@ -1,7 +1,7 @@
 # cr-ecm30-7: macOS strict Clippy fails: the `Replacing` variants and the `wider_destination` helper are unused there
 
 **Severity**: MEDIUM
-**Status**: Resolved by cr-ecm30-8, awaiting review
+**Status**: Verified on Unix — `combined-r32` (Codex openreview, 2026-11-23) reviewed `93ecf7b2..714ed0b7` — the `combined-r31` round, the in-place rework of D-2026-11-23-1 among it — with `guard_confirmed: true`: "The Unix implementation removes the staging directory and the dependency on atomic exchange. Creating the partial directly also preserves the destination directory's group inheritance. I would keep that design and the shared nonblocking checksum opener." (macOS by cross-clippy only, the reviewer's own and the agent's; never run on a Mac)
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: `f4b1249b` (cr-ecm30-8)
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r31` (Codex openreview over `fd603571..93ecf7b2`, 2026-11-22) (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r31.codex.md`.
