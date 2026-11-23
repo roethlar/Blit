@@ -381,6 +381,24 @@ fn after_a_destination_is_looked_at(_dst: &Path) {
     }
 }
 
+/// Test seam (cr-ecm31-3): a fresh partial's first look at itself refused
+/// (`EIO`), by path. Production never sets it.
+#[cfg(all(test, unix))]
+pub(crate) static FRESH_LOOK_FAULTS: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn fresh_look_fault(_dst: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FRESH_LOOK_FAULTS
+        .lock()
+        .is_ok_and(|faults| faults.iter().any(|at| at == _dst))
+    {
+        return Err(std::io::Error::from_raw_os_error(libc::EIO));
+    }
+    Ok(())
+}
+
 /// Test seam (cr-ecm26-4): a read-only partial's writable reopen refused,
 /// by path — a process out of descriptors (`EMFILE`). Production never
 /// sets it.
@@ -759,26 +777,45 @@ impl Resolved {
                     .with_context(|| format!("making a fresh partial for {}", dst.display()))
             }
         };
-        // Which file it is, so that a failure removes it and nothing else.
-        let mine = match file.metadata() {
-            Ok(found) => (found.dev(), found.ino()),
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "looking at the fresh partial at {}: it is left there, unfinished",
-                        dst.display()
-                    )
-                })
+        // cr-ecm31-3: a partial that cannot be removed is left marked
+        // unfinished — its length past its source's, set through what holds
+        // it — so that nothing there looks finished, and the error says where
+        // and why. Left at no length, or its removal's failure dropped, it
+        // stood there as an empty file, or as the copy's own, unreported.
+        let left = |why: String| -> String {
+            match file.set_len(unfinished) {
+                Ok(()) => format!(
+                    "the fresh partial is left at {}, marked unfinished: {why}",
+                    dst.display()
+                ),
+                Err(unmarked) => format!(
+                    "the fresh partial is left at {}, and could not be marked unfinished ({unmarked}): {why}",
+                    dst.display()
+                ),
             }
         };
-        let unmade = || {
-            let ours = matches!(
-                entry_at(held, &self.name),
-                Ok(Some(there)) if there.identity == mine
-            );
-            if ours {
-                // SAFETY: as for the removal above.
-                unsafe { libc::unlinkat(held, self.name.as_ptr(), 0) };
+        // Which file it is, so that a failure removes it and nothing else.
+        let mine = match fresh_look_fault(dst).and_then(|()| file.metadata()) {
+            Ok(found) => (found.dev(), found.ino()),
+            Err(error) => {
+                let said = left(format!("looking at it failed: {error}"));
+                return Err(error).context(said);
+            }
+        };
+        let unmade = || -> Option<String> {
+            match entry_at(held, &self.name) {
+                Ok(Some(there)) if there.identity == mine => {
+                    // SAFETY: as for the removal above.
+                    if unsafe { libc::unlinkat(held, self.name.as_ptr(), 0) } == 0 {
+                        return None;
+                    }
+                    let error = std::io::Error::last_os_error();
+                    Some(left(format!("removing it failed: {error}")))
+                }
+                // Something else has the name now: nothing of this run's is
+                // there to remove.
+                Ok(_) => None,
+                Err(error) => Some(left(format!("looking at the name failed: {error}"))),
             }
         };
         let prepared = file
@@ -789,11 +826,14 @@ impl Resolved {
         match prepared {
             Ok(readied) => Ok((file, readied)),
             Err(error) => {
-                unmade();
-                Err(error.wrap_err(format!(
+                let error = error.wrap_err(format!(
                     "making a fresh partial ready for {}",
                     dst.display()
-                )))
+                ));
+                Err(match unmade() {
+                    None => error,
+                    Some(left) => error.wrap_err(left),
+                })
             }
         }
     }
@@ -1573,6 +1613,57 @@ mod tests {
         let mut kept = data[..1000].to_vec();
         kept.push(b'!');
         assert_eq!(std::fs::read(&dst)?, kept, "left as it is");
+        Ok(())
+    }
+
+    /// cr-ecm31-3: a fresh partial that cannot be made ready, and then cannot
+    /// be removed — its directory barred meanwhile — is left marked
+    /// unfinished, and the error says where and why; and one whose first
+    /// look at itself fails is left marked unfinished too. Left with the
+    /// error naming only its preparation, its cleanup's failure was dropped;
+    /// left at no length, it stood there as an empty file.
+    #[cfg(unix)]
+    #[test]
+    fn a_fresh_partial_its_cleanup_cannot_remove_is_left_marked_and_said() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        struct Reopened(std::path::PathBuf);
+        impl Drop for Reopened {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        let tmp = tempdir()?;
+        let (_, dst, _) = wider_destination(tmp.path())?;
+        let folder = dst.parent().unwrap().to_path_buf();
+        let _reopened = Reopened(folder.clone());
+        let made = fresh_partial_ready(&dst, 9, None, |_| -> Result<()> {
+            std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555))?;
+            eyre::bail!("refused")
+        });
+        let barred = std::fs::write(folder.join("probe"), b"").is_err();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755))?;
+        let error = made.expect_err("not made ready");
+        if barred {
+            let said = format!("{error:#}");
+            assert!(
+                said.contains(&format!("left at {}", dst.display())),
+                "{said}"
+            );
+            assert_eq!(std::fs::metadata(&dst)?.len(), 9, "marked unfinished");
+        } else {
+            eprintln!("SKIPPED the barred half: this process is not barred by a directory's mode");
+        }
+
+        let looked = tmp.path().join("looked");
+        FRESH_LOOK_FAULTS.lock().unwrap().push(looked.clone());
+        let made = fresh_partial_ready(&looked, 9, None, |_| Ok(()));
+        FRESH_LOOK_FAULTS.lock().unwrap().retain(|at| at != &looked);
+        let error = made.expect_err("its look refused");
+        assert!(
+            format!("{error:#}").contains("marked unfinished"),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::metadata(&looked)?.len(), 9, "marked unfinished");
         Ok(())
     }
 
