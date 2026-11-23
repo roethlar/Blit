@@ -2801,17 +2801,24 @@ pub enum ResumeBaseline {
     Hashed(crate::moved::Version),
     /// Nothing was hashed: every block is sent, into a fresh partial.
     Whole,
-    /// cr-ecm30-1: nothing was hashed, and this is what was found at the
-    /// name when that was decided — the file as it stood, or nothing: the
-    /// fresh partial replaces that and nothing else. Anything else there by
-    /// the first block is left as it is, and the file fails.
-    WholeOf(Option<crate::moved::Version>),
+    /// cr-ecm30-1, cr-ecm31-2: nothing was hashed, and this is what was
+    /// found when that was decided: `leaf`, the entry at the name itself —
+    /// never through a link — and `end`, the file the name leads to (a
+    /// link's chain followed), each as it stood, or nothing. The fresh
+    /// partial replaces that and nothing else: anything else come to the
+    /// name, or to its end, by the first block is left as it is, and the
+    /// file fails. What was found and has simply gone leaves the name to the
+    /// partial, made only while nothing has it.
+    WholeOf {
+        leaf: Option<crate::moved::Version>,
+        end: Option<crate::moved::Version>,
+    },
 }
 
 impl ResumeBaseline {
     /// Whether nothing was hashed: every block comes.
     pub fn is_whole(&self) -> bool {
-        matches!(self, Self::Whole | Self::WholeOf(_))
+        matches!(self, Self::Whole | Self::WholeOf { .. })
     }
 }
 
@@ -2837,8 +2844,8 @@ fn hold_partial(
     #[cfg(unix)]
     match baseline {
         Some(ResumeBaseline::Whole) => return hold_whole(dst, total_size, within, None),
-        Some(ResumeBaseline::WholeOf(found)) => {
-            return hold_whole(dst, total_size, within, Some(found))
+        Some(ResumeBaseline::WholeOf { leaf, end }) => {
+            return hold_whole(dst, total_size, within, Some((leaf, end)))
         }
         Some(ResumeBaseline::Hashed(version)) => return hold_hashed(dst, total_size, &version),
         None => {}
@@ -2872,7 +2879,7 @@ fn hold_whole(
     dst: &Path,
     total_size: u64,
     within: Option<&Path>,
-    compared: Option<Option<crate::moved::Version>>,
+    compared: Option<(Option<crate::moved::Version>, Option<crate::moved::Version>)>,
 ) -> Result<Option<HeldPartial>> {
     // cr-ecm21-3, D-2026-11-23-1: something there — a file, or a link to
     // one — is replaced by a fresh private partial made in place: what
@@ -2886,28 +2893,56 @@ fn hold_whole(
     // cr-ecm25-2: and where NOTHING stands, the same, made only while
     // nothing has the name, in the directory held (cr-ecm24-1): a folder
     // replaced on its way cannot move where it is made.
+    let conflict = || {
+        eyre::eyre!(
+            "something else came to stand at {} after it was compared; it is left as it is",
+            dst.display()
+        )
+    };
+    // cr-ecm31-2: the name itself first, never through a link, as the
+    // comparison found it: a link put at a name found empty is not taken for
+    // nothing. Followed, its empty end passed for the empty name, and the
+    // partial was made where it pointed — another name.
+    if let Some((leaf, _)) = compared {
+        let now = match std::fs::symlink_metadata(dst) {
+            Ok(meta) => Some(crate::moved::Version::of(&meta)),
+            Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| format!("looking at {}", dst.display()))
+            }
+        };
+        let same = match (leaf, now) {
+            // The name empty: never anything there, or what was simply gone.
+            (_, None) => true,
+            (Some(was), Some(now)) => was == now,
+            (None, Some(_)) => false,
+        };
+        if !same {
+            return Err(conflict());
+        }
+    }
     let resolved = crate::copy::resolve_destination(dst, within)?;
     let ready = |file: &std::fs::File| HeldPartial::identity_of(file, dst);
     let unfinished = total_size.saturating_add(1);
     let seen = resolved
         .look()
         .with_context(|| format!("looking at {}", dst.display()))?;
-    // cr-ecm30-1: what was found at the name when the file was compared —
+    // cr-ecm30-1: and what the name leads to, as the comparison found it —
     // the file as it stood, or nothing — is what this hold may replace:
     // anything else there by now is left as it is, and the file fails.
     // Looked at only here, a file come there after the comparison was taken
-    // for what prompted it, and replaced.
-    if let Some(found) = compared {
-        let same = match (found, seen) {
-            (None, None) => true,
+    // for what prompted it, and replaced. cr-ecm31-2: gone, it leaves its
+    // place to the partial, made only while nothing has it. Taken for a
+    // conflict, a file simply gone failed the copy of its replacement.
+    if let Some((_, end)) = compared {
+        let same = match (end, seen) {
+            // Its end empty: never anything there, or what was simply gone.
+            (_, None) => true,
             (Some(version), Some(entry)) => entry.version == version,
-            _ => false,
+            (None, Some(_)) => false,
         };
         if !same {
-            eyre::bail!(
-                "something else came to stand at {} after it was compared; it is left as it is",
-                dst.display()
-            );
+            return Err(conflict());
         }
     }
     // cr-ecm27-3: a link at the name — come there since the chain was
@@ -8764,6 +8799,69 @@ mod cr_win_1_tests {
         assert_eq!(std::fs::read(&late).unwrap(), b"theirs");
     }
 
+    /// cr-ecm31-2: a wire resume sent whole where nothing was found leaves a
+    /// link come to the name since — one to nothing, in the destination —
+    /// as it is, and makes nothing where it points; and one whose file has
+    /// simply gone since makes its partial at the empty name. Followed, the
+    /// link's empty end passed for the empty name and the partial was made
+    /// at another name; gone, the file was taken for a conflict.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_wires_whole_resume_tells_an_empty_name_from_a_link_to_nothing() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let linked = dst.join("linked.bin");
+        std::os::unix::fs::symlink("elsewhere.bin", &linked).unwrap();
+        sink.note_resume_baseline(
+            "linked.bin",
+            ResumeBaseline::WholeOf {
+                leaf: None,
+                end: None,
+            },
+        );
+        sink.hold_resume_partial("linked.bin", 10).await.unwrap();
+        assert!(linked.is_symlink(), "the link is left as it is");
+        assert!(
+            !dst.join("elsewhere.bin").exists(),
+            "nothing made where it points"
+        );
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "linked.bin".to_string(),
+                total_size: 10,
+                mtime_seconds: 0,
+                permissions: 0o600,
+                windows_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert!(outcome.file_failed("linked.bin"), "{outcome:?}");
+
+        let gone = dst.join("gone.bin");
+        std::fs::write(&gone, b"0123456789").unwrap();
+        let found = crate::moved::Version::of(&std::fs::metadata(&gone).unwrap());
+        std::fs::remove_file(&gone).unwrap();
+        sink.note_resume_baseline(
+            "gone.bin",
+            ResumeBaseline::WholeOf {
+                leaf: Some(found),
+                end: Some(found),
+            },
+        );
+        sink.hold_resume_partial("gone.bin", 10).await.unwrap();
+        let made = std::fs::metadata(&gone).expect("a fresh partial at the empty name");
+        assert_eq!(made.len(), 11, "unfinished");
+    }
+
     /// cr-ecm30-1: a wire resume sent whole carries what decided it — the
     /// file found at the name, or nothing — and its hold replaces that and
     /// nothing else: a file come to the name after the comparison, in place
@@ -8789,10 +8887,22 @@ mod cr_win_1_tests {
         let compared = crate::moved::Version::of(&std::fs::metadata(&replaced).unwrap());
         std::fs::write(tmp.path().join("theirs"), b"theirs").unwrap();
         std::fs::rename(tmp.path().join("theirs"), &replaced).unwrap();
-        sink.note_resume_baseline("replaced.bin", ResumeBaseline::WholeOf(Some(compared)));
+        sink.note_resume_baseline(
+            "replaced.bin",
+            ResumeBaseline::WholeOf {
+                leaf: Some(compared),
+                end: Some(compared),
+            },
+        );
         let appeared = dst.join("appeared.bin");
         std::fs::write(&appeared, b"appeared").unwrap();
-        sink.note_resume_baseline("appeared.bin", ResumeBaseline::WholeOf(None));
+        sink.note_resume_baseline(
+            "appeared.bin",
+            ResumeBaseline::WholeOf {
+                leaf: None,
+                end: None,
+            },
+        );
         for (name, at, theirs) in [
             ("replaced.bin", &replaced, &b"theirs"[..]),
             ("appeared.bin", &appeared, &b"appeared"[..]),

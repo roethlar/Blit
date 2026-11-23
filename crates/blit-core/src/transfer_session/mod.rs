@@ -6701,11 +6701,22 @@ async fn compute_resume_block_hashes(
         let whole = || Ok((Vec::new(), ResumeBaseline::Whole));
         // cr-ecm30-1: and where a look decided it, what that found — the
         // file as it stood, or nothing — goes with it, for the hold to
-        // replace that and nothing else.
+        // replace that and nothing else. cr-ecm31-2: with the name itself as
+        // it stood, never through a link: what the name leads to is found by
+        // following, and a link to nothing put at a name found empty would
+        // pass for nothing.
+        let leaf = match std::fs::symlink_metadata(&dst) {
+            Ok(meta) => Some(crate::moved::Version::of(&meta)),
+            Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return whole(),
+        };
         let whole_of = |found: Option<&std::fs::Metadata>| {
             Ok((
                 Vec::new(),
-                ResumeBaseline::WholeOf(found.map(crate::moved::Version::of)),
+                ResumeBaseline::WholeOf {
+                    leaf,
+                    end: found.map(crate::moved::Version::of),
+                },
             ))
         };
         // Re-stat inside the claim: a partial that vanished, stopped
@@ -11392,11 +11403,13 @@ mod own_incomplete_copy_tests {
             compute_resume_block_hashes(&root, None, "wide.bin", None, Some(0o100600), 1024)
                 .await
                 .unwrap();
+        let found = crate::moved::Version::of(&std::fs::metadata(&at).unwrap());
         assert_eq!(
             baseline,
-            crate::remote::transfer::sink::ResumeBaseline::WholeOf(Some(
-                crate::moved::Version::of(&std::fs::metadata(&at).unwrap())
-            )),
+            crate::remote::transfer::sink::ResumeBaseline::WholeOf {
+                leaf: Some(found),
+                end: Some(found),
+            },
             "the file as it stood"
         );
         let (_, baseline) =
@@ -11405,8 +11418,29 @@ mod own_incomplete_copy_tests {
                 .unwrap();
         assert_eq!(
             baseline,
-            crate::remote::transfer::sink::ResumeBaseline::WholeOf(None),
+            crate::remote::transfer::sink::ResumeBaseline::WholeOf {
+                leaf: None,
+                end: None,
+            },
             "nothing"
+        );
+        // cr-ecm31-2: a link to nothing: the link itself, and nothing at
+        // its end.
+        let linked = root.join("linked.bin");
+        std::os::unix::fs::symlink("nowhere.bin", &linked).unwrap();
+        let (_, baseline) =
+            compute_resume_block_hashes(&root, None, "linked.bin", None, Some(0o100600), 1024)
+                .await
+                .unwrap();
+        assert_eq!(
+            baseline,
+            crate::remote::transfer::sink::ResumeBaseline::WholeOf {
+                leaf: Some(crate::moved::Version::of(
+                    &std::fs::symlink_metadata(&linked).unwrap()
+                )),
+                end: None,
+            },
+            "the link, and nothing at its end"
         );
     }
 
