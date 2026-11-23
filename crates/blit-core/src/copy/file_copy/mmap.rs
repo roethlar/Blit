@@ -1,20 +1,20 @@
 use eyre::{Context, Result};
 #[cfg(unix)]
 use std::fs;
-#[cfg(unix)]
-use std::fs::File;
 use std::path::Path;
 
 #[cfg(unix)]
 pub fn mmap_copy_file(src: &Path, dst: &Path) -> Result<u64> {
-    let src_file = File::open(src)?;
+    // cr-ecm33-6: without waiting, and only a regular file — and the
+    // destination made the same way.
+    let src_file = crate::copy::open_regular(src)?;
     let file_size = src_file.metadata()?.len();
 
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    let dst_file = File::create(dst)?;
+    let dst_file = crate::copy::create_regular(dst)?;
     dst_file.set_len(file_size)?;
 
     #[cfg(target_os = "linux")]

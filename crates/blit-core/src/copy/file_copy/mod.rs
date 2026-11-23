@@ -88,8 +88,9 @@ pub fn copy_file(
                 .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
                 .open(src)?
         };
+        // cr-ecm33-6: without waiting, and only a regular file.
         #[cfg(not(windows))]
-        let src_file = File::open(src)?;
+        let src_file = open_regular(src)?;
 
         #[cfg(windows)]
         let mut dst_file = {
@@ -535,6 +536,45 @@ mod mode_tests {
     //! carry bytes and nothing else.
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// cr-ecm33-6: the exported path-based copies take only a regular file as
+    /// their source and do not wait on a FIFO: `/dev/null` is refused by
+    /// each, and a FIFO no one writes by `copy_file` at once. Opened as any
+    /// file is, `/dev/null` was copied as an empty file, and the FIFO waited
+    /// for a writer.
+    #[test]
+    fn the_path_based_copies_take_only_a_regular_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("out.bin");
+        let sizer = BufferSizer::default();
+        let null = Path::new("/dev/null");
+        assert!(copy_file(null, &dst, &sizer, false).is_err(), "copy_file");
+        assert!(
+            crate::copy::resume_copy_file(null, &dst, 1024).is_err(),
+            "resume_copy_file"
+        );
+        assert!(
+            crate::copy::mmap_copy_file(null, &dst).is_err(),
+            "mmap_copy_file"
+        );
+        let at = dir.path().join("pipe.bin");
+        let name = std::ffi::CString::new(at.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `name` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+        let (done, waited) = std::sync::mpsc::channel();
+        {
+            let (at, dst) = (at.clone(), dir.path().join("from-pipe.bin"));
+            std::thread::spawn(move || {
+                let sizer = BufferSizer::default();
+                let _ = done.send(copy_file(&at, &dst, &sizer, false).is_err());
+            });
+        }
+        let Ok(refused) = waited.recv_timeout(std::time::Duration::from_secs(20)) else {
+            let _ = std::fs::OpenOptions::new().write(true).open(&at);
+            panic!("copy_file waited on the FIFO");
+        };
+        assert!(refused, "a FIFO is no file to copy");
+    }
 
     /// cr-ecm32-3: a source opened to be read does not wait on a FIFO and is
     /// a regular file, or it is refused: a FIFO no one writes, and a device.
