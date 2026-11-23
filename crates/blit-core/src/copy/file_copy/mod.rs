@@ -277,16 +277,38 @@ pub fn open_regular(path: &Path) -> std::io::Result<File> {
 /// cr-ecm32-2: not cut on opening — what was opened is checked first, and
 /// cut only then, through the handle. Cut on opening, a file the check then
 /// refused, or could not make, was left at no length.
+///
+/// cr-ecm33-5: and what it MADE — where nothing stood — is its own: made, a
+/// file whose check then fails is removed, not left behind; one that stood
+/// there is left as it was. Made and then refused, an empty file stood at
+/// the name, reported nowhere.
 pub fn create_regular(dst: &Path) -> std::io::Result<File> {
-    let mut open = std::fs::OpenOptions::new();
-    open.write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        open.custom_flags(libc::O_NONBLOCK);
-    }
-    let file = match open.open(dst) {
-        Ok(file) => file,
+    let options = |make: bool| {
+        let mut open = std::fs::OpenOptions::new();
+        open.write(true);
+        if make {
+            open.create_new(true);
+        } else {
+            // A link standing at the name is written through, and what it
+            // names made, as any copy's open does.
+            open.create(true).truncate(false);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            open.custom_flags(libc::O_NONBLOCK);
+        }
+        open
+    };
+    let opened = match options(true).open(dst) {
+        Ok(file) => Ok((file, true)),
+        Err(taken) if taken.kind() == std::io::ErrorKind::AlreadyExists => {
+            options(false).open(dst).map(|file| (file, false))
+        }
+        Err(error) => Err(error),
+    };
+    let (file, made) = match opened {
+        Ok(opened) => opened,
         #[cfg(unix)]
         Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {
             return Err(std::io::Error::other(format!(
@@ -296,14 +318,30 @@ pub fn create_regular(dst: &Path) -> std::io::Result<File> {
         }
         Err(error) => return Err(error),
     };
-    if !create_look_fault(dst)
-        .and_then(|()| file.metadata())?
-        .is_file()
-    {
-        return Err(std::io::Error::other(format!(
-            "{} is not a regular file",
-            dst.display()
-        )));
+    let checked = create_look_fault(dst)
+        .and_then(|()| file.metadata())
+        .and_then(|found| {
+            if found.is_file() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(format!(
+                    "{} is not a regular file",
+                    dst.display()
+                )))
+            }
+        });
+    if let Err(error) = checked {
+        if made {
+            drop(file);
+            if let Err(unremoved) = std::fs::remove_file(dst) {
+                return Err(std::io::Error::other(format!(
+                    "{}: {error}; the empty file made at {} could not be removed: {unremoved}",
+                    crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE,
+                    dst.display()
+                )));
+            }
+        }
+        return Err(error);
     }
     file.set_len(0)?;
     Ok(file)
@@ -628,6 +666,23 @@ mod mode_tests {
         assert_eq!(std::fs::read(&at).unwrap(), b"eleven byte", "left whole");
         let made = create_regular(&at).unwrap();
         assert_eq!(made.metadata().unwrap().len(), 0, "cut once checked");
+    }
+
+    /// cr-ecm33-5: a file made where nothing stood, whose check then fails,
+    /// is removed: nothing is left at the name. Left, it stood there an
+    /// empty file, reported nowhere.
+    #[test]
+    fn a_file_made_and_then_refused_is_not_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join("absent.bin");
+        CREATE_LOOK_FAULTS.lock().unwrap().push(at.clone());
+        let made = create_regular(&at);
+        CREATE_LOOK_FAULTS
+            .lock()
+            .unwrap()
+            .retain(|path| path != &at);
+        assert!(made.is_err(), "its look refused");
+        assert!(!at.exists(), "nothing left at the name");
     }
 
     #[test]
