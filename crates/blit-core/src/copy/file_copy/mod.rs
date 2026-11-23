@@ -241,9 +241,13 @@ impl<R: std::io::Read> std::io::Read for SourceRead<R> {
 /// — and kept only if what was opened is a regular file: a FIFO with a
 /// reader, or a device, is no file to copy into. Opened to be written as
 /// any file is, a FIFO waited for a reader, and the transfer with it.
+///
+/// cr-ecm32-2: not cut on opening — what was opened is checked first, and
+/// cut only then, through the handle. Cut on opening, a file the check then
+/// refused, or could not make, was left at no length.
 pub fn create_regular(dst: &Path) -> std::io::Result<File> {
     let mut open = std::fs::OpenOptions::new();
-    open.write(true).create(true).truncate(true);
+    open.write(true).create(true).truncate(false);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -260,13 +264,34 @@ pub fn create_regular(dst: &Path) -> std::io::Result<File> {
         }
         Err(error) => return Err(error),
     };
-    if !file.metadata()?.is_file() {
+    if !create_look_fault(dst)
+        .and_then(|()| file.metadata())?
+        .is_file()
+    {
         return Err(std::io::Error::other(format!(
             "{} is not a regular file",
             dst.display()
         )));
     }
+    file.set_len(0)?;
     Ok(file)
+}
+
+/// Test seam (cr-ecm32-2): the look at a file opened to be written refused
+/// (`EIO`), by path. Production never sets it.
+#[cfg(test)]
+pub(crate) static CREATE_LOOK_FAULTS: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn create_look_fault(_dst: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if CREATE_LOOK_FAULTS
+        .lock()
+        .is_ok_and(|faults| faults.iter().any(|at| at == _dst))
+    {
+        return Err(std::io::Error::other("a look that failed"));
+    }
+    Ok(())
 }
 
 /// ssc-4 (SOURCE_SIDE_CONTAINMENT D-C, A12): the local copy cascade on
@@ -479,6 +504,27 @@ mod mode_tests {
     //! carry bytes and nothing else.
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// cr-ecm32-2: a file opened to be written is checked before it is cut:
+    /// a check that fails leaves what stood there whole; one that passes
+    /// cuts it, through the handle. Cut on opening, an eleven-byte file was
+    /// left at no length.
+    #[test]
+    fn a_file_opened_to_be_written_is_checked_before_it_is_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join("kept.bin");
+        std::fs::write(&at, b"eleven byte").unwrap();
+        CREATE_LOOK_FAULTS.lock().unwrap().push(at.clone());
+        let made = create_regular(&at);
+        CREATE_LOOK_FAULTS
+            .lock()
+            .unwrap()
+            .retain(|path| path != &at);
+        assert!(made.is_err(), "its look refused");
+        assert_eq!(std::fs::read(&at).unwrap(), b"eleven byte", "left whole");
+        let made = create_regular(&at).unwrap();
+        assert_eq!(made.metadata().unwrap().len(), 0, "cut once checked");
+    }
 
     #[test]
     fn a_copied_file_has_its_sources_mode_however_it_was_copied() {

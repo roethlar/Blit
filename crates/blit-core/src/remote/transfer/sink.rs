@@ -3410,6 +3410,8 @@ impl<'a> PartialTarget<'a> {
         }
     }
 
+    // Off Linux only now: there the local copy arms for what it opened.
+    #[cfg_attr(all(unix, not(target_os = "macos")), allow(dead_code))]
     fn arm(&mut self, on_failure: OnFailure) {
         self.armed = Some(on_failure);
     }
@@ -3575,11 +3577,14 @@ fn copy_resolved_file_payload(
 /// missing destination is fine: anything created from here on is this
 /// copy's.
 ///
+/// (Off Linux only: there the copy opens its destination once, cr-ecm32-2.)
+///
 /// cr-ecm31-4: opened without waiting — a FIFO there that no one reads is
 /// refused at once — and only a regular file is this copy's to write: a
 /// FIFO with a reader, or a device, fails the file, left as it is. Opened
 /// to be written as any file is, a FIFO waited for a reader, and the
 /// transfer with it.
+#[cfg(not(all(unix, not(target_os = "macos"))))]
 fn probe_destination_writable(dst: &Path) -> Result<()> {
     let mut open = std::fs::OpenOptions::new();
     open.write(true);
@@ -3620,6 +3625,9 @@ fn copy_and_stamp_opened(
     use eyre::eyre;
     let mut did_copy = false;
     let mut resumed: Option<std::fs::File> = None;
+    // cr-ecm32-2: what the local copy opened and wrote through (Linux).
+    #[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(unused_mut))]
+    let mut opened: Option<std::fs::File> = None;
     // cr-ecm14-2: a run that keeps what exists makes the name first, by
     // a creation that fails if anything has it — and what it made is its
     // own from here: removed, should the copy fail (cr-ecm13-1: with
@@ -3682,19 +3690,43 @@ fn copy_and_stamp_opened(
         dst,
         config.compare_mode,
     )? {
-        // 2026-10-07 defect (a): arm the cleanup only for a destination this
-        // copy can write. One it cannot open — a folder in the way, a file
-        // the user may not write — is not this copy's: the cleanup would
-        // delete the user's file without having written a byte, or report a
-        // folder as this run's incomplete copy.
-        probe_destination_writable(dst)?;
-        // cr-ssc4-2: from here until the validated success, any exit
-        // removes the destination — a source read error mid-copy, a
-        // post-copy stat failure, a metadata-tail failure — so nothing
-        // partial can pass for a finished copy.
-        partial.arm(OnFailure::Remove);
         let sizer = BufferSizer::default();
-        crate::copy::copy_opened(src_file, src, dst, header.size, &sizer, false)?;
+        // cr-ecm32-2: on Linux the destination is opened once — a regular
+        // file, checked before it is cut — the cleanup is armed for that
+        // file and no other, and the copy goes through what was opened, the
+        // same cascade on descriptors. Probed, armed, then opened again by
+        // name, a FIFO put there between was refused by the copy and removed
+        // by a cleanup armed for whatever stood at the name. 2026-10-07
+        // defect (a) holds as before: one this copy cannot open is not
+        // armed for at all.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            // The source's path is for the clone paths elsewhere.
+            let _ = src;
+            let target = crate::copy::create_regular(dst).map_err(eyre::Report::new)?;
+            // cr-ssc4-2: from here until the validated success, any exit
+            // removes what was opened — and only while it stands at the
+            // name — so nothing partial can pass for a finished copy.
+            partial.arm_made(&target);
+            crate::copy::copy_opened_into(src_file, &target, header.size, &sizer)?;
+            opened = Some(target);
+        }
+        // Elsewhere the copy goes by the name, as before: macOS clones into
+        // an absent name, and Windows clones with handles of its own.
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        {
+            // 2026-10-07 defect (a): arm the cleanup only for a destination
+            // this copy can write. One it cannot open — a folder in the way,
+            // a file the user may not write — is not this copy's: the
+            // cleanup would delete the user's file without having written a
+            // byte, or report a folder as this run's incomplete copy.
+            probe_destination_writable(dst)?;
+            // cr-ssc4-2: from here until the validated success, any exit
+            // removes the destination, so nothing partial can pass for a
+            // finished copy.
+            partial.arm(OnFailure::Remove);
+            crate::copy::copy_opened(src_file, src, dst, header.size, &sizer, false)?;
+        }
         run_after_copy_fault_hook(dst).map_err(|e| eyre!("source: read error: {e}"))?;
         did_copy = true;
     }
@@ -3736,7 +3768,7 @@ fn copy_and_stamp_opened(
             .ok()
             .or(fallback);
         if let Some(ft) = ft {
-            let stamped = match made.as_ref().or(resumed.as_ref()) {
+            let stamped = match made.as_ref().or(resumed.as_ref()).or(opened.as_ref()) {
                 Some(written) => filetime::set_file_handle_times(written, None, Some(ft)),
                 None => filetime::set_file_mtime(dst, ft),
             };
@@ -8817,6 +8849,47 @@ mod cr_win_1_tests {
             .unwrap();
         assert!(outcome.file_failed("late.bin"), "{outcome:?}");
         assert_eq!(std::fs::read(&late).unwrap(), b"theirs");
+    }
+
+    /// cr-ecm32-2: a local copy's cleanup is armed for the file it opened
+    /// and no other: one put at the name in its place before the copy
+    /// fails is left as it is. Armed for the name after a probe, the
+    /// cleanup removed whatever stood there by then.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[tokio::test]
+    async fn a_local_copys_cleanup_removes_only_the_file_it_opened() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("new.bin"), b"new").unwrap();
+        let at = dst.join("new.bin");
+        {
+            let (at, aside) = (at.clone(), tmp.path().join("theirs"));
+            crate::remote::transfer::sink::AFTER_COPY_FAULT_HOOKS
+                .lock()
+                .unwrap()
+                .push((
+                    at.clone(),
+                    std::sync::Arc::new(move |_: &Path| {
+                        std::fs::write(&aside, b"theirs").unwrap();
+                        std::fs::rename(&aside, &at).unwrap();
+                        Err(std::io::Error::other("a read that failed"))
+                    }),
+                ));
+        }
+        let sink = FsTransferSink::new(src.clone(), dst.clone(), FsSinkConfig::default());
+        let outcome = sink
+            .write_payload(PreparedPayload::File(make_file_header("new.bin", 3)))
+            .await
+            .unwrap();
+        crate::remote::transfer::sink::AFTER_COPY_FAULT_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(path, _)| path != &at);
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        assert_eq!(std::fs::read(&at).unwrap(), b"theirs", "left as it is");
     }
 
     /// cr-ecm31-4: a local copy over a FIFO at its destination, no one
