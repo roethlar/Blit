@@ -1,9 +1,9 @@
 # cr-ecm32-3: the scan's probe, the local copier's and the tar packer's source opens could wait on a FIFO
 
 **Severity**: HIGH — the scan's readability probe, the local copy's source open and the tar packer's member open each used a blocking open. A FIFO with no writer, put in a file's place, held the transfer indefinitely. The packer also took a device (`/dev/null`) for a file.
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r34` (Codex openreview, 2026-11-23) reviewed `70efef8a..0f912b06` — the `combined-r33` fixes — with `guard_confirmed: true`: "Checking before truncation, opening FIFOs without waiting, and recording the resolved parent and name for a Unix resume are sound changes." "A FIFO arriving after the writable probe can still block `fcopyfile`'s destination open indefinitely. Keep the clone fast path for an absent destination and pass a validated, nonblocking descriptor to the fallback." "`copy_file`, `resume_copy_file`, and `mmap_copy_file` all returned success for `/dev/null` in my Linux fixture. Their source opens can also wait on a FIFO. Route these public entry points through the regular-file opener." The remaining work is cr-ecm33-4 and -6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm32-3`)
+**Commit**: `6e52d386`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r33` over `714ed0b7..70efef8a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r33.codex.md`. It completes cr-ecm31-4 (`374ed558`).
 
 ## Evidence

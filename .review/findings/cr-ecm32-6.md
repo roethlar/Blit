@@ -1,9 +1,9 @@
 # cr-ecm32-6: the release note said a destination FIFO is left, but a resume replaces it
 
 **Severity**: MEDIUM — brought in by cr-ecm31-4: the `CHANGELOG.md` entry said a FIFO or device at a destination path fails that file and is left as it is, but with `--resume` such a destination is replaced by a fresh copy of the file (cr-ecm26-5), as a guard of its own shows
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r34` (Codex openreview, 2026-11-23) reviewed `70efef8a..0f912b06` — the `combined-r33` fixes — with `guard_confirmed: true`: "Checking before truncation, opening FIFOs without waiting, and recording the resolved parent and name for a Unix resume are sound changes." "Local `--resume` replaces a destination FIFO. In a wire session with resume enabled, a FIFO already present at comparison received an ordinary file transfer, remained a FIFO, and produced one file failure. The wire grants block resume only for a nonempty regular destination." The remaining work is cr-ecm33-7
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm32-6`)
+**Commit**: `4e223b0a`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r33` over `714ed0b7..70efef8a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r33.codex.md`. It completes cr-ecm31-4 (`374ed558`).
 
 ## Evidence

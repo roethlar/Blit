@@ -1,9 +1,9 @@
 # cr-ecm32-1: a whole-file resume did not carry where its comparison led
 
 **Severity**: HIGH — two holes. (1) A failed lookup was sent as "unknown". An `ENOTDIR` while following a link the comparison had seen sent the file `Whole`, and the hold then looked for itself and replaced whatever had come. (2) The comparison carried no place. With a link of the chain redirected between two empty names, both baselines matched, and the partial was made at the new name.
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r34` (Codex openreview, 2026-11-23) reviewed `70efef8a..0f912b06` — the `combined-r33` fixes — with `guard_confirmed: true`: "Checking before truncation, opening FIFOs without waiting, and recording the resolved parent and name for a Unix resume are sound changes." "On Unix, if a previously present partial's parent vanishes before hashing, `place` becomes `None`. If the parent returns as a symlink to another in-root directory, an empty name there can receive the file. Fail that pass when the parent cannot be established. On Windows the receiver discards even `Unjustified`, so a failed comparison can still authorize a later write. Enforce that refusal on every platform and retain the validated Windows handle for writes." The remaining work is cr-ecm33-3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm32-1`)
+**Commit**: `f22af07f`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r33` over `714ed0b7..70efef8a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r33.codex.md`. It completes cr-ecm31-2 (`31eac5d2`).
 
 ## Evidence

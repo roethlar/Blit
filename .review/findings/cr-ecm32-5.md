@@ -1,9 +1,9 @@
 # cr-ecm32-5: a partial left behind was named in the error but not in the summary's left-in-place set
 
 **Severity**: MEDIUM — a fresh partial left behind (cr-ecm31-3: its first look refused, or its removal failed) was named in the failure's message, but not in the words the summary reads for "this run left its own copy here". So it was missing from the summary's left-in-place set, and from what job records and retries read from it.
-**Status**: Fixed on Unix, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r34` (Codex openreview, 2026-11-23) reviewed `70efef8a..0f912b06` — the `combined-r33` fixes — with `guard_confirmed: true`: "Checking before truncation, opening FIFOs without waiting, and recording the resolved parent and name for a Unix resume are sound changes." "I observed errors in both directions. Failed validation at a previously absent destination left an unreported zero-byte file. A source-only failure whose pathname contained the diagnostic phrase put an untouched destination in `left_in_place`. Track whether acquisition created a file, settle it on failure, and carry the outcome into the summary independently of the error text." The remaining work is cr-ecm33-5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm32-5`)
+**Commit**: `b91abdc1`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r33` over `714ed0b7..70efef8a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r33.codex.md`. It completes cr-ecm31-3 (`89ca4eaa`).
 
 ## Evidence
