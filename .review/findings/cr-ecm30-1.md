@@ -1,7 +1,7 @@
 # cr-ecm30-1: what prompted a whole-file resume was not carried through the command
 
 **Severity**: HIGH — (A) the wire's whole-file baseline kept nothing of what was found when it was decided, so a file that came to the name before the first block was taken for it and replaced; (B) a saved device and number could match a different file given the number of one gone; (C) an automatic retry pass, carrying only the path, can overwrite a newcomer whose conflict the first pass detected
-**Status**: Parts A and B fixed on Unix, awaiting review; part C NOT FIXED — waits on the owner (see Known gaps)
+**Status**: Parts A and B fixed on Unix, awaiting review; part C DECLINED by the owner (D-2026-11-23-2, 2026-11-23: "Retry converges")
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: this commit (`Fix cr-ecm30-1`)
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r31` over `fd603571..93ecf7b2` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r31.codex.md`. It completes cr-ecm29-2 (`72729f85`).
@@ -41,5 +41,5 @@ C is put to the owner and not built. It needs a third per-path set from the dest
 - `crates/blit-core/src/transfer_session/mod.rs` — `compute_resume_block_hashes`; guard; assertions.
 
 ## Known gaps
-- (C) not done: an automatic retry pass still re-sends a path whose conflict the first pass detected, and on that pass whatever stands there is compared and copied over as on any run. Waiting on the owner (see Intake).
+- (C) declined (D-2026-11-23-2): an automatic retry pass re-sends a path whose conflict the first pass detected, and on that pass whatever stands there is compared and copied over, as on any run — convergence on retry, the owner's model.
 - A version check and the removal after it are still two calls; a change between them goes unseen (D-2026-11-23-1).
