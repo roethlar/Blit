@@ -110,7 +110,7 @@ pub fn copy_file(
         #[cfg(target_os = "macos")]
         let dst_file: Option<File> = None;
         #[cfg(all(unix, not(target_os = "macos")))]
-        let dst_file = File::create(dst)?;
+        let dst_file = create_regular(dst)?;
 
         let (total_bytes, clone_succeeded) = {
             #[cfg(windows)]
@@ -168,7 +168,7 @@ pub fn copy_file(
                 if cloned {
                     (file_size, true)
                 } else {
-                    let dst_for_stream = File::create(dst)?;
+                    let dst_for_stream = create_regular(dst)?;
                     let mut reader = BufReader::with_capacity(buffer_size, src_file);
                     let mut writer = BufWriter::with_capacity(buffer_size, dst_for_stream);
                     let n = io::copy(&mut reader, &mut writer)?;
@@ -234,6 +234,39 @@ impl<R: std::io::Read> std::io::Read for SourceRead<R> {
             .read(buf)
             .map_err(|e| std::io::Error::new(e.kind(), format!("source: read error: {e}")))
     }
+}
+
+/// cr-ecm31-4: `dst` made, or opened, to be written from its start —
+/// without waiting: a FIFO at the name that no one reads is refused at once
+/// — and kept only if what was opened is a regular file: a FIFO with a
+/// reader, or a device, is no file to copy into. Opened to be written as
+/// any file is, a FIFO waited for a reader, and the transfer with it.
+pub fn create_regular(dst: &Path) -> std::io::Result<File> {
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        open.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = match open.open(dst) {
+        Ok(file) => file,
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {
+            return Err(std::io::Error::other(format!(
+                "{} is a FIFO no one reads, not a regular file",
+                dst.display()
+            )))
+        }
+        Err(error) => return Err(error),
+    };
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a regular file",
+            dst.display()
+        )));
+    }
+    Ok(file)
 }
 
 /// ssc-4 (SOURCE_SIDE_CONTAINMENT D-C, A12): the local copy cascade on
@@ -330,7 +363,7 @@ pub fn copy_opened(
                 (expected_len, true)
             } else {
                 (&*src).seek(SeekFrom::Start(0))?;
-                let dst_for_stream = File::create(dst)?;
+                let dst_for_stream = create_regular(dst)?;
                 let mut reader =
                     BufReader::with_capacity(buffer_size, SourceRead(src.take(expected_len)));
                 let mut writer = BufWriter::with_capacity(buffer_size, dst_for_stream);
@@ -341,7 +374,7 @@ pub fn copy_opened(
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            let dst_file = File::create(dst)?;
+            let dst_file = create_regular(dst)?;
             let fast_linux = clone::attempt_copy_file_range_linux(src, &dst_file, expected_len)
                 .unwrap_or(false)
                 || {

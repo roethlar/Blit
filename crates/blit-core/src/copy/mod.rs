@@ -7,6 +7,7 @@ pub use compare::{
     file_needs_copy, file_needs_copy_with_checksum_type, file_needs_copy_with_mode,
     file_needs_copy_with_mode_opened,
 };
+pub use file_copy::create_regular;
 #[cfg(unix)]
 pub(crate) use file_copy::resume::{effective_user, is_link, resolve_destination};
 #[cfg(all(test, unix))]

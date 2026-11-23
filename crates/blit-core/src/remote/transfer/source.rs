@@ -539,7 +539,18 @@ impl TransferSource for FsTransferSource {
         // Contract v7 (D-F): a header carrying raw name bytes is opened
         // by those bytes — the lossy text names nothing on disk.
         let path = crate::raw_name::source_path(&self.root, header);
-        let file = fs::File::open(&path).await?;
+        // cr-ecm31-4: opened without waiting — a FIFO put in a file's place
+        // after the scan cannot hold the transfer — and sent only if what was
+        // opened is a regular file. Opened to be read, a FIFO waited for a
+        // writer, and the transfer with it.
+        let mut open = fs::OpenOptions::new();
+        open.read(true);
+        #[cfg(unix)]
+        open.custom_flags(libc::O_NONBLOCK);
+        let file = open.open(&path).await?;
+        if !file.metadata().await?.is_file() {
+            eyre::bail!("{} is not a regular file", path.display());
+        }
         Ok(OpenedSourceFile::fs(file, path))
     }
 
@@ -1868,6 +1879,43 @@ mod filtered_source_tests {
             windows_metadata: None,
             raw_relative_path: None,
         }
+    }
+
+    /// cr-ecm31-4: a FIFO at a source's name — put in a file's place after
+    /// the scan — does not hold the source's open: it is refused at once,
+    /// no file to send. Opened to be read, it waited for a writer, and the
+    /// transfer with it.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_a_sources_name_does_not_hold_its_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join("pipe.bin");
+        let name = std::ffi::CString::new(at.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `name` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+        let (done, waited) = std::sync::mpsc::channel();
+        {
+            let root = dir.path().to_path_buf();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let opened = runtime.block_on(async {
+                    FsTransferSource::new(root)
+                        .open_file(&header("pipe.bin", 0))
+                        .await
+                        .map(|_| ())
+                });
+                let _ = done.send(opened.is_err());
+            });
+        }
+        let Ok(refused) = waited.recv_timeout(std::time::Duration::from_secs(20)) else {
+            // A writer lets the waiting open go, so the test can end.
+            let _ = std::fs::OpenOptions::new().write(true).open(&at);
+            panic!("the source's open waited on the FIFO");
+        };
+        assert!(refused, "a FIFO is no file to send");
     }
 
     async fn collect(mut rx: mpsc::Receiver<FileHeader>) -> Vec<String> {

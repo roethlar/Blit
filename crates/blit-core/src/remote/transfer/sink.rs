@@ -2463,7 +2463,8 @@ fn create_to_write(dst: &Path, new_only: bool) -> std::io::Result<std::fs::File>
             .create_new(true)
             .open(dst)
     } else {
-        std::fs::File::create(dst)
+        // cr-ecm31-4: without waiting on a FIFO, and only a regular file.
+        crate::copy::create_regular(dst)
     }
 }
 
@@ -3573,10 +3574,29 @@ fn copy_resolved_file_payload(
 /// falls through), so this fails exactly when the copy itself would. A
 /// missing destination is fine: anything created from here on is this
 /// copy's.
+///
+/// cr-ecm31-4: opened without waiting — a FIFO there that no one reads is
+/// refused at once — and only a regular file is this copy's to write: a
+/// FIFO with a reader, or a device, fails the file, left as it is. Opened
+/// to be written as any file is, a FIFO waited for a reader, and the
+/// transfer with it.
 fn probe_destination_writable(dst: &Path) -> Result<()> {
-    match std::fs::OpenOptions::new().write(true).open(dst) {
-        Ok(_) => Ok(()),
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        open.custom_flags(libc::O_NONBLOCK);
+    }
+    match open.open(dst) {
+        Ok(file) if file.metadata().is_ok_and(|found| found.is_file()) => Ok(()),
+        Ok(_) => Err(eyre::eyre!("{} is not a regular file", dst.display())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ENXIO) => Err(eyre::eyre!(
+            "{} is a FIFO no one reads, not a regular file",
+            dst.display()
+        )),
         // The same bare error the copy's own open would have raised, so the
         // reason a user sees is unchanged.
         Err(error) => Err(eyre::Report::new(error)),
@@ -8797,6 +8817,78 @@ mod cr_win_1_tests {
             .unwrap();
         assert!(outcome.file_failed("late.bin"), "{outcome:?}");
         assert_eq!(std::fs::read(&late).unwrap(), b"theirs");
+    }
+
+    /// cr-ecm31-4: a local copy over a FIFO at its destination, no one
+    /// reading it, does not wait on it: the probe refuses it at once, the
+    /// file fails, and the FIFO is left as it is. And where a copy, or a
+    /// streamed record, makes its file, a FIFO there is refused too. Opened
+    /// to be written, each waited for a reader, and the transfer with it.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_a_destination_does_not_hold_the_copy() {
+        use std::os::unix::fs::FileTypeExt as _;
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        let fifo = |at: &Path| {
+            let name = std::ffi::CString::new(at.as_os_str().as_encoded_bytes()).unwrap();
+            // SAFETY: `name` is a NUL-terminated path that outlives the call.
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+        };
+        std::fs::write(src.join("kept.bin"), b"new").unwrap();
+        let kept = dst.join("kept.bin");
+        fifo(&kept);
+        let (done, waited) = std::sync::mpsc::channel();
+        {
+            let (src, dst) = (src.clone(), dst.clone());
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let failed = runtime.block_on(async {
+                    let sink = FsTransferSink::new(src, dst, FsSinkConfig::default());
+                    sink.write_payload(PreparedPayload::File(make_file_header("kept.bin", 3)))
+                        .await
+                        .map(|outcome| outcome.files_failed_total)
+                });
+                let _ = done.send(failed.map_err(|error| format!("{error:#}")));
+            });
+        }
+        let Ok(failed) = waited.recv_timeout(std::time::Duration::from_secs(20)) else {
+            // A reader lets the waiting open go, so the test can end.
+            let _ = std::fs::File::open(&kept);
+            panic!("the copy waited on the FIFO");
+        };
+        assert_eq!(failed, Ok(1), "the file fails");
+        assert!(
+            std::fs::symlink_metadata(&kept)
+                .unwrap()
+                .file_type()
+                .is_fifo(),
+            "left as it is"
+        );
+
+        let made = dst.join("made.bin");
+        fifo(&made);
+        let (done, waited) = std::sync::mpsc::channel();
+        {
+            let made = made.clone();
+            std::thread::spawn(move || {
+                let _ = done.send((
+                    create_to_write(&made, false).is_err(),
+                    crate::copy::create_regular(&made).is_err(),
+                ));
+            });
+        }
+        let Ok(refused) = waited.recv_timeout(std::time::Duration::from_secs(20)) else {
+            let _ = std::fs::File::open(&made);
+            panic!("making the file waited on the FIFO");
+        };
+        assert_eq!(refused, (true, true), "a FIFO is no file to copy into");
     }
 
     /// cr-ecm31-2: a wire resume sent whole where nothing was found leaves a

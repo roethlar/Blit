@@ -287,6 +287,11 @@ part, and a job you can list, read, re-run and retry.
   made at the empty name, in place, as every write to a destination
   is. If the fresh copy cannot be made ready, nothing that looks
   finished is left at the name, and a retry lands the file.
+- A FIFO, or a device, where a copy expects a file no longer holds the
+  transfer: one at a destination path fails that file and is left as
+  it is, and one put in a source file's place after the scan fails
+  that file. Opened as a file is, a FIFO waited for its other end —
+  and the whole transfer with it.
 - `check` of a single file against a destination of another name
   compares the two. With the source named in `--files-from`, or a
   pattern naming either file, it looked for one file's name on the
