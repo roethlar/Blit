@@ -9366,6 +9366,9 @@ mod cr_win_1_tests {
             },
         );
         let before = std::fs::metadata(real.join("named.bin")).unwrap().ino();
+        // cr-ecm31-6: held open, so that its number cannot be given to the
+        // fresh partial — a number freed may be given again at once (ext4).
+        let _held = std::fs::File::open(real.join("named.bin")).unwrap();
         sink.note_resume_baseline("link.bin", ResumeBaseline::Whole);
         sink.hold_resume_partial("link.bin", 4).await.unwrap();
         assert!(dst.join("link.bin").is_symlink(), "the link stays");

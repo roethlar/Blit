@@ -287,6 +287,11 @@ part, and a job you can list, read, re-run and retry.
   made at the empty name, in place, as every write to a destination
   is. If the fresh copy cannot be made ready, nothing that looks
   finished is left at the name, and a retry lands the file.
+  Two limits come with it, accepted: something put at the name in the
+  instant between that last look and the removal is removed with it;
+  and an automatic retry (`--retries`) copies over whatever stands at
+  the name by then — a file the pass before it left as it is included
+  — as any later run would.
 - A FIFO, or a device, where a copy expects a file no longer holds the
   transfer: one at a destination path fails that file and is left as
   it is, and one put in a source file's place after the scan fails

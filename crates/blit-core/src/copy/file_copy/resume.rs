@@ -1746,6 +1746,9 @@ mod tests {
         let (_, dst, _) = wider_destination(tmp.path())?;
         let folder = dst.parent().unwrap().to_path_buf();
         let before = std::fs::metadata(&dst)?.ino();
+        // cr-ecm31-6: held open, so that its number cannot be given to the
+        // fresh partial — a number freed may be given again at once (ext4).
+        let _held = File::open(&dst)?;
         let (file, names) = fresh_partial_ready(&dst, 9, None, |_| {
             let mut names = std::fs::read_dir(&folder)?
                 .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
@@ -2305,6 +2308,9 @@ mod tests {
         std::fs::write(&dst, &data[..1000])?;
         std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o644))?;
         let before = std::fs::metadata(&dst)?.ino();
+        // cr-ecm31-6: held open, so that its number cannot be given to the
+        // fresh partial — a number freed may be given again at once (ext4).
+        let _held = File::open(&dst)?;
         resume_copy_from(&mut opened, data.len() as u64, &dst, 1024)?;
         assert_ne!(std::fs::metadata(&dst)?.ino(), before, "a fresh partial");
         std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))?;
