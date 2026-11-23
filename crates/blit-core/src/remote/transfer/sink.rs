@@ -2854,18 +2854,18 @@ fn hold_partial(
 
 #[cfg(unix)]
 fn hold_whole(dst: &Path, total_size: u64, within: Option<&Path>) -> Result<Option<HeldPartial>> {
-    // cr-ecm21-3: something there — a file, or a link to one — is replaced
-    // by a fresh private partial made beside it, and nothing of it is
-    // touched until that exists: it was removed, or cut to nothing through
-    // the link, before a permission failure could leave its bytes gone.
+    // cr-ecm21-3, D-2026-11-23-1: something there — a file, or a link to
+    // one — is replaced by a fresh private partial made in place: what
+    // stands there is removed while it is still what was seen, and the
+    // partial made at the empty name, private from the moment it exists.
+    // Cut to nothing through the link, its bytes were gone before its mode
+    // was set.
     // cr-ecm23-1: ready — private, at its length, and which file it is
-    // known — before it takes the name. Learned after, a look that failed
-    // left the destination replaced, and nothing held.
-    // cr-ecm25-2: and where NOTHING stands, the same: made in the directory
-    // held (cr-ecm24-1), ready, and taking the name only while nothing does.
-    // Made by the name, it was there before which file it is was known — a
-    // look that failed left it — and a folder replaced on its way could move
-    // where it was made.
+    // known — before the hold has it, or it is removed. Learned after, a
+    // look that failed left a partial nothing held.
+    // cr-ecm25-2: and where NOTHING stands, the same, made only while
+    // nothing has the name, in the directory held (cr-ecm24-1): a folder
+    // replaced on its way cannot move where it is made.
     let resolved = crate::copy::resolve_destination(dst, within)?;
     let ready = |file: &std::fs::File| HeldPartial::identity_of(file, dst);
     let unfinished = total_size.saturating_add(1);
@@ -8729,7 +8729,7 @@ mod cr_win_1_tests {
     /// cr-ecm29-2: the wire's fresh partial replaces what its look found: a
     /// file come to the name after it is left as it is, and the file fails.
     /// Looked at again when the partial was made, the newcomer was replaced.
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_wires_fresh_partial_leaves_a_file_come_since_its_look() {
         let tmp = tempdir().unwrap();
@@ -8785,10 +8785,10 @@ mod cr_win_1_tests {
         assert_eq!(std::fs::read(&at).unwrap(), b"theirs");
     }
 
-    /// cr-ecm23-1: a fresh partial for the wire is known — which file it is
-    /// — before it takes the destination's place: a look that fails leaves
-    /// the destination as it stood, and the file fails. Learned after the
-    /// rename, it left the destination eleven bytes of nothing.
+    /// cr-ecm23-1, D-2026-11-23-1: a fresh partial for the wire is known —
+    /// which file it is — before the hold has it: a look that fails removes
+    /// it, nothing at the name looks finished, and the file fails. Learned
+    /// after, it left the destination eleven bytes of nothing.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_fresh_partial_is_known_before_it_takes_the_name() {
@@ -8810,12 +8810,8 @@ mod cr_win_1_tests {
         let held = sink.hold_resume_partial("r.bin", 10).await;
         IDENTITY_FAULTS.lock().unwrap().retain(|fault| fault != &at);
         held.unwrap();
-        assert_eq!(std::fs::read(&at).unwrap(), b"0123456789", "as it stood");
-        assert_eq!(
-            std::fs::read_dir(&dst).unwrap().count(),
-            1,
-            "nothing left beside it"
-        );
+        assert!(!at.exists(), "nothing at the name that looks finished");
+        assert_eq!(std::fs::read_dir(&dst).unwrap().count(), 0, "nothing left");
         let outcome = sink
             .write_payload(PreparedPayload::FileBlockComplete {
                 relative_path: "r.bin".to_string(),
@@ -8827,7 +8823,7 @@ mod cr_win_1_tests {
             .await
             .unwrap();
         assert!(outcome.file_failed("r.bin"), "{outcome:?}");
-        assert_eq!(std::fs::read(&at).unwrap(), b"0123456789");
+        assert!(!at.exists());
     }
 
     /// cr-ecm22-3: a hold that cannot learn which file it holds fails the
