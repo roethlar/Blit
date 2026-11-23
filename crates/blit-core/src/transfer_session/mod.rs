@@ -6698,7 +6698,11 @@ async fn compute_resume_block_hashes(
     })?;
     tokio::task::spawn_blocking(move || -> Result<(Vec<Vec<u8>>, ResumeBaseline)> {
         use std::io::Read;
-        let whole = || Ok((Vec::new(), ResumeBaseline::Whole));
+        // cr-ecm32-1: a look that fails — at the name, or at where it leads
+        // — observes nothing that could justify a write: the file fails at
+        // its hold, and its retry compares afresh. Sent as unknown, the hold
+        // looked for itself and replaced whatever had come.
+        let unjustified = || Ok((Vec::new(), ResumeBaseline::Unjustified));
         // cr-ecm30-1: and where a look decided it, what that found — the
         // file as it stood, or nothing — goes with it, for the hold to
         // replace that and nothing else. cr-ecm31-2: with the name itself as
@@ -6708,14 +6712,39 @@ async fn compute_resume_block_hashes(
         let leaf = match std::fs::symlink_metadata(&dst) {
             Ok(meta) => Some(crate::moved::Version::of(&meta)),
             Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => None,
-            Err(_) => return whole(),
+            Err(_) => return unjustified(),
         };
+        // cr-ecm32-1: and where the name leads, resolved as the hold resolves
+        // it — the directory the chain ends in and the name there — for the
+        // partial to be made there and nowhere else. A name whose directory
+        // is not there yet leads nowhere yet.
+        #[cfg(unix)]
+        let place = {
+            let unmade = leaf.is_none()
+                && dst.parent().is_some_and(|parent| {
+                    std::fs::symlink_metadata(parent)
+                        .is_err_and(|gone| gone.kind() == std::io::ErrorKind::NotFound)
+                });
+            if unmade {
+                None
+            } else {
+                match crate::copy::resolve_destination(&dst, None)
+                    .and_then(|resolved| resolved.place().map_err(eyre::Report::new))
+                {
+                    Ok(place) => Some(place),
+                    Err(_) => return unjustified(),
+                }
+            }
+        };
+        #[cfg(not(unix))]
+        let place: Option<crate::copy::Place> = None;
         let whole_of = |found: Option<&std::fs::Metadata>| {
             Ok((
                 Vec::new(),
                 ResumeBaseline::WholeOf {
                     leaf,
                     end: found.map(crate::moved::Version::of),
+                    place: place.clone(),
                 },
             ))
         };
@@ -6733,6 +6762,7 @@ async fn compute_resume_block_hashes(
                 ResumeBaseline::WholeOf {
                     leaf,
                     end: Some(end),
+                    place: place.clone(),
                 },
             ))
         };
@@ -6779,7 +6809,7 @@ async fn compute_resume_block_hashes(
             // cr-ecm27-2: a look that fails — the file gone, a folder on its
             // way become a file (`ENOTDIR`), or anything else of this one
             // file's — sends it whole. It ended the transfer.
-            Err(_) => return whole(),
+            Err(_) => return unjustified(),
         };
         // cr-ecm28-1: opened without waiting — a FIFO put in the file's place
         // after the look cannot hold the hashing — and what was opened is a
@@ -11316,6 +11346,37 @@ mod own_incomplete_copy_tests {
         assert!(baseline.is_whole(), "{baseline:?}");
     }
 
+    /// Where `at` leads, as the hold resolves it.
+    #[cfg(unix)]
+    fn place_of(at: &Path) -> crate::copy::Place {
+        crate::copy::resolve_destination(at, None)
+            .unwrap()
+            .place()
+            .unwrap()
+    }
+
+    /// cr-ecm32-1: a resume whose comparison cannot look at where its name
+    /// leads — a link through a file (`ENOTDIR`) — justifies no write: it is
+    /// sent `Unjustified`, and fails at its hold. Sent as unknown, the hold
+    /// looked for itself.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_look_that_fails_justifies_no_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        std::fs::write(root.join("file.bin"), b"a file").unwrap();
+        std::os::unix::fs::symlink("file.bin/inner", root.join("through.bin")).unwrap();
+        let (hashes, baseline) =
+            compute_resume_block_hashes(&root, None, "through.bin", None, Some(0o100600), 1024)
+                .await
+                .unwrap();
+        assert!(hashes.is_empty());
+        assert_eq!(
+            baseline,
+            crate::remote::transfer::sink::ResumeBaseline::Unjustified
+        );
+    }
+
     /// cr-ecm31-1: a hashing that fails part-way — a read on the second
     /// block, or the look after the last — sends the file whole with what
     /// it found, the file as it stood (the name itself being that file), for
@@ -11347,6 +11408,7 @@ mod own_incomplete_copy_tests {
                 crate::remote::transfer::sink::ResumeBaseline::WholeOf {
                     leaf: Some(found),
                     end: Some(found),
+                    place: Some(place_of(&at)),
                 },
                 "{name}: what it found"
             );
@@ -11463,6 +11525,7 @@ mod own_incomplete_copy_tests {
             crate::remote::transfer::sink::ResumeBaseline::WholeOf {
                 leaf: Some(found),
                 end: Some(found),
+                place: Some(place_of(&at)),
             },
             "the file as it stood"
         );
@@ -11475,6 +11538,7 @@ mod own_incomplete_copy_tests {
             crate::remote::transfer::sink::ResumeBaseline::WholeOf {
                 leaf: None,
                 end: None,
+                place: Some(place_of(&root.join("absent.bin"))),
             },
             "nothing"
         );
@@ -11493,6 +11557,7 @@ mod own_incomplete_copy_tests {
                     &std::fs::symlink_metadata(&linked).unwrap()
                 )),
                 end: None,
+                place: Some(place_of(&linked)),
             },
             "the link, and nothing at its end"
         );

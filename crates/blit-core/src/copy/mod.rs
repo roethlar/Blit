@@ -9,11 +9,11 @@ pub use compare::{
 };
 #[cfg(unix)]
 pub(crate) use file_copy::resume::{effective_user, is_link, resolve_destination};
+pub use file_copy::resume::{Place, DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE};
 #[cfg(all(test, unix))]
 pub(crate) use file_copy::resume::{
     AFTER_A_RESOLVE_HOOKS, BEFORE_A_FRESH_PARTIAL_IS_MADE_HOOKS, FRESH_LOOK_FAULTS, RUN_AS,
 };
-pub use file_copy::resume::{DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE};
 pub use file_copy::{
     copy_file, copy_opened, copy_opened_into, mmap_copy_file, open_resume_partial,
     open_resume_partial_held, resume_copy_file, resume_copy_from, resume_copy_into,

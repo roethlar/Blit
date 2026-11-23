@@ -527,6 +527,15 @@ pub fn fresh_partial_ready<T>(
     }
 }
 
+/// cr-ecm32-1: where a name leads, as resolution finds it: the directory the
+/// chain of links ends in (which it is: device and number) and the name in
+/// it. A whole-file resume is written only where its comparison led.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Place {
+    directory: (u64, u64),
+    name: Vec<u8>,
+}
+
 /// cr-ecm24-1: where a resume's partial is had — ONE resolution for every
 /// way one is had, opened where it stands or made fresh, locally and by
 /// the wire: the chain of links at the name followed to its end
@@ -677,6 +686,17 @@ impl Resolved {
         ready: impl FnOnce(&File) -> Result<T>,
     ) -> Result<(File, T)> {
         self.fresh_as(dst, unfinished, ready, None)
+    }
+
+    /// cr-ecm32-1: where this resolution leads — the held directory (which
+    /// it is) and the name in it.
+    pub(crate) fn place(&self) -> std::io::Result<Place> {
+        use std::os::unix::fs::MetadataExt as _;
+        let directory = File::from(self.directory.try_clone()?).metadata()?;
+        Ok(Place {
+            directory: (directory.dev(), directory.ino()),
+            name: self.name.as_bytes().to_vec(),
+        })
     }
 
     /// What stands at the name in the held directory, itself — its mode
