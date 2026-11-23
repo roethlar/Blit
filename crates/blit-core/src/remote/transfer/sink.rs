@@ -3475,10 +3475,24 @@ impl<'a> PartialTarget<'a> {
     /// cr-ecm33-1: armed to remove on failure the file an ordinary copy
     /// opened — through a link at the name, it may be — and that file and
     /// no other.
+    ///
+    /// cr-ecm33-2: and the cleanup HOLDS it — the handle the copy writes
+    /// through, still writable — so that what it cannot remove (a barred
+    /// directory) it marks unfinished through that handle. Opened again by
+    /// name to be marked, a file given its read-only source's mode by the
+    /// copy could not be, and was left at its source's size, which a retry
+    /// comparing sizes skips.
     #[cfg(all(unix, not(target_os = "macos")))]
-    fn arm_opened(&mut self, opened: &std::fs::File) {
-        self.arm_made(opened);
+    fn arm_opened(&mut self, opened: std::fs::File) {
+        self.arm_made(&opened);
         self.follows = true;
+        self.held = Some(opened);
+    }
+
+    /// What the cleanup holds, for the write to go through.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn held_file(&self) -> Option<&std::fs::File> {
+        self.held.as_ref()
     }
 
     /// The file this write made no longer stands at its name: what does
@@ -3679,9 +3693,6 @@ fn copy_and_stamp_opened(
     use eyre::eyre;
     let mut did_copy = false;
     let mut resumed: Option<std::fs::File> = None;
-    // cr-ecm32-2: what the local copy opened and wrote through (Linux).
-    #[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(unused_mut))]
-    let mut opened: Option<std::fs::File> = None;
     // cr-ecm14-2: a run that keeps what exists makes the name first, by
     // a creation that fails if anything has it — and what it made is its
     // own from here: removed, should the copy fail (cr-ecm13-1: with
@@ -3762,9 +3773,11 @@ fn copy_and_stamp_opened(
             // removes what was opened — and only while it stands at the
             // name, or a link there leads to it — so nothing partial can
             // pass for a finished copy.
-            partial.arm_opened(&target);
-            crate::copy::copy_opened_into(src_file, &target, header.size, &sizer)?;
-            opened = Some(target);
+            partial.arm_opened(target);
+            let target = partial
+                .held_file()
+                .ok_or_else(|| eyre!("the opened destination is not held"))?;
+            crate::copy::copy_opened_into(src_file, target, header.size, &sizer)?;
         }
         // Elsewhere the copy goes by the name, as before: macOS clones into
         // an absent name, and Windows clones with handles of its own.
@@ -3823,7 +3836,11 @@ fn copy_and_stamp_opened(
             .ok()
             .or(fallback);
         if let Some(ft) = ft {
-            let stamped = match made.as_ref().or(resumed.as_ref()).or(opened.as_ref()) {
+            #[cfg(all(unix, not(target_os = "macos")))]
+            let opened = partial.held_file();
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
+            let opened: Option<&std::fs::File> = None;
+            let stamped = match made.as_ref().or(resumed.as_ref()).or(opened) {
                 Some(written) => filetime::set_file_handle_times(written, None, Some(ft)),
                 None => filetime::set_file_mtime(dst, ft),
             };
@@ -9006,6 +9023,63 @@ mod cr_win_1_tests {
             panic!("the copy waited on the FIFO");
         };
         assert_eq!(failed, Ok(1), "the file fails");
+    }
+
+    /// cr-ecm33-2: a local copy that fails after giving its file a read-only
+    /// source's mode, in a directory it cannot remove from, marks the file
+    /// unfinished through the handle it wrote through — one byte longer than
+    /// its source — and says it was left. Opened again by name, the file
+    /// could not be written, and was left at its source's size.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[tokio::test]
+    async fn a_local_copy_marks_what_it_cannot_remove_through_its_handle() {
+        use std::os::unix::fs::PermissionsExt as _;
+        struct Reopened(PathBuf);
+        impl Drop for Reopened {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+                if let Ok(mut prefixes) = METADATA_TAIL_FAULT_PREFIXES.lock() {
+                    prefixes.retain(|prefix| prefix != &self.0);
+                }
+            }
+        }
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("ro.bin"), b"8 bytes!").unwrap();
+        std::fs::set_permissions(src.join("ro.bin"), std::fs::Permissions::from_mode(0o444))
+            .unwrap();
+        std::fs::write(dst.join("ro.bin"), b"old").unwrap();
+        let _reopened = Reopened(dst.clone());
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::write(dst.join("probe"), b"").is_ok() {
+            eprintln!("SKIPPED: this process is not barred by a directory's mode");
+            return;
+        }
+        METADATA_TAIL_FAULT_PREFIXES
+            .lock()
+            .unwrap()
+            .push(dst.clone());
+        let sink = FsTransferSink::new(src.clone(), dst.clone(), FsSinkConfig::default());
+        let outcome = sink
+            .write_payload(PreparedPayload::File(make_file_header("ro.bin", 8)))
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        assert!(
+            outcome.failures[0]
+                .reason
+                .contains(INCOMPLETE_LEFT_IN_PLACE),
+            "{}",
+            outcome.failures[0].reason
+        );
+        assert_eq!(
+            std::fs::metadata(dst.join("ro.bin")).unwrap().len(),
+            9,
+            "marked unfinished, not at its source's size"
+        );
     }
 
     /// cr-ecm33-1: an ordinary local copy through a link standing at its
