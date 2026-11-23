@@ -6716,25 +6716,19 @@ async fn compute_resume_block_hashes(
         };
         // cr-ecm32-1: and where the name leads, resolved as the hold resolves
         // it — the directory the chain ends in and the name there — for the
-        // partial to be made there and nowhere else. A name whose directory
-        // is not there yet leads nowhere yet.
+        // partial to be made there and nowhere else. cr-ecm33-3: every
+        // resume asked for here is of a file the diff saw, so a directory
+        // that cannot be established now — gone since, or anything else —
+        // is no place to write: the file fails at its hold. Taken for a
+        // directory not made yet, it was written wherever the hold's own
+        // resolution led, a directory come back as a link to another among
+        // them.
         #[cfg(unix)]
-        let place = {
-            let unmade = leaf.is_none()
-                && dst.parent().is_some_and(|parent| {
-                    std::fs::symlink_metadata(parent)
-                        .is_err_and(|gone| gone.kind() == std::io::ErrorKind::NotFound)
-                });
-            if unmade {
-                None
-            } else {
-                match crate::copy::resolve_destination(&dst, None)
-                    .and_then(|resolved| resolved.place().map_err(eyre::Report::new))
-                {
-                    Ok(place) => Some(place),
-                    Err(_) => return unjustified(),
-                }
-            }
+        let place = match crate::copy::resolve_destination(&dst, None)
+            .and_then(|resolved| resolved.place().map_err(eyre::Report::new))
+        {
+            Ok(place) => Some(place),
+            Err(_) => return unjustified(),
         };
         #[cfg(not(unix))]
         let place: Option<crate::copy::Place> = None;
@@ -11353,6 +11347,26 @@ mod own_incomplete_copy_tests {
             .unwrap()
             .place()
             .unwrap()
+    }
+
+    /// cr-ecm33-3: a resume whose destination's directory is gone by its
+    /// hashing — the diff saw the file — justifies no write: it is sent
+    /// `Unjustified`. Taken for a directory not made yet, it carried no
+    /// place, and the hold wrote wherever its own resolution led.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_resume_whose_directory_is_gone_justifies_no_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let (hashes, baseline) =
+            compute_resume_block_hashes(&root, None, "gone/r.bin", None, Some(0o100600), 1024)
+                .await
+                .unwrap();
+        assert!(hashes.is_empty());
+        assert_eq!(
+            baseline,
+            crate::remote::transfer::sink::ResumeBaseline::Unjustified
+        );
     }
 
     /// cr-ecm32-1: a resume whose comparison cannot look at where its name

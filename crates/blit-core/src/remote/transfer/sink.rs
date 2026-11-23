@@ -2815,8 +2815,9 @@ pub enum ResumeBaseline {
     /// ends in and the name there — when that was found: the partial is
     /// made only where the hold's own resolution leads to the same place.
     /// A link of the chain redirected since, between two empty names, led
-    /// the hold to make it at the other. (No place: the name's directory
-    /// was not there yet.)
+    /// the hold to make it at the other. (No place off Unix, where none is
+    /// found; on Unix a place that cannot be found is `Unjustified`,
+    /// cr-ecm33-3.)
     WholeOf {
         leaf: Option<crate::moved::Version>,
         end: Option<crate::moved::Version>,
