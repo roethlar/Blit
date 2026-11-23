@@ -782,14 +782,19 @@ impl Resolved {
         // it — so that nothing there looks finished, and the error says where
         // and why. Left at no length, or its removal's failure dropped, it
         // stood there as an empty file, or as the copy's own, unreported.
+        // cr-ecm32-5: said in the words every record of a failure is read for
+        // "this run left its own copy here" — the summary's left-in-place
+        // set, a job's record, a retry. Said otherwise, the partial was
+        // named in the error and missing from that set.
         let left = |why: String| -> String {
+            use crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE;
             match file.set_len(unfinished) {
                 Ok(()) => format!(
-                    "the fresh partial is left at {}, marked unfinished: {why}",
+                    "{INCOMPLETE_LEFT_IN_PLACE}: the fresh partial is left at {}, marked unfinished: {why}",
                     dst.display()
                 ),
                 Err(unmarked) => format!(
-                    "the fresh partial is left at {}, and could not be marked unfinished ({unmarked}): {why}",
+                    "{INCOMPLETE_LEFT_IN_PLACE}: the fresh partial is left at {}, and could not be marked unfinished ({unmarked}): {why}",
                     dst.display()
                 ),
             }

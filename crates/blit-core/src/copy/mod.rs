@@ -11,7 +11,7 @@ pub use compare::{
 pub(crate) use file_copy::resume::{effective_user, is_link, resolve_destination};
 #[cfg(all(test, unix))]
 pub(crate) use file_copy::resume::{
-    AFTER_A_RESOLVE_HOOKS, BEFORE_A_FRESH_PARTIAL_IS_MADE_HOOKS, RUN_AS,
+    AFTER_A_RESOLVE_HOOKS, BEFORE_A_FRESH_PARTIAL_IS_MADE_HOOKS, FRESH_LOOK_FAULTS, RUN_AS,
 };
 pub use file_copy::resume::{DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE};
 pub use file_copy::{

@@ -8853,6 +8853,62 @@ mod cr_win_1_tests {
         assert_eq!(std::fs::read(&late).unwrap(), b"theirs");
     }
 
+    /// cr-ecm32-5: a fresh partial a local resume leaves behind — marked
+    /// unfinished, its first look refused — is reported as this run's
+    /// incomplete copy left in place, in the words the summary's
+    /// left-in-place set is read from. Named only in the error, it was
+    /// missing from that set, and from what retries and job records read.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fresh_partial_left_behind_is_reported_left_in_place() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("r.bin"), b"8 bytes!").unwrap();
+        std::fs::set_permissions(src.join("r.bin"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let at = dst.join("r.bin");
+        // Wider than its source: not reused, a fresh partial is made for it.
+        std::fs::write(&at, b"half").unwrap();
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o644)).unwrap();
+        crate::copy::FRESH_LOOK_FAULTS
+            .lock()
+            .unwrap()
+            .push(at.clone());
+        let sink = FsTransferSink::new(
+            src.clone(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let outcome = sink
+            .write_payload(PreparedPayload::File(make_file_header("r.bin", 8)))
+            .await
+            .unwrap();
+        crate::copy::FRESH_LOOK_FAULTS
+            .lock()
+            .unwrap()
+            .retain(|path| path != &at);
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        assert!(
+            outcome.failures[0]
+                .reason
+                .contains(INCOMPLETE_LEFT_IN_PLACE),
+            "{}",
+            outcome.failures[0].reason
+        );
+        assert_eq!(
+            std::fs::metadata(&at).unwrap().len(),
+            9,
+            "marked unfinished"
+        );
+    }
+
     /// cr-ecm32-3: a local copy whose source is a FIFO — put in a file's
     /// place after the scan, no one writing it — does not wait on it: the
     /// file fails. Opened as any file is, it waited for a writer, and the
