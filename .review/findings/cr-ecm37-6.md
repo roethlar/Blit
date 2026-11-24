@@ -5,9 +5,9 @@
 - the report's shortened rendering of that name.
 
 The record counted one failure. The head retried both entries and reported two failures.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r39` (Codex openreview, 2026-11-24) reviewed `6ee7ed5e..86d69ee3` — the `combined-r38` fixes — with `guard_confirmed: true`: "The session-held directory, explicit failure index, structured unknown disposition and hash-based summary lookups are sound choices. I would keep them and require the following corrections." "A truncated record counting one failure yielded two retry names when its log supplied both the full and shortened spellings. Require the recovered identity count to equal the recorded failure count after merging the log." The remaining work is cr-ecm38-7
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm37-6`)
+**Commit**: `1bc7aaa9`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r38` over `2c55cb3a..6ee7ed5e` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r38.codex.md`. It completes cr-ecm36-3 (`f29d3dc7`) in part.
 
 ## Evidence

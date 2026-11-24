@@ -5,9 +5,9 @@
 The reviewer also named two places that went by the name:
 - the directories a write needs were made by `create_dir_all`, which follows a directory on the way that has become a link out of the destination;
 - where the kernel has no `openat2`, the opens went by the name.
-**Status**: Fixed on Linux; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r39` (Codex openreview, 2026-11-24) reviewed `6ee7ed5e..86d69ee3` — the `combined-r38` fixes — with `guard_confirmed: true`: "The session-held directory, explicit failure index, structured unknown disposition and hash-based summary lookups are sound choices. I would keep them and require the following corrections." "If the destination is renamed and another directory takes its old name, the fallback used for internal absolute links or unavailable `openat2` can open the replacement. Directory creation and resume also use the pathname. Resolve, create and reopen relative to the session's held directory, including on fallback." The remaining work is cr-ecm38-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm37-1`)
+**Commit**: `6e49eb4a`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r38` over `2c55cb3a..6ee7ed5e` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r38.codex.md`. It completes cr-ecm36-1 (`d5378b09`).
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-ecm37-7: the summary join still searched the leftover lists for each failed file
 
 **Severity**: MEDIUM — a run with many failures stalls at its summary. cr-ecm36-4 made the join of failures to failed paths a hash lookup. It left the lookup into the leftover lists, `left_in_place` and `left_in_place_raw`, as a search of each list for each failed file. With every failed file leaving a partial, the join took 91 ms for 6,000 files, 356 ms for 12,000 and 1.41 s for 24,000 in a debug build.
-**Status**: Fixed; awaiting review
+**Status**: Verified — `combined-r39` (Codex openreview, 2026-11-24) reviewed `6ee7ed5e..86d69ee3` — the `combined-r38` fixes — with `guard_confirmed: true`: "The session-held directory, explicit failure index, structured unknown disposition and hash-based summary lookups are sound choices. I would keep them and require the following corrections."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm37-7`)
+**Commit**: `a9a57a9f`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r38` over `2c55cb3a..6ee7ed5e` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r38.codex.md`. It completes cr-ecm36-4 (`c8fe7147`) in part.
 
 ## Evidence

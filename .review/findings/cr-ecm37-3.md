@@ -5,9 +5,9 @@
 When the source failed a resume record, the close looked up what stood at the name. Any failure of that lookup was taken for "gone". With the search permission of the file's directory taken before the close, the receiver reported `left_in_place = false` while the nine-byte partial for an eight-byte source stood. An `--ignore-existing` retry would then keep that partial.
 
 And there was no way to say "not known" for one file: a failure's disposition was a bool on the progress lane and on the wire.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r39` (Codex openreview, 2026-11-24) reviewed `6ee7ed5e..86d69ee3` — the `combined-r38` fixes — with `guard_confirmed: true`: "The session-held directory, explicit failure index, structured unknown disposition and hash-based summary lookups are sound choices. I would keep them and require the following corrections." "I passed a failure with unknown partial status through the production record writer. With `--ignore-existing`, `jobs retry` exited successfully and left the nine-byte partial in place for an eight-byte source. Persist the per-file unknown state, or mark the saved account incomplete so retry can decline it." "Under `--ignore-existing`, a shortened but explicitly linked failure with unknown disposition suppressed a separate, eligible retry. With a short name, the sibling retried successfully, but the known failure lost its name and reason. Honor the index when counting unknown dispositions and carry named failures forward alongside the anonymous remainder." The remaining work is cr-ecm38-3 and -5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm37-3`)
+**Commit**: `1d5be9a8`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r38` over `2c55cb3a..6ee7ed5e` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r38.codex.md`. It completes cr-ecm36-5 (`e07ef48a`).
 
 ## Evidence

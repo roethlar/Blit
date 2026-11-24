@@ -1,0 +1,26 @@
+The goal is to let a transfer finish the files it can, then retry exactly the files that still need work. I would anchor every destination write to the directory the session opened and carry two facts about each failure through reporting, retry and saved jobs: the file’s exact identity and whether the run left a partial copy. A bounded diagnostic can refer to that identity by index.
+
+**Verdict `acceptable_with_changes`.** The session-held directory, explicit failure index, structured unknown disposition and hash-based summary lookups are sound choices. I would keep them and require the following corrections.
+
+1. **High — preserve the original retry selection.** With a single-file source and a `--files-from` list containing only `.`, the first pass rejected the entry. With two retries, the command copied the unselected source and exited successfully. The scan converts text failures into raw-byte identities, bypassing list-entry handling on Linux. On Windows and macOS, that raw-name path drops even ordinary text names. Preserve the distinction between a text path, a raw filename and a list entry that names no file. [Scan failure recording](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/transfer_session/mod.rs:1566) · [Retry filter](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/transfers/filter.rs:215)
+
+2. **High — use the held Linux directory throughout.** If the destination is renamed and another directory takes its old name, the fallback used for internal absolute links or unavailable `openat2` can open the replacement. Directory creation and resume also use the pathname. Resolve, create and reopen relative to the session’s held directory, including on fallback. [Fallback open](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/copy/file_copy/mod.rs:650) · [Directory creation](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/copy/file_copy/mod.rs:830) · [Resume open](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:4215)
+
+3. **High — preserve uncertainty in saved jobs.** I passed a failure with unknown partial status through the production record writer. With `--ignore-existing`, `jobs retry` exited successfully and left the nine-byte partial in place for an eight-byte source. Persist the per-file unknown state, or mark the saved account incomplete so retry can decline it. [Record writer](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/src/run_log.rs:686) · [Saved retry](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/src/jobs.rs:327)
+
+4. **High — account for partials created during Windows resume.** By inspection, if a resume target disappears before the first block, the sink can create a partial, discard the creation result and report nothing left when the source aborts. Retain evidence of creation or report the disposition as unknown. [Partial creation](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:3595) · [Hold result](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:3299) · [Failure close](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:1919)
+
+5. **Medium — retain known failures withheld from a retry.** Under `--ignore-existing`, a shortened but explicitly linked failure with unknown disposition suppressed a separate, eligible retry. With a short name, the sibling retried successfully, but the known failure lost its name and reason. Honor the index when counting unknown dispositions and carry named failures forward alongside the anonymous remainder. [Wire accounting](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:665) · [Retry accounting](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/src/transfers/retry.rs:348)
+
+6. **Medium — link diagnostics only from exact identities.** A delegated retry emitted a zero index for a 4,504-byte path, losing its reason on decode. Separately, an already-shortened display that matched another file’s literal name acquired that file’s index. Use the shared encoder for delegated retries and require an exact identity before assigning a link. [Delegated encoder](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/src/transfers/retry.rs:551) · [Index lookup](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:267)
+
+7. **Medium — validate the final recovered retry set.** A truncated record counting one failure yielded two retry names when its log supplied both the full and shortened spellings. Require the recovered identity count to equal the recorded failure count after merging the log. [Log merge and count check](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/src/jobs.rs:575)
+
+Linux formatting, strict Clippy and workspace tests passed, with **2,122 tests passed and two ignored**. Windows and macOS passed cross-target Clippy. The independent guard failed when I removed retained names from a truncated retry list and passed after restoration. I read `AGENTS.md`, resolved the head with `git rev-parse`, removed the disposable export and verified the tracked checkout still matched the head.
+
+```text
+base: 6ee7ed5e95b02480dc18b778bbdd71ed725b4ed7
+head: 86d69ee3a9f137bf6f8031c3aca10e40ac76fea5
+capability_ok: true
+guard_confirmed: true
+```

@@ -4,9 +4,9 @@
 - **The retry.** With 260 missing long names the failed-path list was cut for size, and the retry fell back to the report's names alone. Every one of those was shortened, so `--retries 1` retried none, though the list carried 225 exact names. The saved record held all 225.
 - **JSON** showed a 4,096-byte rendering of a 4,583-byte name with no flag.
 - **The saved record** named the long file without its reason.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r39` (Codex openreview, 2026-11-24) reviewed `6ee7ed5e..86d69ee3` — the `combined-r38` fixes — with `guard_confirmed: true`: "The session-held directory, explicit failure index, structured unknown disposition and hash-based summary lookups are sound choices. I would keep them and require the following corrections." "Under `--ignore-existing`, a shortened but explicitly linked failure with unknown disposition suppressed a separate, eligible retry. With a short name, the sibling retried successfully, but the known failure lost its name and reason. Honor the index when counting unknown dispositions and carry named failures forward alongside the anonymous remainder." "A delegated retry emitted a zero index for a 4,504-byte path, losing its reason on decode. Separately, an already-shortened display that matched another file's literal name acquired that file's index. Use the shared encoder for delegated retries and require an exact identity before assigning a link." The remaining work is cr-ecm38-5 and -6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm37-5`)
+**Commit**: `a57e4bd0`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r38` over `2c55cb3a..6ee7ed5e` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r38.codex.md`. It completes cr-ecm36-3 (`f29d3dc7`) in part.
 
 ## Evidence
