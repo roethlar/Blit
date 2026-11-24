@@ -217,6 +217,7 @@ impl FileFailure {
                 .clone()
                 .filter(|raw| raw.len() <= MAX_FAILURE_PATH_BYTES)
                 .unwrap_or_default(),
+            left_in_place: self.left_in_place,
         }
     }
 
@@ -228,7 +229,8 @@ impl FileFailure {
             reason: wire.reason.clone(),
             raw_relative_path: (!wire.raw_relative_path.is_empty())
                 .then(|| wire.raw_relative_path.clone()),
-            left_in_place: false,
+            // cr-ecm34-5: as the wire carries it (contract 30).
+            left_in_place: wire.left_in_place,
         }
     }
 }
@@ -4966,6 +4968,26 @@ impl TransferSink for NullSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cr-ecm34-5: a failure keeps whether it left its copy across the
+    /// wire (contract 30), as it keeps its name's bytes.
+    #[test]
+    fn a_failure_keeps_its_disposition_across_the_wire() {
+        let mut outcome = SinkOutcome::default();
+        outcome.record_failure_leaving("r.bin", Some(b"r\xff.bin".to_vec()), "left", true);
+        outcome.record_failure("s.bin", "source: cannot open");
+        let back: Vec<FileFailure> = outcome
+            .failures
+            .iter()
+            .map(|failure| FileFailure::from_wire(&failure.to_wire()))
+            .collect();
+        assert!(back[0].left_in_place);
+        assert_eq!(
+            back[0].raw_relative_path.as_deref(),
+            Some(&b"r\xff.bin"[..])
+        );
+        assert!(!back[1].left_in_place);
+    }
 
     /// D-2026-11-24-1 (cr-ecm33-5): whether a failure left this run's copy
     /// in place is said by the flag its maker sets, never read from words:

@@ -236,7 +236,11 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// summary has reached the source and what did not land is struck from
 /// it. No message changed. A daemon of contract 28 would let a removal
 /// take a file rewritten within the second it was sent in.
-pub const CONTRACT_VERSION: u32 = 29;
+/// v30: `FileFailure.left_in_place` (cr-ecm34-5) — a failure carries
+/// whether it left this run's own incomplete copy, so a summary read back
+/// keeps it. A daemon of contract 29 sends none, which reads as nothing
+/// left.
+pub const CONTRACT_VERSION: u32 = 30;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames
@@ -1594,6 +1598,7 @@ fn requested_but_unscanned(
             relative_path: rel,
             reason,
             raw_relative_path,
+            left_in_place: false,
         });
     }
     (out, dropped)
@@ -2541,6 +2546,7 @@ async fn source_send_half(
                                             relative_path: failure.relative_path,
                                             reason: failure.reason,
                                             raw_relative_path: failure.raw_relative_path.unwrap_or_default(),
+                                            left_in_place: false,
                                         },
                                     )))
                                     .await?;
@@ -3529,6 +3535,7 @@ async fn send_payload_records(
                     relative_path: failure.relative_path,
                     reason: failure.reason,
                     raw_relative_path: failure.raw_relative_path.unwrap_or_default(),
+                    left_in_place: false,
                 })))
                 .await?;
             }
@@ -3547,6 +3554,7 @@ async fn send_payload_records(
                             relative_path: header.relative_path.clone(),
                             reason: format!("source: cannot open: {err:#}"),
                             raw_relative_path: header.raw_relative_path.clone().unwrap_or_default(),
+                            left_in_place: false,
                         })))
                         .await?;
                         continue;
@@ -3561,6 +3569,7 @@ async fn send_payload_records(
                             relative_path: header.relative_path.clone(),
                             reason: format!("source: cannot read metadata: {err}"),
                             raw_relative_path: header.raw_relative_path.clone().unwrap_or_default(),
+                            left_in_place: false,
                         })))
                         .await?;
                         continue;
@@ -3574,6 +3583,7 @@ async fn send_payload_records(
                             header.size
                         ),
                         raw_relative_path: header.raw_relative_path.clone().unwrap_or_default(),
+                        left_in_place: false,
                     })))
                     .await?;
                     continue;
@@ -3661,6 +3671,7 @@ async fn send_payload_records(
                         relative_path: failure.relative_path,
                         reason: failure.reason,
                         raw_relative_path: failure.raw_relative_path.unwrap_or_default(),
+                        left_in_place: false,
                     })))
                     .await?;
                 }
@@ -3801,6 +3812,7 @@ async fn send_resume_block_records(
                     relative_path: header.relative_path.clone(),
                     reason: ResumeBlockDiff::skip_reason(&err),
                     raw_relative_path: header.raw_relative_path.clone().unwrap_or_default(),
+                    left_in_place: false,
                 })))
                 .await?;
                 return Ok(());

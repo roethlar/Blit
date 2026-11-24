@@ -899,6 +899,10 @@ pub fn totals_from_local(summary: &blit_core::transfer_session::LocalMirrorSumma
         files_resumed: 0,
         in_stream_carrier: None,
         failed_paths: summary.failed_paths.clone(),
+        failed_paths_raw: blit_core::run_log::raw_at_their_places(
+            &summary.failed_paths,
+            &summary.failed_paths_raw,
+        ),
         failed_paths_truncated: summary.failed_paths_truncated,
         failures: summary.failures.clone(),
         left_in_place: summary.left_in_place.clone(),
@@ -959,6 +963,10 @@ pub fn totals_from_delegated(summary: &blit_core::generated::DelegatedPullSummar
         files_resumed: 0,
         in_stream_carrier: Some(summary.tcp_fallback_used),
         failed_paths: summary.failed_paths.clone(),
+        failed_paths_raw: blit_core::run_log::raw_at_their_places(
+            &summary.failed_paths,
+            &summary.failed_paths_raw,
+        ),
         failed_paths_truncated: summary.failed_paths_truncated,
         failures: summary
             .failures

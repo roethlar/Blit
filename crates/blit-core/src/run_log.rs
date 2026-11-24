@@ -77,6 +77,11 @@ pub struct RunTotals {
     pub in_stream_carrier: Option<bool>,
     /// The failed files by name; exact unless `failed_paths_truncated`.
     pub failed_paths: Vec<String>,
+    /// cr-ecm34-5: the exact bytes of each of `failed_paths` whose name is
+    /// not text, at its place in that list, and nothing at the place of one
+    /// that is — one entry for every path, so a failure past the summary's
+    /// reason cap is still named by its own bytes.
+    pub failed_paths_raw: Vec<Vec<u8>>,
     pub failed_paths_truncated: bool,
     /// As many failed files as the report kept, each with its reason and
     /// — when its name is not its text — its own bytes (review
@@ -104,12 +109,27 @@ impl RunTotals {
             (Some(a), Some(b)) => Some(a || b),
             (a, b) => a.or(b),
         };
+        let mut other_raw = other.failed_paths_raw;
+        other_raw.resize(other.failed_paths.len(), Vec::new());
+        self.failed_paths_raw
+            .resize(self.failed_paths.len(), Vec::new());
         self.failed_paths.extend(other.failed_paths);
+        self.failed_paths_raw.extend(other_raw);
         self.failed_paths_truncated |= other.failed_paths_truncated;
         self.failures.extend(other.failures);
         self.left_in_place.extend(other.left_in_place);
         self.left_in_place_truncated |= other.left_in_place_truncated;
         self.left_in_place_raw.extend(other.left_in_place_raw);
+    }
+}
+
+/// A summary's `failed_paths_raw` at their places: one entry for every
+/// path (the wire sends either that, or none when no name needs bytes).
+pub fn raw_at_their_places(paths: &[String], raw: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    if raw.len() == paths.len() {
+        raw.to_vec()
+    } else {
+        vec![Vec::new(); paths.len()]
     }
 }
 
@@ -123,6 +143,7 @@ impl From<&TransferSummary> for RunTotals {
             files_resumed: summary.files_resumed,
             in_stream_carrier: Some(summary.in_stream_carrier_used),
             failed_paths: summary.failed_paths.clone(),
+            failed_paths_raw: raw_at_their_places(&summary.failed_paths, &summary.failed_paths_raw),
             failed_paths_truncated: summary.failed_paths_truncated,
             failures: summary
                 .failures
@@ -604,14 +625,22 @@ impl RunLog {
             // names collapse to one text are two files — and each named
             // once: one already named live, with those bytes, is not again.
             let mut failed = std::mem::take(&mut active.failed);
-            for path in &totals.failed_paths {
+            for (index, path) in totals.failed_paths.iter().enumerate() {
                 let named: Vec<&FileFailure> = totals
                     .failures
                     .iter()
                     .filter(|failure| &failure.relative_path == path)
                     .collect();
                 if named.is_empty() {
-                    let raw = active.raw_names.get(path).cloned();
+                    // cr-ecm34-5: by the bytes the summary carries for this
+                    // path when it has them — a run whose log heard no
+                    // name live, past the reason cap, names it exactly.
+                    let raw = totals
+                        .failed_paths_raw
+                        .get(index)
+                        .filter(|bytes| !bytes.is_empty())
+                        .map(|bytes| crate::raw_name::escape_raw(bytes))
+                        .or_else(|| active.raw_names.get(path).cloned());
                     if failed.insert((path.clone(), raw.clone())) {
                         // By the entry's own bytes when it has them, as
                         // below (cr-jl4fix2-1).
@@ -933,6 +962,71 @@ mod tests {
             })
             .collect();
         assert_eq!(raws, [Some(crate::raw_name::escape_raw(b"dup\xff.bin"))]);
+    }
+
+    /// cr-ecm34-5: a run whose log heard no name live — its account only
+    /// the summary — names a failure past the reason cap by the bytes the
+    /// summary carries for its path, and says it left its copy by them.
+    #[tokio::test]
+    async fn a_summary_only_failure_is_named_by_its_own_bytes() {
+        use crate::job_log::{open_log, LogLine};
+        let dir = tempfile::tempdir().unwrap();
+        let log = RunLog::new(
+            Some(LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: DEFAULT_KEEP,
+                finished: None,
+            }),
+            "0123456789abcdef0123456789abcdef",
+        );
+        log.start(Role::Initiator, RunInfo::default(), None);
+        let summary = TransferSummary {
+            files_failed: 2,
+            failed_paths: vec!["plain.bin".into(), "dup\u{FFFD}.bin".into()],
+            failed_paths_raw: vec![Vec::new(), b"dup\xfe.bin".to_vec()],
+            left_in_place_raw: vec![b"dup\xfe.bin".to_vec()],
+            ..TransferSummary::default()
+        };
+        let report = log
+            .close(Outcome::Failed, None, Some(RunTotals::from(&summary)))
+            .await
+            .expect("a report");
+        let failed: Vec<(String, Option<String>, Option<bool>)> =
+            open_log(&report.path.expect("a log"))
+                .unwrap()
+                .filter_map(|line| match line.unwrap() {
+                    LogLine::Event(event) => match event.body {
+                        EventBody::FileFailed {
+                            path,
+                            raw,
+                            left_in_place,
+                            ..
+                        } => Some((path, raw, left_in_place)),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+        assert_eq!(
+            failed,
+            [
+                ("plain.bin".to_string(), None, Some(false)),
+                (
+                    "dup\u{FFFD}.bin".to_string(),
+                    Some(crate::raw_name::escape_raw(b"dup\xfe.bin")),
+                    Some(true)
+                ),
+            ]
+        );
+        // Merged with a part that carried no bytes, each path keeps its own.
+        let mut merged = RunTotals {
+            failed_paths: vec!["a".into()],
+            ..RunTotals::default()
+        };
+        merged.merge(RunTotals::from(&summary));
+        assert_eq!(merged.failed_paths_raw.len(), merged.failed_paths.len());
+        assert_eq!(merged.failed_paths_raw[2], b"dup\xfe.bin".to_vec());
     }
 
     /// D-2026-11-24-1 (cr-ecm33-5): a failure the summary names without a

@@ -1574,6 +1574,10 @@ message FileFailure {
   // lossy text collides with another's names its own file; empty
   // otherwise, or when they would not fit the path bound.
   bytes raw_relative_path = 3;
+  // Contract 30 (cr-ecm34-5, D-2026-11-24-1): the failure left this run's
+  // own incomplete copy at the destination — carried with the failure, so
+  // a summary read back keeps it; never read from `reason`.
+  bool left_in_place = 4;
 }
 
 // DESTINATION → SOURCE at close: the end that wrote bytes and

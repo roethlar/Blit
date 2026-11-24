@@ -1100,6 +1100,7 @@ async fn skip_for_an_ungranted_path_is_a_violation() {
         relative_path: "evil.bin".into(),
         reason: "source: cannot open".into(),
         raw_relative_path: Vec::new(),
+        left_in_place: false,
     })))
     .await
     .unwrap();
@@ -1154,6 +1155,7 @@ async fn skip_for_a_granted_need_then_source_done_completes_with_the_failure_rep
         relative_path: "granted.bin".into(),
         reason: "source: cannot open: locked".into(),
         raw_relative_path: Vec::new(),
+        left_in_place: false,
     })))
     .await
     .unwrap();
