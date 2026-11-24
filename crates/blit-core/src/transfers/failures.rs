@@ -86,6 +86,7 @@ mod tests {
             reason: reason.to_string(),
             raw_relative_path: None,
             left_in_place: false,
+            path_shortened: false,
         }
     }
 
@@ -150,6 +151,7 @@ mod tests {
             reason: "Access is denied. (os error 5)".to_string(),
             raw_relative_path: Vec::new(),
             left_in_place: false,
+            path_shortened: false,
         }];
         let read_back = failures_from_wire(&wire);
         assert_eq!(read_back.len(), 1);

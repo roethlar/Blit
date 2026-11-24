@@ -191,6 +191,11 @@ pub struct FileFailure {
     /// the destination — set where that is known, never read from
     /// `reason`, which is for people.
     pub left_in_place: bool,
+    /// cr-ecm36-3: `relative_path` is the report's shortened rendering of a
+    /// longer name — for people only; the exact name is in the failed-path
+    /// set. Read back from a peer's report; never set where a failure is
+    /// made.
+    pub path_shortened: bool,
 }
 
 impl FileFailure {
@@ -207,8 +212,11 @@ impl FileFailure {
     /// the bound is the wire's, and the whole reason is already in the
     /// log `record_failure` wrote.
     pub fn to_wire(&self) -> crate::generated::FileFailure {
+        let relative_path = bounded_tail(&self.relative_path, MAX_FAILURE_PATH_BYTES);
         crate::generated::FileFailure {
-            relative_path: bounded_tail(&self.relative_path, MAX_FAILURE_PATH_BYTES),
+            // cr-ecm36-3: said, when the path was shortened.
+            path_shortened: self.path_shortened || relative_path != self.relative_path,
+            relative_path,
             reason: bounded_head(&self.reason, MAX_FAILURE_REASON_BYTES),
             // A cut name is no identity: bytes past the bound are dropped
             // whole, and the text stands alone.
@@ -231,6 +239,7 @@ impl FileFailure {
                 .then(|| wire.raw_relative_path.clone()),
             // cr-ecm34-5: as the wire carries it (contract 30).
             left_in_place: wire.left_in_place,
+            path_shortened: wire.path_shortened,
         }
     }
 }
@@ -420,6 +429,7 @@ impl SinkOutcome {
                 reason,
                 raw_relative_path,
                 left_in_place,
+                path_shortened: false,
             });
         }
     }
@@ -7264,6 +7274,7 @@ mod tests {
                 reason: "direct".into(),
                 raw_relative_path: None,
                 left_in_place: false,
+                path_shortened: false,
             })
             .collect();
         unbounded.files_failed_total = unbounded.failures.len() as u64;
@@ -7516,6 +7527,7 @@ mod tests {
             reason: "write dir/one.bin: Access is denied".into(),
             raw_relative_path: None,
             left_in_place: false,
+            path_shortened: false,
         };
         assert_eq!(FileFailure::from_wire(&failure.to_wire()), failure);
     }
@@ -10074,6 +10086,22 @@ mod cr_win_1_tests {
         assert!(outcome.failures[0]
             .reason
             .starts_with("source: read error; "));
+    }
+
+    /// cr-ecm36-3: a failure whose path the report shortens says so on the
+    /// wire, and reads back saying so.
+    #[test]
+    fn a_shortened_path_says_it_was_shortened() {
+        let long = format!("{}/name.bin", "d".repeat(MAX_FAILURE_PATH_BYTES + 500));
+        let mut outcome = SinkOutcome::default();
+        outcome.record_failure(long.clone(), "source: missing");
+        outcome.record_failure("short.bin", "source: missing");
+        let wire: Vec<crate::generated::FileFailure> =
+            outcome.failures.iter().map(FileFailure::to_wire).collect();
+        assert!(wire[0].path_shortened);
+        assert_ne!(wire[0].relative_path, long);
+        assert!(!wire[1].path_shortened);
+        assert!(FileFailure::from_wire(&wire[0]).path_shortened);
     }
 
     /// cr-ecm36-4: seventy failed names of one text are seventy entries,

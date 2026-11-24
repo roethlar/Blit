@@ -222,7 +222,12 @@ impl PassFailures {
         let truncated =
             self.failed_paths_truncated || (self.files_failed as usize) > self.failures.len();
         let mut named = RetrySet::default();
-        for failure in &self.failures {
+        // cr-ecm36-3: a path the report shortened names no file to retry.
+        for failure in self
+            .failures
+            .iter()
+            .filter(|failure| !failure.path_shortened)
+        {
             match &failure.raw_relative_path {
                 Some(raw) => {
                     named.raw.insert(raw.clone());
@@ -731,6 +736,7 @@ mod tests {
             reason: "source: cannot open: boom".to_string(),
             raw_relative_path: None,
             left_in_place: false,
+            path_shortened: false,
         }
     }
 
@@ -1490,6 +1496,7 @@ mod cr_fix2_2_tests {
                 reason: "source: missing at retry".to_string(),
                 raw_relative_path: None,
                 left_in_place: false,
+                path_shortened: false,
             }],
             failed_paths: vec!["a".to_string()],
             failed_paths_truncated: false,

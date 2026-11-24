@@ -159,6 +159,11 @@ impl RunTotals {
             std::collections::HashSet::new();
         let mut named_texts: std::collections::HashSet<String> = std::collections::HashSet::new();
         for failure in &self.failures {
+            // cr-ecm36-3: a path the report shortened is a rendering, not a
+            // name: the exact name is among the failed paths.
+            if failure.path_shortened {
+                continue;
+            }
             let raw = failure.raw_relative_path.clone();
             if !named.insert((failure.relative_path.clone(), raw.clone())) {
                 continue;
@@ -1018,6 +1023,7 @@ mod tests {
                 reason: "duplicate".into(),
                 raw_relative_path: Some(b"dup\xff.bin".to_vec()),
                 left_in_place: false,
+                path_shortened: false,
             }],
             ..RunTotals::default()
         };
@@ -1135,6 +1141,29 @@ mod tests {
         assert_eq!(whole.failed_files()[1].left_in_place, Some(false));
     }
 
+    /// cr-ecm36-3: a failure whose path the report shortened is no file: the
+    /// long name, from the failed-path set, is the one file failed. Taken
+    /// for a name, the shortened rendering was a second file, and the list
+    /// was called whole.
+    #[test]
+    fn a_shortened_path_is_no_file() {
+        let long = format!("{}/name.bin", "d".repeat(4600));
+        let totals = RunTotals {
+            files_failed: 1,
+            failed_paths: vec![long.clone()],
+            failures: vec![FileFailure {
+                relative_path: "[truncated]…name.bin".into(),
+                reason: "source: missing".into(),
+                path_shortened: true,
+                ..FileFailure::default()
+            }],
+            ..RunTotals::default()
+        };
+        let files = totals.failed_files();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert_eq!(files[0].path, long);
+    }
+
     /// cr-ecm35-3: two failed files of one text, the reason cap falling
     /// between them, are two files — each logged by its own bytes, the one
     /// past the cap with no reason. Joined by the text, the second was not
@@ -1163,6 +1192,7 @@ mod tests {
                 reason: "denied".into(),
                 raw_relative_path: Some(b"dup\xff".to_vec()),
                 left_in_place: false,
+                path_shortened: false,
             }],
             ..RunTotals::default()
         };
@@ -1293,12 +1323,14 @@ mod tests {
                     reason: "denied".into(),
                     raw_relative_path: None,
                     left_in_place: false,
+                    path_shortened: false,
                 },
                 FileFailure {
                     relative_path: text.clone(),
                     reason: "duplicate".into(),
                     raw_relative_path: Some(b"dup\xff.bin".to_vec()),
                     left_in_place: false,
+                    path_shortened: false,
                 },
             ],
             ..RunTotals::default()

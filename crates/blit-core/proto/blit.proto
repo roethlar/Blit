@@ -1578,6 +1578,10 @@ message FileFailure {
   // own incomplete copy at the destination — carried with the failure, so
   // a summary read back keeps it; never read from `reason`.
   bool left_in_place = 4;
+  // Contract 31 (cr-ecm36-3): `relative_path` was shortened to fit the
+  // report — a rendering for people, not a name: the exact name is in the
+  // failed-path set, and nothing that names files takes this one for it.
+  bool path_shortened = 5;
 }
 
 // DESTINATION → SOURCE at close: the end that wrote bytes and
