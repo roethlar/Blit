@@ -3899,7 +3899,8 @@ fn copy_and_stamp_opened(
         {
             // The source's path is for the clone paths elsewhere.
             let _ = src;
-            let target = crate::copy::create_regular(dst).map_err(eyre::Report::new)?;
+            let target =
+                crate::copy::create_regular_within(dst, within).map_err(eyre::Report::new)?;
             // cr-ssc4-2: from here until the validated success, any exit
             // removes what was opened — and only while it stands at the
             // name, or a link there leads to it — so nothing partial can

@@ -280,61 +280,87 @@ pub fn open_regular(path: &Path) -> std::io::Result<File> {
 ///
 /// cr-ecm33-5: and what it MADE — where nothing stood — is its own: made, a
 /// file whose check then fails is removed, not left behind; one that stood
-/// there is left as it was. Made and then refused, an empty file stood at
-/// the name, reported nowhere.
+/// there is left as it was.
 ///
-/// cr-ecm34-1 (Unix): where the name is a link, what is made or opened is
-/// the file its links lead to — found first, so a file made through a
-/// dangling link is known to be made, and its name is the one removed. And
-/// what it made is removed only while that name still holds it: one put
-/// there since is somebody's. Every step that can fail, to the cut, is
-/// settled so.
+/// See [`create_regular_within`]: this is it with no destination root.
 pub fn create_regular(dst: &Path) -> std::io::Result<File> {
-    #[cfg(unix)]
-    let resolved = links_resolved(dst)?;
-    #[cfg(unix)]
-    let dst = resolved.as_path();
+    create_regular_within(dst, None)
+}
+
+/// [`create_regular`] for a destination whose root is `within` (canonical).
+///
+/// cr-ecm35-1 (Unix): a file is made only by a creation that fails if the
+/// name is taken — at the name itself, never through a link — and a taken
+/// name is opened without making anything: a file gone between the two
+/// opens is not made by the second, unrecorded. A link at the name that
+/// leads to nothing has the file it names made where it leads, found by
+/// the same resolution a resume's partial is (the chain followed as the
+/// system follows it, its end within `within`, the directory held): a link
+/// out of the destination makes nothing outside it. A refused file it made
+/// is removed only while that place still holds it, its handle held.
+#[cfg(unix)]
+pub fn create_regular_within(dst: &Path, within: Option<&Path>) -> std::io::Result<File> {
+    let (file, made) = acquire_to_write(dst, within)?;
+    // Which file was made, taken before anything else is asked of it: the
+    // look below may be what fails.
+    let mine = made
+        .as_ref()
+        .and_then(|_| file.metadata().ok())
+        .map(|found| identity_of(&found));
+    let checked = create_look_fault(dst)
+        .and_then(|()| file.metadata())
+        .and_then(|found| {
+            if found.is_file() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(format!(
+                    "{} is not a regular file",
+                    dst.display()
+                )))
+            }
+        })
+        .and_then(|()| file.set_len(0));
+    if let Err(error) = checked {
+        if let Some(at) = made {
+            let removed = at.remove_if_mine(mine);
+            drop(file);
+            if let Err(unremoved) = removed {
+                return Err(std::io::Error::other(
+                    crate::remote::transfer::sink::LeftInPlace(format!(
+                        "{}: {error}; the empty file made at {} could not be removed: {unremoved}",
+                        crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE,
+                        dst.display()
+                    )),
+                ));
+            }
+        }
+        return Err(error);
+    }
+    Ok(file)
+}
+
+/// Off Unix: as before — made where nothing stands, else opened, a link
+/// written through and what it names made — and a refused file made is
+/// removed by name.
+#[cfg(not(unix))]
+pub fn create_regular_within(dst: &Path, _within: Option<&Path>) -> std::io::Result<File> {
     let options = |make: bool| {
         let mut open = std::fs::OpenOptions::new();
         open.write(true);
         if make {
             open.create_new(true);
         } else {
-            // A link standing at the name is written through, and what it
-            // names made, as any copy's open does.
             open.create(true).truncate(false);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            open.custom_flags(libc::O_NONBLOCK);
         }
         open
     };
-    let opened = match options(true).open(dst) {
-        Ok(file) => Ok((file, true)),
+    let (file, made) = match options(true).open(dst) {
+        Ok(file) => (file, true),
         Err(taken) if taken.kind() == std::io::ErrorKind::AlreadyExists => {
-            options(false).open(dst).map(|file| (file, false))
-        }
-        Err(error) => Err(error),
-    };
-    let (file, made) = match opened {
-        Ok(opened) => opened,
-        #[cfg(unix)]
-        Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {
-            return Err(std::io::Error::other(format!(
-                "{} is a FIFO no one reads, not a regular file",
-                dst.display()
-            )))
+            (options(false).open(dst)?, false)
         }
         Err(error) => return Err(error),
     };
-    // cr-ecm34-1: which file was made, taken before anything else is
-    // asked of it; the look below may be what fails.
-    #[cfg(unix)]
-    let mine = made
-        .then(|| file.metadata().ok().map(|found| identity_of(&found)))
-        .flatten();
     let checked = create_look_fault(dst)
         .and_then(|()| file.metadata())
         .and_then(|found| {
@@ -351,11 +377,7 @@ pub fn create_regular(dst: &Path) -> std::io::Result<File> {
     if let Err(error) = checked {
         if made {
             drop(file);
-            #[cfg(unix)]
-            let removed = remove_if_mine(dst, mine);
-            #[cfg(not(unix))]
-            let removed = std::fs::remove_file(dst);
-            if let Err(unremoved) = removed {
+            if let Err(unremoved) = std::fs::remove_file(dst) {
                 return Err(std::io::Error::other(
                     crate::remote::transfer::sink::LeftInPlace(format!(
                         "{}: {error}; the empty file made at {} could not be removed: {unremoved}",
@@ -370,26 +392,109 @@ pub fn create_regular(dst: &Path) -> std::io::Result<File> {
     Ok(file)
 }
 
-/// cr-ecm34-1: `dst` with the links standing at its name followed to the
-/// name they lead to — as an open would follow them, but known, so what is
-/// made there is known to be made. A name that is no link is itself.
+/// cr-ecm35-1: where a file the opener made stands — at the name itself, or
+/// where a link at the name led, in the directory held.
 #[cfg(unix)]
-fn links_resolved(dst: &Path) -> std::io::Result<std::path::PathBuf> {
-    let mut at = dst.to_path_buf();
-    // As the system's own bound on a chain of links (ELOOP).
-    for _ in 0..40 {
-        match std::fs::symlink_metadata(&at) {
-            Ok(found) if found.file_type().is_symlink() => {
-                let leads_to = std::fs::read_link(&at)?;
-                at = match at.parent() {
-                    Some(parent) if leads_to.is_relative() => parent.join(leads_to),
-                    _ => leads_to,
-                };
-            }
-            _ => return Ok(at),
+enum MadeAt {
+    Name(std::path::PathBuf),
+    Held(crate::copy::Resolved),
+}
+
+#[cfg(unix)]
+impl MadeAt {
+    fn remove_if_mine(&self, mine: Option<(u64, u64)>) -> std::io::Result<()> {
+        match self {
+            MadeAt::Name(dst) => remove_if_mine(dst, mine),
+            MadeAt::Held(resolved) => resolved.remove_if(mine),
         }
     }
-    Err(std::io::Error::from_raw_os_error(libc::ELOOP))
+}
+
+/// The file at `dst` to be written, and where it was made if it was. See
+/// [`create_regular_within`].
+#[cfg(unix)]
+fn acquire_to_write(dst: &Path, within: Option<&Path>) -> std::io::Result<(File, Option<MadeAt>)> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let options = |make: bool| {
+        let mut open = std::fs::OpenOptions::new();
+        open.write(true).custom_flags(libc::O_NONBLOCK);
+        if make {
+            open.create_new(true);
+        }
+        open
+    };
+    let refused = |error: std::io::Error| {
+        if error.raw_os_error() == Some(libc::ENXIO) {
+            std::io::Error::other(format!(
+                "{} is a FIFO no one reads, not a regular file",
+                dst.display()
+            ))
+        } else {
+            error
+        }
+    };
+    // A name that keeps changing between the opens is given up on.
+    for _ in 0..4 {
+        match options(true).open(dst) {
+            Ok(file) => return Ok((file, Some(MadeAt::Name(dst.to_path_buf())))),
+            Err(taken) if taken.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(refused(error)),
+        }
+        between_the_two_opens(dst);
+        match options(false).open(dst) {
+            Ok(file) => return Ok((file, None)),
+            Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => {
+                // Taken a moment ago, leading to nothing now: a link to
+                // nothing, whose file is made where it leads — or a file gone
+                // between the opens, and the name is tried again.
+                let a_link = std::fs::symlink_metadata(dst)
+                    .is_ok_and(|there| there.file_type().is_symlink());
+                if !a_link {
+                    continue;
+                }
+                let resolved = crate::copy::resolve_destination(dst, within)
+                    .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+                match resolved
+                    .open(libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NONBLOCK)
+                {
+                    Ok(file) => return Ok((file, Some(MadeAt::Held(resolved)))),
+                    Err(taken) if taken.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(refused(error)),
+                }
+            }
+            Err(error) => return Err(refused(error)),
+        }
+    }
+    Err(std::io::Error::other(format!(
+        "{} kept changing while it was opened",
+        dst.display()
+    )))
+}
+
+/// Test seam (cr-ecm35-1): runs between the creation that found the name
+/// taken and the open of what has it. Production never sets it.
+#[cfg(all(unix, test))]
+pub(crate) static BETWEEN_THE_TWO_OPENS: std::sync::Mutex<Vec<(std::path::PathBuf, fn(&Path))>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn between_the_two_opens(_dst: &Path) {
+    #[cfg(test)]
+    {
+        let hooks: Vec<fn(&Path)> = BETWEEN_THE_TWO_OPENS
+            .lock()
+            .map(|hooks| {
+                hooks
+                    .iter()
+                    .filter(|(at, _)| at == _dst)
+                    .map(|(_, hook)| *hook)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for hook in hooks {
+            hook(_dst);
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -812,6 +917,75 @@ mod mode_tests {
         assert!(made.is_err(), "its look refused");
         assert!(!target.exists(), "nothing made through the link is left");
         assert!(link.is_symlink(), "the link is left as it was");
+    }
+
+    /// cr-ecm35-1: a link at the destination that leads out of it, to
+    /// nothing, has nothing made outside: the file it names is made where
+    /// it leads only within the destination's root. Judged by its lexical
+    /// parent, the link passed, and the file was made outside.
+    #[test]
+    fn a_dangling_link_out_of_the_destination_makes_nothing_outside() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("dst");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = root.join("link.bin");
+        std::os::unix::fs::symlink("../outside/new.bin", &link).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let made = create_regular_within(&link, Some(&root));
+        assert!(made.is_err(), "refused: {made:?}");
+        assert!(!outside.join("new.bin").exists(), "nothing made outside");
+        assert!(link.is_symlink(), "the link is left as it was");
+    }
+
+    /// cr-ecm35-1: a chain of 40 links to nothing — as many as the system
+    /// follows — has its file made at the end. The opener's own resolution
+    /// refused it.
+    #[test]
+    fn a_chain_of_forty_links_to_nothing_has_its_file_made() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in 1..=40 {
+            let next = if n == 40 {
+                "target.bin".to_string()
+            } else {
+                format!("l{}", n + 1)
+            };
+            std::os::unix::fs::symlink(next, dir.path().join(format!("l{n}"))).unwrap();
+        }
+        let made = create_regular(&dir.path().join("l1"));
+        assert!(made.is_ok(), "{made:?}");
+        assert!(dir.path().join("target.bin").is_file());
+    }
+
+    /// cr-ecm35-1: a taken name is opened without making anything: a file
+    /// gone between the two opens is made by a creation that fails if the
+    /// name is taken, and so known to be made — removed when its look
+    /// refuses it. Made by the second open, it was recorded as one that
+    /// stood there, and left.
+    #[test]
+    fn a_file_gone_between_the_opens_is_made_only_exclusively() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join("was.bin");
+        std::fs::write(&at, b"there a moment ago").unwrap();
+        BETWEEN_THE_TWO_OPENS
+            .lock()
+            .unwrap()
+            .push((at.clone(), |at| {
+                let _ = std::fs::remove_file(at);
+            }));
+        CREATE_LOOK_FAULTS.lock().unwrap().push(at.clone());
+        let made = create_regular(&at);
+        BETWEEN_THE_TWO_OPENS
+            .lock()
+            .unwrap()
+            .retain(|(path, _)| path != &at);
+        CREATE_LOOK_FAULTS
+            .lock()
+            .unwrap()
+            .retain(|path| path != &at);
+        assert!(made.is_err(), "its look refused");
+        assert!(!at.exists(), "what it made is not left");
     }
 
     /// cr-ecm34-1: a file made and refused is removed only while the name

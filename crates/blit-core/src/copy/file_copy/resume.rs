@@ -700,6 +700,32 @@ impl Resolved {
         })
     }
 
+    /// cr-ecm35-1: the file at the name removed only while it is `mine`, the
+    /// file made there; anything else there now is somebody's. Not known
+    /// which file was made, nothing is removed.
+    pub(crate) fn remove_if(&self, mine: Option<(u64, u64)>) -> std::io::Result<()> {
+        use std::os::unix::io::AsRawFd as _;
+        let Some(mine) = mine else {
+            return Err(std::io::Error::other(
+                "which file was made could not be told, so what is at the name is not removed",
+            ));
+        };
+        match self.look()? {
+            Some(entry) if entry.identity == mine => {}
+            _ => return Ok(()),
+        }
+        // SAFETY: the held directory is open for the call, and the name is a
+        // NUL-terminated string that outlives it.
+        let removed = unsafe { libc::unlinkat(self.directory.as_raw_fd(), self.name.as_ptr(), 0) };
+        if removed == 0 {
+            return Ok(());
+        }
+        match std::io::Error::last_os_error() {
+            error if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            error => Err(error),
+        }
+    }
+
     /// What stands at the name in the held directory, itself — its mode
     /// (type bits included), its owner, and which it is — or nothing.
     pub(crate) fn look(&self) -> std::io::Result<Option<Entry>> {
