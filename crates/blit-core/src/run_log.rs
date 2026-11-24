@@ -148,9 +148,16 @@ impl RunTotals {
     /// by its text when it carries none (a peer that sent none).
     pub fn failed_files(&self) -> Vec<FailedFile> {
         let carried = self.failed_paths_raw.iter().any(|bytes| !bytes.is_empty());
+        // cr-ecm37-7: the leftover lists by hash too, built once — searched
+        // for each failed file, 24,000 files that all left a copy took
+        // seconds.
+        let left_text: std::collections::HashSet<&str> =
+            self.left_in_place.iter().map(String::as_str).collect();
+        let left_raw: std::collections::HashSet<&[u8]> =
+            self.left_in_place_raw.iter().map(Vec::as_slice).collect();
         let left = |path: &str, raw: Option<&[u8]>| match raw {
-            Some(bytes) => self.left_in_place_raw.iter().any(|left| left == bytes),
-            None => self.left_in_place.iter().any(|left| left == path),
+            Some(bytes) => left_raw.contains(bytes),
+            None => left_text.contains(path),
         };
         let mut files: Vec<FailedFile> = Vec::new();
         // cr-ecm36-4: by hash, not by searching the list for each — a run of
@@ -1139,6 +1146,49 @@ mod tests {
             ..totals
         };
         assert_eq!(whole.failed_files()[1].left_in_place, Some(false));
+    }
+
+    /// cr-ecm37-7: the join is linear in the leftover lists as well as in the
+    /// failures. A hundred thousand failed files that all left a copy, half
+    /// named by text and half by bytes, are joined well inside the bound:
+    /// searching either list for each file, half of them took several
+    /// seconds in a debug build. (The bound is far from both: the join by
+    /// hash takes a small fraction of it.)
+    #[test]
+    fn the_join_is_linear_in_the_leftovers() {
+        const EACH: usize = 50_000;
+        let text: Vec<String> = (0..EACH).map(|n| format!("t/{n:06}")).collect();
+        let raw: Vec<Vec<u8>> = (0..EACH)
+            .map(|n| {
+                let mut bytes = format!("r/{n:06}").into_bytes();
+                bytes.push(0xFF);
+                bytes
+            })
+            .collect();
+        let mut failed_paths = text.clone();
+        failed_paths.extend(
+            raw.iter()
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+        );
+        let mut failed_paths_raw = vec![Vec::new(); EACH];
+        failed_paths_raw.extend(raw.iter().cloned());
+        let totals = RunTotals {
+            files_failed: 2 * EACH as u64,
+            failed_paths,
+            failed_paths_raw,
+            left_in_place: text,
+            left_in_place_raw: raw,
+            ..RunTotals::default()
+        };
+        let started = std::time::Instant::now();
+        let files = totals.failed_files();
+        let took = started.elapsed();
+        assert_eq!(files.len(), 2 * EACH);
+        assert!(files.iter().all(|file| file.left_in_place == Some(true)));
+        assert!(
+            took < std::time::Duration::from_secs(3),
+            "the join took {took:?}"
+        );
     }
 
     /// cr-ecm36-3: a failure whose path the report shortened is no file: the
