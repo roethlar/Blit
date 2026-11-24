@@ -109,7 +109,7 @@ pub fn open_resume_partial(
     dst: &Path,
     source_mode: Option<u32>,
     src_len: u64,
-    within: Option<&Path>,
+    within: Option<&super::Within>,
 ) -> Result<(File, u64)> {
     open_resume_partial_with(dst, source_mode, src_len, within, false)
         .map(|(file, _, len)| (file, len))
@@ -126,7 +126,7 @@ pub fn open_resume_partial_held(
     dst: &Path,
     source_mode: Option<u32>,
     src_len: u64,
-    within: Option<&Path>,
+    within: Option<&super::Within>,
 ) -> Result<(File, File, u64)> {
     let (file, cleanup, len) = open_resume_partial_with(dst, source_mode, src_len, within, true)?;
     let cleanup = cleanup.ok_or_else(|| eyre::eyre!("no second handle to {}", dst.display()))?;
@@ -138,7 +138,7 @@ fn open_resume_partial_with(
     dst: &Path,
     source_mode: Option<u32>,
     src_len: u64,
-    within: Option<&Path>,
+    within: Option<&super::Within>,
     cleanup: bool,
 ) -> Result<(File, Option<File>, u64)> {
     use std::os::unix::fs::MetadataExt as _;
@@ -502,7 +502,7 @@ pub fn make_partial_private(file: &File) -> std::io::Result<bool> {
 /// when one is given: a link there to a name outside it made the file
 /// outside. See [`fresh_partial_ready`].
 #[cfg(unix)]
-pub fn fresh_partial(dst: &Path, unfinished: u64, within: Option<&Path>) -> Result<File> {
+pub fn fresh_partial(dst: &Path, unfinished: u64, within: Option<&super::Within>) -> Result<File> {
     fresh_partial_ready(dst, unfinished, within, |_| Ok(())).map(|(file, ())| file)
 }
 
@@ -515,7 +515,7 @@ pub fn fresh_partial(dst: &Path, unfinished: u64, within: Option<&Path>) -> Resu
 pub fn fresh_partial_ready<T>(
     dst: &Path,
     unfinished: u64,
-    within: Option<&Path>,
+    within: Option<&super::Within>,
     ready: impl FnOnce(&File) -> Result<T>,
 ) -> Result<(File, T)> {
     let resolved = resolve_destination(dst, within)?;
@@ -559,9 +559,24 @@ pub(crate) struct Resolved {
 pub(crate) const MAX_FOLLOWED_LINKS: usize = if cfg!(target_os = "linux") { 40 } else { 32 };
 
 /// [`Resolved`]: the place `dst` names, `within` the destination's root
-/// (canonical) when one is given.
+/// when one is given.
 #[cfg(unix)]
-pub(crate) fn resolve_destination(dst: &Path, within: Option<&Path>) -> Result<Resolved> {
+pub(crate) fn resolve_destination(dst: &Path, within: Option<&super::Within>) -> Result<Resolved> {
+    resolve_destination_following(dst, within, true)
+}
+
+/// [`resolve_destination`], the chain of links at the name followed only
+/// when `follow`: a name to be made is never followed.
+///
+/// cr-ecm38-2: on Linux, with the root held, from the directory the transfer
+/// holds ([`resolve_beneath`]) — never by its path, which a directory put in
+/// the root's place since names instead.
+#[cfg(unix)]
+pub(crate) fn resolve_destination_following(
+    dst: &Path,
+    within: Option<&super::Within>,
+    follow: bool,
+) -> Result<Resolved> {
     // cr-ecm24-6: a name typed as a directory — with a `/` or `/.` after it,
     // as typed or as a link of the chain names it — is no place for a file:
     // its last name taken, `absent/` was made a regular file `absent`.
@@ -572,9 +587,42 @@ pub(crate) fn resolve_destination(dst: &Path, within: Option<&Path>) -> Result<R
     if typed_as_directory(dst) {
         return not_a_file();
     }
+    #[cfg(target_os = "linux")]
+    if let Some(resolved) = within.and_then(|within| resolve_beneath(within, dst, follow)) {
+        let resolved = resolved.map_err(|error| {
+            if error.raw_os_error() == Some(libc::ENOTDIR) && follow {
+                eyre::Report::new(error).wrap_err(format!(
+                    "putting a fresh partial in place of {}",
+                    dst.display()
+                ))
+            } else {
+                eyre::Report::new(error).wrap_err(format!("resolving {}", dst.display()))
+            }
+        })?;
+        after_a_destination_is_resolved(dst);
+        return Ok(resolved);
+    }
+    resolve_by_path(dst, within.map(super::Within::path), follow)
+}
+
+/// [`resolve_destination_following`] by the path: the chain followed by its
+/// names, the directory it ends in canonicalized and checked within `within`
+/// (the root's canonical path), and held — where no root's directory is held
+/// to walk from, and off Linux.
+#[cfg(unix)]
+pub(crate) fn resolve_by_path(dst: &Path, within: Option<&Path>, follow: bool) -> Result<Resolved> {
+    let not_a_file = || {
+        Err(std::io::Error::from_raw_os_error(libc::ENOTDIR))
+            .with_context(|| format!("putting a fresh partial in place of {}", dst.display()))
+    };
+    if typed_as_directory(dst) {
+        return not_a_file();
+    }
     let mut target = dst.to_path_buf();
     let mut links = 0;
-    while std::fs::symlink_metadata(&target).is_ok_and(|there| there.file_type().is_symlink()) {
+    while follow
+        && std::fs::symlink_metadata(&target).is_ok_and(|there| there.file_type().is_symlink())
+    {
         // As many as opening the name would follow — the system's own limit
         // (cr-ecm36-8).
         links += 1;
@@ -626,6 +674,291 @@ pub(crate) fn resolve_destination(dst: &Path, within: Option<&Path>) -> Result<R
     };
     after_a_destination_is_resolved(dst);
     Ok(resolved)
+}
+
+/// cr-ecm38-2 (Linux): `dst` resolved from the root `within` holds — one name
+/// at a time from the held directory, never through a link it does not read
+/// itself. A link is read and its target walked in its place: a relative one
+/// from where it stands, an absolute one from the root when it names a place
+/// beneath the root (by either of its names), else it leads out; `..` above
+/// the root leads out too. The last name, when it is a link, is followed
+/// when `follow`. `None` where the root holds no directory, or `dst` lies
+/// beneath neither of its names by its path: resolved by its path, then.
+/// By its path, a fallback opened what had since taken the root's name.
+#[cfg(target_os = "linux")]
+pub(crate) fn resolve_beneath(
+    within: &super::Within,
+    dst: &Path,
+    follow: bool,
+) -> Option<std::io::Result<Resolved>> {
+    use std::os::unix::io::AsRawFd as _;
+    let held = within.held.as_ref()?;
+    let place = within.place(dst)?;
+    Some((|| {
+        let mut walk = Walk::new(within, held.as_raw_fd(), dst);
+        let mut names = Walk::names(&place);
+        let Some(mut last) = names.pop_back() else {
+            return Err(std::io::Error::other(format!(
+                "{} names no file",
+                dst.display()
+            )));
+        };
+        walk.enter(names, false)?;
+        loop {
+            let name = name_of(&last)?;
+            if !follow || !walk.is_link(&name)? {
+                break;
+            }
+            walk.count_link()?;
+            let target = read_link_at(walk.here(), &name)?;
+            if typed_as_directory(&target) {
+                return Err(std::io::Error::from_raw_os_error(libc::ENOTDIR));
+            }
+            let mut more = walk.splice(&target)?;
+            let Some(next) = more.pop_back() else {
+                return Err(std::io::Error::other(format!(
+                    "{} names no file",
+                    dst.display()
+                )));
+            };
+            walk.enter(more, false)?;
+            last = next;
+        }
+        Ok(Resolved {
+            directory: walk.into_directory()?,
+            name: name_of(&last)?,
+        })
+    })())
+}
+
+/// cr-ecm38-2 (Linux): every directory of `place` (beneath the root `within`
+/// holds) that is missing, made — each in the one found above it, from the
+/// held directory, links walked as [`resolve_beneath`] walks them.
+#[cfg(target_os = "linux")]
+pub(crate) fn make_dirs_beneath(
+    within: &super::Within,
+    place: &Path,
+    shown: &Path,
+) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd as _;
+    let Some(held) = within.held.as_ref() else {
+        return Err(std::io::Error::other("no directory is held"));
+    };
+    Walk::new(within, held.as_raw_fd(), shown).enter(Walk::names(place), true)
+}
+
+/// A walk from a held root, the directories entered held in turn.
+#[cfg(target_os = "linux")]
+struct Walk<'a> {
+    within: &'a super::Within,
+    root: std::os::unix::io::RawFd,
+    entered: Vec<std::os::unix::io::OwnedFd>,
+    links: usize,
+    shown: &'a Path,
+}
+
+#[cfg(target_os = "linux")]
+impl<'a> Walk<'a> {
+    fn new(within: &'a super::Within, root: std::os::unix::io::RawFd, shown: &'a Path) -> Self {
+        Self {
+            within,
+            root,
+            entered: Vec::new(),
+            links: 0,
+            shown,
+        }
+    }
+
+    fn here(&self) -> std::os::unix::io::RawFd {
+        use std::os::unix::io::AsRawFd as _;
+        self.entered.last().map_or(self.root, |fd| fd.as_raw_fd())
+    }
+
+    fn leads_out(&self) -> std::io::Error {
+        std::io::Error::other(format!(
+            "{} leads out of the destination",
+            self.shown.display()
+        ))
+    }
+
+    /// A relative path's names, `..` and `.` kept as names.
+    fn names(path: &Path) -> std::collections::VecDeque<std::ffi::OsString> {
+        path.components()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(name) => Some(name.to_os_string()),
+                std::path::Component::ParentDir => Some("..".into()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn count_link(&mut self) -> std::io::Result<()> {
+        self.links += 1;
+        if self.links > MAX_FOLLOWED_LINKS {
+            return Err(std::io::Error::from_raw_os_error(libc::ELOOP));
+        }
+        Ok(())
+    }
+
+    /// What a link's `target` puts in its place: an absolute one is walked
+    /// from the root, when it names a place beneath it.
+    fn splice(
+        &mut self,
+        target: &Path,
+    ) -> std::io::Result<std::collections::VecDeque<std::ffi::OsString>> {
+        if target.is_absolute() {
+            let place = self.within.place(target).ok_or_else(|| self.leads_out())?;
+            self.entered.clear();
+            Ok(Self::names(&place))
+        } else {
+            Ok(Self::names(target))
+        }
+    }
+
+    fn is_link(&self, name: &std::ffi::CStr) -> std::io::Result<bool> {
+        match stat_at(self.here(), name) {
+            Ok(found) => Ok(found.st_mode & libc::S_IFMT == libc::S_IFLNK),
+            Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Enter each of `names` in turn, as a directory; missing ones made when
+    /// `make`.
+    fn enter(
+        &mut self,
+        mut names: std::collections::VecDeque<std::ffi::OsString>,
+        make: bool,
+    ) -> std::io::Result<()> {
+        while let Some(name) = names.pop_front() {
+            if name == ".." {
+                if self.entered.pop().is_none() {
+                    return Err(self.leads_out());
+                }
+                continue;
+            }
+            if name.is_empty() || name == "." {
+                continue;
+            }
+            let c_name = name_of(&name)?;
+            let found = match stat_at(self.here(), &c_name) {
+                Ok(found) => found,
+                Err(missing) if missing.kind() == std::io::ErrorKind::NotFound && make => {
+                    // SAFETY: `here` is open for the call; `c_name` is one
+                    // NUL-terminated name that outlives it.
+                    if unsafe { libc::mkdirat(self.here(), c_name.as_ptr(), 0o777) } < 0 {
+                        let error = std::io::Error::last_os_error();
+                        if error.kind() != std::io::ErrorKind::AlreadyExists {
+                            return Err(error);
+                        }
+                    }
+                    stat_at(self.here(), &c_name)?
+                }
+                Err(error) => return Err(error),
+            };
+            match found.st_mode & libc::S_IFMT {
+                libc::S_IFLNK => {
+                    self.count_link()?;
+                    let target = read_link_at(self.here(), &c_name)?;
+                    let mut more = self.splice(&target)?;
+                    while let Some(spliced) = more.pop_back() {
+                        names.push_front(spliced);
+                    }
+                }
+                libc::S_IFDIR => {
+                    let entered = open_directory_at(self.here(), &c_name)?;
+                    self.entered.push(entered);
+                }
+                _ => return Err(std::io::Error::from_raw_os_error(libc::ENOTDIR)),
+            }
+        }
+        Ok(())
+    }
+
+    /// The directory reached, held.
+    fn into_directory(mut self) -> std::io::Result<std::os::unix::io::OwnedFd> {
+        match self.entered.pop() {
+            Some(directory) => Ok(directory),
+            None => open_directory_at(self.root, c"."),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn name_of(name: &std::ffi::OsStr) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt as _;
+    std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+}
+
+#[cfg(target_os = "linux")]
+fn stat_at(
+    directory: std::os::unix::io::RawFd,
+    name: &std::ffi::CStr,
+) -> std::io::Result<libc::stat> {
+    // SAFETY: `stat` is plain integers, filled by the call.
+    let mut found: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `directory` is open for the call; `name` is NUL-terminated
+    // and `found` a properly sized `stat`, both outliving it.
+    if unsafe {
+        libc::fstatat(
+            directory,
+            name.as_ptr(),
+            &mut found,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(found)
+}
+
+#[cfg(target_os = "linux")]
+fn read_link_at(
+    directory: std::os::unix::io::RawFd,
+    name: &std::ffi::CStr,
+) -> std::io::Result<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt as _;
+    let mut buffer = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: `directory` is open for the call; `name` is NUL-terminated and
+    // `buffer` is writable for its length, all outliving it.
+    let read = unsafe {
+        libc::readlinkat(
+            directory,
+            name.as_ptr(),
+            buffer.as_mut_ptr().cast::<libc::c_char>(),
+            buffer.len(),
+        )
+    };
+    if read < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    buffer.truncate(read as usize);
+    Ok(std::path::PathBuf::from(std::ffi::OsString::from_vec(
+        buffer,
+    )))
+}
+
+#[cfg(target_os = "linux")]
+fn open_directory_at(
+    directory: std::os::unix::io::RawFd,
+    name: &std::ffi::CStr,
+) -> std::io::Result<std::os::unix::io::OwnedFd> {
+    use std::os::unix::io::{FromRawFd as _, OwnedFd};
+    // SAFETY: `directory` is open for the call; `name` is NUL-terminated.
+    let opened = unsafe {
+        libc::openat(
+            directory,
+            name.as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if opened < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `opened` is an open descriptor nothing else owns.
+    Ok(unsafe { OwnedFd::from_raw_fd(opened) })
 }
 
 /// Test seam (cr-ecm27-3): runs once a resume's destination is resolved and
@@ -1132,7 +1465,7 @@ pub fn open_resume_partial_held(
     dst: &Path,
     source_mode: Option<u32>,
     src_len: u64,
-    within: Option<&Path>,
+    within: Option<&super::Within>,
 ) -> Result<(File, File, u64)> {
     let (file, len) = open_resume_partial(dst, source_mode, src_len, within)?;
     let cleanup = file
@@ -1147,7 +1480,7 @@ pub fn open_resume_partial(
     dst: &Path,
     _source_mode: Option<u32>,
     _src_len: u64,
-    _within: Option<&Path>,
+    _within: Option<&super::Within>,
 ) -> Result<(File, u64)> {
     let dst_len = std::fs::metadata(dst).map(|m| m.len()).unwrap_or(0);
     let file = OpenOptions::new()
@@ -2217,7 +2550,13 @@ mod tests {
         let at = root.join("r.bin");
         std::os::unix::fs::symlink("../outside/new", &at)?;
         let within = std::fs::canonicalize(&root)?;
-        assert!(open_resume_partial(&at, Some(0o100600), 10, Some(&within)).is_err());
+        assert!(open_resume_partial(
+            &at,
+            Some(0o100600),
+            10,
+            Some(&crate::copy::Within::hold(&within))
+        )
+        .is_err());
         assert_eq!(
             std::fs::read_dir(&outside)?.count(),
             0,
@@ -2261,12 +2600,15 @@ mod tests {
         let dst = tmp.path().join("one.bin");
         std::fs::write(&dst, b"old")?;
         let root = std::fs::canonicalize(&dst)?;
-        let file = fresh_partial(&dst, 11, Some(&root))?;
+        let file = fresh_partial(&dst, 11, Some(&crate::copy::Within::hold(&root)))?;
         assert_eq!(file.metadata()?.len(), 11);
         assert_eq!(std::fs::metadata(&dst)?.len(), 11, "in its own place");
         let beside = tmp.path().join("beside.bin");
         std::fs::write(&beside, b"x")?;
-        assert!(fresh_partial(&beside, 11, Some(&root)).is_err(), "outside");
+        assert!(
+            fresh_partial(&beside, 11, Some(&crate::copy::Within::hold(&root))).is_err(),
+            "outside"
+        );
         assert_eq!(std::fs::read(&beside)?, b"x");
         Ok(())
     }

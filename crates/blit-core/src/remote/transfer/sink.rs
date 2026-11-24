@@ -1848,7 +1848,8 @@ impl TransferSink for FsTransferSink {
             .lock()
             .expect("resume-baselines lock poisoned")
             .remove(relative_path);
-        let within = self.canonical_dst_root.clone();
+        // cr-ecm38-2: from the root this transfer holds.
+        let within = self.within.clone();
         let held = tokio::task::spawn_blocking(move || {
             hold_partial(&dst, total_size, baseline, within.as_deref())
         })
@@ -3295,7 +3296,7 @@ fn hold_partial(
     dst: &Path,
     total_size: u64,
     baseline: Option<ResumeBaseline>,
-    within: Option<&Path>,
+    within: Option<&crate::copy::Within>,
 ) -> Result<Option<HeldPartial>> {
     hold_fault(dst)?;
     #[cfg(unix)]
@@ -3340,7 +3341,7 @@ fn hold_partial(
 fn hold_whole(
     dst: &Path,
     total_size: u64,
-    within: Option<&Path>,
+    within: Option<&crate::copy::Within>,
     compared: Option<(
         Option<crate::moved::Version>,
         Option<crate::moved::Version>,
@@ -3594,7 +3595,7 @@ fn hold_fault(_dst: &Path) -> Result<()> {
 fn hold_partial_unfinished(
     dst: &Path,
     total_size: u64,
-    within: Option<&Path>,
+    within: Option<&crate::copy::Within>,
 ) -> std::io::Result<std::fs::File> {
     hold_partial_unfinished_made(dst, total_size, within).map(|(file, _)| file)
 }
@@ -3605,7 +3606,7 @@ fn hold_partial_unfinished(
 fn hold_partial_unfinished_made(
     dst: &Path,
     total_size: u64,
-    within: Option<&Path>,
+    within: Option<&crate::copy::Within>,
 ) -> std::io::Result<(std::fs::File, bool)> {
     // cr-ecm19-4: a partial made here is made private (600), and one here
     // already is made so through this handle — whatever the mask it was
@@ -4248,7 +4249,7 @@ fn copy_and_stamp_opened(
             dst,
             Some(crate::wire_metadata::permissions_mode(src_meta)),
             header.size,
-            within.map(crate::copy::Within::path),
+            within,
         )
         .with_context(|| format!("resume copy {}", header.relative_path))?;
         partial.arm_held(cleanup, OnFailure::KeepUnfinished { created });

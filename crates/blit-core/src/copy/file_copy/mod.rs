@@ -446,7 +446,7 @@ fn acquire_to_write(
                 if !a_link {
                     continue;
                 }
-                let resolved = crate::copy::resolve_destination(dst, within.map(Within::path))
+                let resolved = crate::copy::resolve_destination(dst, within)
                     .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
                 match resolved
                     .open(libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NONBLOCK)
@@ -637,18 +637,19 @@ fn open_beneath(dst: &Path, within: &Within, make: bool) -> Beneath {
     }
 }
 
-/// cr-ecm37-1, cr-ecm37-4: `dst` opened, or made, where the destination's own
-/// resolution puts it — the chain of links at its name followed, the
-/// directory it ends in found within the root and HELD, the file opened by
-/// its name there, never through a link. To be made, the name itself must
-/// be free: what stands there, a link among them, is not followed.
+/// cr-ecm37-1, cr-ecm37-4, cr-ecm38-2: `dst` opened, or made, where the
+/// destination's own resolution puts it — from the root the transfer holds,
+/// one name at a time ([`resume::resolve_beneath`]); the file opened by its
+/// name in the directory reached, never through a link. To be made, the name
+/// itself is not followed: what stands there, a link among them, fails the
+/// creation.
 #[cfg(target_os = "linux")]
 fn open_resolved(dst: &Path, within: &Within, make: bool) -> std::io::Result<File> {
-    if make && std::fs::symlink_metadata(dst).is_ok() {
-        return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
-    }
-    let resolved = crate::copy::resolve_destination(dst, Some(within.path()))
-        .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    let resolved = match resume::resolve_beneath(within, dst, !make) {
+        Some(resolved) => resolved?,
+        None => resume::resolve_by_path(dst, Some(within.path()), !make)
+            .map_err(|error| std::io::Error::other(format!("{error:#}")))?,
+    };
     let mut flags = libc::O_WRONLY | libc::O_NONBLOCK;
     if make {
         flags |= libc::O_CREAT | libc::O_EXCL;
@@ -746,59 +747,30 @@ pub fn create_dirs_within(directory: &Path, within: Option<&Within>) -> std::io:
 
 #[cfg(target_os = "linux")]
 fn make_beneath(directory: &Path, within: &Within) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::io::AsRawFd as _;
     let (Some(held), Some(place)) = (within.held.as_ref(), within.place(directory)) else {
         return made_by_name_within(directory, within);
     };
-    let held = held.as_raw_fd();
-    let as_directory = libc::O_PATH | libc::O_DIRECTORY;
-    let by_name = |error: std::io::Error| match error.raw_os_error() {
-        Some(libc::ENOSYS) | Some(libc::EPERM) | Some(libc::EXDEV) => {
-            made_by_name_within(directory, within)
-        }
-        _ => Err(error),
-    };
     if place.as_os_str().is_empty() {
         return Ok(());
     }
-    // There already, as the common case is: one walk.
-    match openat2_beneath(held, &place, as_directory, 0) {
-        Ok(_) => return Ok(()),
-        Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return by_name(error),
+    // There already, as the common case is: one walk, by the kernel.
+    if openat2_beneath(
+        held.as_raw_fd(),
+        &place,
+        libc::O_PATH | libc::O_DIRECTORY,
+        0,
+    )
+    .is_ok()
+    {
+        return Ok(());
     }
-    let mut above: Option<std::os::unix::io::OwnedFd> = None;
-    let mut prefix = std::path::PathBuf::new();
-    for component in place.components() {
-        let std::path::Component::Normal(name) = component else {
-            return made_by_name_within(directory, within);
-        };
-        prefix.push(name);
-        let found = match openat2_beneath(held, &prefix, as_directory, 0) {
-            Ok(found) => found,
-            Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {
-                let name = std::ffi::CString::new(name.as_bytes())
-                    .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-                let at = above.as_ref().map_or(held, |above| above.as_raw_fd());
-                // SAFETY: `at` is open for the call; `name` is one
-                // NUL-terminated name that outlives it.
-                if unsafe { libc::mkdirat(at, name.as_ptr(), 0o777) } < 0 {
-                    let error = std::io::Error::last_os_error();
-                    if error.kind() != std::io::ErrorKind::AlreadyExists {
-                        return Err(error);
-                    }
-                }
-                match openat2_beneath(held, &prefix, as_directory, 0) {
-                    Ok(found) => found,
-                    Err(error) => return by_name(error),
-                }
-            }
-            Err(error) => return by_name(error),
-        };
-        above = Some(found);
-    }
-    Ok(())
+    // cr-ecm38-2: else from the root held, one name at a time — links walked
+    // within it, the missing made in the one found above them — whether the
+    // kernel cannot walk beneath it (no `openat2`), or sees a link it cannot
+    // follow so. By the name, the fallback made them in whatever had taken
+    // the root's name since.
+    resume::make_dirs_beneath(within, &place, directory)
 }
 
 /// `directory` made by its name, once the part of it that stands is found
@@ -1417,6 +1389,110 @@ mod mode_tests {
         assert!(root.join("f.bin").is_file());
         assert!(inside_directory.is_ok(), "{inside_directory:?}");
         assert!(root.join("d").join("e").is_dir());
+    }
+
+    /// cr-ecm38-2 (Linux): a root held, then renamed away and another
+    /// directory made at its name. Returns the dir, the held root, the root's
+    /// name (now the other directory) and the retired root's new name.
+    #[cfg(target_os = "linux")]
+    fn a_root_replaced_at_its_name(
+        before: impl FnOnce(&Path),
+    ) -> (
+        tempfile::TempDir,
+        Within,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("dst")).unwrap();
+        let root = std::fs::canonicalize(dir.path().join("dst")).unwrap();
+        before(&root);
+        let within = Within::hold(&root);
+        let retired = dir.path().join("dst.old");
+        std::fs::rename(&root, &retired).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        (dir, within, root, retired)
+    }
+
+    /// cr-ecm38-2 (Linux): where the kernel cannot open beneath the root (no
+    /// `openat2`), a file is made in the root the transfer holds, though
+    /// another directory has taken its name. By its path, the fallback made
+    /// it in that other directory.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn without_openat2_a_file_is_made_in_the_root_held() {
+        let (_dir, within, root, retired) = a_root_replaced_at_its_name(|_| {});
+        super::NO_OPENAT2.with(|refused| refused.set(true));
+        let made = create_regular_within(&root.join("f.bin"), Some(&within));
+        super::NO_OPENAT2.with(|refused| refused.set(false));
+        made.unwrap();
+        assert!(retired.join("f.bin").is_file(), "in the root held");
+        assert!(!root.join("f.bin").exists(), "not in what took its name");
+    }
+
+    /// cr-ecm38-2 (Linux): an absolute link within the root is followed from
+    /// the root the transfer holds, though another directory has taken the
+    /// root's name — the link's path names that other one now. By its path,
+    /// the open looked there and failed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_absolute_link_is_followed_within_the_root_held() {
+        let (_dir, within, root, retired) = a_root_replaced_at_its_name(|root| {
+            std::fs::create_dir(root.join("real")).unwrap();
+            std::fs::write(root.join("real").join("target.bin"), b"old").unwrap();
+            std::os::unix::fs::symlink(root.join("real").join("target.bin"), root.join("link.bin"))
+                .unwrap();
+        });
+        let mut written = open_to_write(&root.join("link.bin"), Some(&within), false).unwrap();
+        std::io::Write::write_all(&mut written, b"new").unwrap();
+        drop(written);
+        assert_eq!(
+            std::fs::read(retired.join("real").join("target.bin")).unwrap(),
+            b"new"
+        );
+        assert!(!root.join("link.bin").exists());
+    }
+
+    /// cr-ecm38-2 (Linux): the directories a write needs are made in the root
+    /// the transfer holds — through an absolute link within it, and where the
+    /// kernel cannot walk beneath it — though another directory has taken
+    /// its name. By the name, they were made in that other one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn directories_are_made_in_the_root_held() {
+        let (_dir, within, root, retired) = a_root_replaced_at_its_name(|root| {
+            std::fs::create_dir(root.join("a")).unwrap();
+            std::os::unix::fs::symlink(root.join("a"), root.join("abs")).unwrap();
+        });
+        create_dirs_within(&root.join("abs").join("c"), Some(&within)).unwrap();
+        assert!(
+            retired.join("a").join("c").is_dir(),
+            "through the link, in the root held"
+        );
+        assert!(!root.join("abs").exists() && !root.join("a").exists());
+
+        super::NO_OPENAT2.with(|refused| refused.set(true));
+        let made = create_dirs_within(&root.join("x").join("y"), Some(&within));
+        super::NO_OPENAT2.with(|refused| refused.set(false));
+        made.unwrap();
+        assert!(
+            retired.join("x").join("y").is_dir(),
+            "without openat2, in the root held"
+        );
+        assert!(!root.join("x").exists());
+    }
+
+    /// cr-ecm38-2 (Linux): a resume's fresh partial is made in the root the
+    /// transfer holds, though another directory has taken its name. By its
+    /// path, it was made in that other one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resume_partial_is_made_in_the_root_held() {
+        let (_dir, within, root, retired) = a_root_replaced_at_its_name(|_| {});
+        let partial = crate::copy::fresh_partial(&root.join("p.bin"), 11, Some(&within)).unwrap();
+        assert_eq!(partial.metadata().unwrap().len(), 11);
+        assert!(retired.join("p.bin").is_file(), "in the root held");
+        assert!(!root.join("p.bin").exists());
     }
 
     /// cr-ecm37-4 (Linux): an absolute link that leads within the
