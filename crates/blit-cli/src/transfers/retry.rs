@@ -123,6 +123,10 @@ pub(crate) struct PassFailures {
     /// never observed to converge), are counted in `files_failed`, and
     /// are reported once as a synthesized entry.
     pub unretried: u64,
+    /// D-2026-11-24-1: the report's failures were marked as ones that
+    /// survived a retry — said here, never read back from their reasons,
+    /// whose words may be anything, a file's name among them.
+    pub retried: bool,
 }
 
 impl PassFailures {
@@ -139,6 +143,7 @@ impl PassFailures {
             removed_incomplete: summary.removed_incomplete.clone(),
             removed_incomplete_truncated: summary.removed_incomplete_truncated,
             unretried: 0,
+            retried: false,
         }
     }
 
@@ -155,6 +160,7 @@ impl PassFailures {
             removed_incomplete: summary.removed_incomplete.clone(),
             removed_incomplete_truncated: summary.removed_incomplete_truncated,
             unretried: 0,
+            retried: false,
         }
     }
 
@@ -174,6 +180,7 @@ impl PassFailures {
             removed_incomplete: removed.to_vec(),
             removed_incomplete_truncated: removed_truncated,
             unretried: 0,
+            retried: false,
         }
     }
 
@@ -254,12 +261,14 @@ impl PassFailures {
     }
 
     /// Mark every remaining failure as one that survived a retry, and
-    /// name the ones no pass could reach.
+    /// name the ones no pass could reach — once: the report says whether
+    /// it was marked (D-2026-11-24-1), not its reasons' words.
     fn mark_retried(&mut self) {
+        if std::mem::replace(&mut self.retried, true) {
+            return;
+        }
         for failure in &mut self.failures {
-            if !failure.reason.ends_with(RETRIED_SUFFIX) {
-                failure.reason.push_str(RETRIED_SUFFIX);
-            }
+            failure.reason.push_str(RETRIED_SUFFIX);
         }
         if self.unretried > 0 {
             self.failures.push(FileFailure {
@@ -744,6 +753,7 @@ mod tests {
             removed_incomplete: Vec::new(),
             removed_incomplete_truncated: false,
             unretried: 0,
+            retried: false,
         }
     }
 
@@ -1246,6 +1256,37 @@ mod tests {
             .ends_with(RETRIED_SUFFIX));
     }
 
+    /// D-2026-11-24-1: a failure that survived a retry is marked so by the
+    /// report's flag, never by its words: one whose reason already ends as
+    /// a marked one does — its file's name ends so — is marked all the
+    /// same, and a report is marked once however often it is asked.
+    #[tokio::test]
+    async fn a_retried_failure_is_marked_by_the_report_not_its_words() {
+        let name = format!("a{RETRIED_SUFFIX}");
+        let out = run_retry_passes(&args(1), failures(&[name.as_str()]), |_| {
+            let name = name.clone();
+            async move {
+                let mut failed = failures(&[name.as_str()]);
+                failed.failures[0].reason = format!("source: cannot open {name}");
+                Ok(PassResult {
+                    files_transferred: 0,
+                    bytes_transferred: 0,
+                    failures: failed,
+                    in_stream_carrier_used: false,
+                    files_resumed: 0,
+                })
+            }
+        })
+        .await
+        .expect("loop");
+        let mut report = out.final_failures;
+        assert!(report.retried);
+        let marked = format!("source: cannot open {name}{RETRIED_SUFFIX}");
+        assert_eq!(report.failures[0].reason, marked);
+        report.mark_retried();
+        assert_eq!(report.failures[0].reason, marked, "marked once");
+    }
+
     #[tokio::test]
     async fn zero_retries_or_zero_failures_run_nothing() {
         let mut calls = 0u32;
@@ -1263,6 +1304,7 @@ mod tests {
                 .ends_with(RETRIED_SUFFIX),
             "nothing was retried, so nothing is marked"
         );
+        assert!(!out.final_failures.retried);
         let out = run_retry_passes(&args(3), PassFailures::default(), |_| {
             calls += 1;
             async { unreachable!("no pass without failures") }
@@ -1449,6 +1491,7 @@ mod cr_fix2_2_tests {
             removed_incomplete: Vec::new(),
             removed_incomplete_truncated: false,
             unretried: 0,
+            retried: false,
         };
         let mut args = TransferArgs::for_tests("src", "dst");
         args.retries = 2;
