@@ -466,7 +466,12 @@ mod tests {
         fs::create_dir_all(t.join("sub")).unwrap();
         fs::create_dir(t.join("Empty")).unwrap();
         fs::write(t.join("a.txt"), b"hello\n").unwrap();
-        fs::write(t.join("A.txt"), b"x").unwrap();
+        // ci-listing-case: a second spelling only where the filesystem keeps
+        // the two apart — on one that does not (macOS, Windows) `A.txt` IS
+        // `a.txt`, and writing it rewrote that file.
+        if !t.join("A.txt").exists() {
+            fs::write(t.join("A.txt"), b"x").unwrap();
+        }
         fs::write(t.join(".dot"), b"x").unwrap();
         fs::write(t.join("sub/inner"), b"x").unwrap();
         #[cfg(unix)]
@@ -551,7 +556,14 @@ mod tests {
         let plain = listed(&t, None, PLAIN).unwrap();
         assert_eq!(lookups(), 1, "the operand, and no entry");
         assert!(plain.directory && plain.itself.is_none());
-        let mut expected = vec!["A.txt", "Empty", "a.txt", "sub"];
+        let mut expected = vec!["Empty", "a.txt", "sub"];
+        // ci-listing-case: `A.txt` beside it, where the filesystem has both.
+        if fs::read_dir(&t)
+            .unwrap()
+            .any(|entry| entry.unwrap().file_name() == "A.txt")
+        {
+            expected.insert(0, "A.txt");
+        }
         if cfg!(unix) {
             expected.extend(["broken", "flink", "link"]);
             expected.sort();
