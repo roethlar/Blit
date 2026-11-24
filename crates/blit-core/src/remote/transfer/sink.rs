@@ -1416,9 +1416,10 @@ impl FsTransferSink {
         // file all the same and gave it to nobody.
         let create = || {
             let dst = dst.to_path_buf();
+            let within = self.canonical_dst_root.clone();
             async move {
                 tokio::task::spawn_blocking(move || -> std::io::Result<Made> {
-                    let file = create_to_write(&dst, new_only)?;
+                    let file = create_to_write(&dst, new_only, within.as_deref())?;
                     let identity = file.metadata().ok().as_ref().and_then(file_identity);
                     let made = Made {
                         file: Some(file),
@@ -2561,15 +2562,30 @@ pub const THE_NAME_IS_TAKEN: &str = "something stands at the destination that wa
 /// file, a directory, a link to nothing (which a plain creation writes
 /// THROUGH, making what it names). Whatever is there is then not this
 /// run's to touch.
-fn create_to_write(dst: &Path, new_only: bool) -> std::io::Result<std::fs::File> {
+///
+/// cr-ecm36-1: within the destination's root, `within` — made or opened
+/// beneath it, and a link at the name to nothing made only within it.
+fn create_to_write(
+    dst: &Path,
+    new_only: bool,
+    within: Option<&Path>,
+) -> std::io::Result<std::fs::File> {
     if new_only {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(dst)
+        #[cfg(unix)]
+        {
+            crate::copy::open_to_write(dst, within, true)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = within;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(dst)
+        }
     } else {
         // cr-ecm31-4: without waiting on a FIFO, and only a regular file.
-        crate::copy::create_regular(dst)
+        crate::copy::create_regular_within(dst, within)
     }
 }
 
@@ -3870,7 +3886,8 @@ fn copy_and_stamp_opened(
     // truncated whatever another hand had put there in between.
     let made_here = config.ignore_existing;
     let made = if made_here {
-        let made = create_to_write(dst, true).map_err(|error| creation_failed(dst, error, true))?;
+        let made = create_to_write(dst, true, within)
+            .map_err(|error| creation_failed(dst, error, true))?;
         // cr-ecm34-2 (Linux): and the cleanup HOLDS it — the handle the
         // copy writes through, still writable — as an ordinary copy's does
         // (cr-ecm33-2), its check that the name is that very file kept: what
@@ -4239,7 +4256,8 @@ fn write_tar_shard_payload(
         let results: Vec<(String, ClassifiedMember<()>)> = extracted
             .into_par_iter()
             .map(|f: ExtractedFile| {
-                let written = write_shard_member(&f, new_only).map(|bytes| (bytes, ()));
+                let written =
+                    write_shard_member(&f, new_only, canonical_dst_root).map(|bytes| (bytes, ()));
                 let member = classify_shard_member(dst_root, &f.rel, written);
                 (f.rel, member)
             })
@@ -4273,7 +4291,7 @@ fn write_tar_shard_payload(
                 prepare_to_write(&f.dest_path, f.windows_metadata.as_ref(), new_only)?;
 
                 let open_started = std::time::Instant::now();
-                let mut file = create_to_write(&f.dest_path, new_only)
+                let mut file = create_to_write(&f.dest_path, new_only, canonical_dst_root)
                     .map_err(|error| creation_failed(&f.dest_path, error, new_only))?;
                 // cr-ecm19-2: which file it made, in any run.
                 let own = file.metadata().ok().as_ref().and_then(file_identity);
@@ -4346,6 +4364,7 @@ fn write_tar_shard_payload(
 fn write_shard_member(
     file: &super::tar_safety::ExtractedFile,
     new_only: bool,
+    within: Option<&Path>,
 ) -> std::result::Result<u64, FailedWrite> {
     if let Some(parent) = file.dest_path.parent() {
         std::fs::create_dir_all(parent)
@@ -4354,7 +4373,7 @@ fn write_shard_member(
     prepare_to_write(&file.dest_path, file.windows_metadata.as_ref(), new_only)?;
     // cr-ecm14-2: a run that keeps what exists creates, or fails — and a
     // name it could not take is not its to settle.
-    let mut target = create_to_write(&file.dest_path, new_only)
+    let mut target = create_to_write(&file.dest_path, new_only, within)
         .map_err(|error| creation_failed(&file.dest_path, error, new_only))?;
     // cr-ecm19-2: which file it made, in any run.
     let own = target.metadata().ok().as_ref().and_then(file_identity);
@@ -7936,7 +7955,7 @@ mod tests {
 
         // The real member writer, failing for the real reason.
         let member = shard_member(&dst_root, "deep/one.bin", b"payload");
-        let written = write_shard_member(&member, false).map(|bytes| (bytes, ()));
+        let written = write_shard_member(&member, false, None).map(|bytes| (bytes, ()));
         let chain = format!(
             "{:#}",
             written
@@ -7969,7 +7988,7 @@ mod tests {
 
         // One member lands while the root is alive.
         let landed = shard_member(&dst_root, "landed.bin", b"landed!");
-        let landed_result = write_shard_member(&landed, false).map(|bytes| (bytes, ()));
+        let landed_result = write_shard_member(&landed, false, None).map(|bytes| (bytes, ()));
         assert!(
             landed_result.is_ok(),
             "the fixture's healthy member must actually land"
@@ -7979,7 +7998,7 @@ mod tests {
         // Then the root dies under a concurrent member.
         kill_root(&dst_root);
         let refused = shard_member(&dst_root, "refused.bin", b"refused");
-        let refused_result = write_shard_member(&refused, false).map(|bytes| (bytes, ()));
+        let refused_result = write_shard_member(&refused, false, None).map(|bytes| (bytes, ()));
         assert!(
             refused_result.is_err(),
             "the member must fail against the dead root"
@@ -9413,6 +9432,49 @@ mod cr_win_1_tests {
         );
     }
 
+    /// cr-ecm36-1: a streamed record and a tar member make their files with
+    /// the destination's root: a link at the name that leads out of the
+    /// destination, to nothing, makes nothing outside — the file fails.
+    /// Made with no root, the file was made where the link led.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_receivers_make_nothing_outside_the_destination() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        let outside = tmp.path().join("outside");
+        for dir in [&src, &dst, &outside] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::os::unix::fs::symlink("../outside/streamed.bin", dst.join("streamed.bin")).unwrap();
+        std::os::unix::fs::symlink("../outside/member.bin", dst.join("member.bin")).unwrap();
+        let sink = FsTransferSink::new(src.clone(), dst.clone(), FsSinkConfig::default());
+        let mut body: &[u8] = b"news";
+        let outcome = sink
+            .write_file_stream(&make_file_header("streamed.bin", 4), &mut body)
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        assert!(
+            !outside.join("streamed.bin").exists(),
+            "nothing made outside"
+        );
+
+        let root = std::fs::canonicalize(&dst).unwrap();
+        let member = crate::remote::transfer::tar_safety::ExtractedFile {
+            rel: "member.bin".to_string(),
+            dest_path: dst.join("member.bin"),
+            raw: None,
+            contents: b"new".to_vec(),
+            mtime: None,
+            permissions: None,
+            size: 3,
+            windows_metadata: None,
+        };
+        assert!(write_shard_member(&member, false, Some(&root)).is_err());
+        assert!(!outside.join("member.bin").exists(), "nothing made outside");
+    }
+
     /// cr-ecm33-1: an ordinary local copy through a link standing at its
     /// destination — to a file in the destination — lands in the file the
     /// link names, keeps the link, and is delivered. Its completion asked
@@ -9540,7 +9602,7 @@ mod cr_win_1_tests {
             let made = made.clone();
             std::thread::spawn(move || {
                 let _ = done.send((
-                    create_to_write(&made, false).is_err(),
+                    create_to_write(&made, false, None).is_err(),
                     crate::copy::create_regular(&made).is_err(),
                 ));
             });
@@ -11015,7 +11077,10 @@ mod cr_win_1_tests {
             windows_metadata: None,
         };
         // Free: written, with its time and mode.
-        assert_eq!(write_shard_member(&member("free"), true).ok(), Some(3));
+        assert_eq!(
+            write_shard_member(&member("free"), true, None).ok(),
+            Some(3)
+        );
         let landed = std::fs::metadata(tmp.path().join("free")).unwrap();
         assert_eq!(landed.permissions().mode() & 0o777, 0o600);
         assert_eq!(
@@ -11045,7 +11110,8 @@ mod cr_win_1_tests {
                 }
                 Hooked(dest.clone())
             };
-            let failed = write_shard_member(&member(name), true).expect_err("the name is taken");
+            let failed =
+                write_shard_member(&member(name), true, None).expect_err("the name is taken");
             if !tail_fails {
                 assert!(
                     format!("{:#}", failed.error).contains(THE_NAME_IS_TAKEN),
@@ -11066,7 +11132,10 @@ mod cr_win_1_tests {
             );
         }
         // A run that keeps nothing: as ever.
-        assert_eq!(write_shard_member(&member("plain"), false).ok(), Some(3));
+        assert_eq!(
+            write_shard_member(&member("plain"), false, None).ok(),
+            Some(3)
+        );
         assert_eq!(std::fs::read(tmp.path().join("plain")).unwrap(), b"new");
     }
 
@@ -11480,7 +11549,7 @@ mod cr_win_1_tests {
             ));
             Hooked(dest.clone())
         };
-        let failed = write_shard_member(&member, false).expect_err("replaced");
+        let failed = write_shard_member(&member, false, None).expect_err("replaced");
         assert!(
             format!("{:#}", failed.error).contains(REPLACED_WHILE_WRITTEN),
             "{:#}",
@@ -11559,7 +11628,8 @@ mod cr_win_1_tests {
         std::os::unix::fs::symlink("made", tmp.path().join("taken")).unwrap();
         std::fs::write(tmp.path().join("file"), b"old").unwrap();
         for name in ["taken", "file"] {
-            let refused = write_shard_member(&member(name), true).expect_err("the name is taken");
+            let refused =
+                write_shard_member(&member(name), true, None).expect_err("the name is taken");
             assert!(
                 format!("{:#}", refused.error).contains(THE_NAME_IS_TAKEN),
                 "{name}: {:#}",
@@ -11568,10 +11638,16 @@ mod cr_win_1_tests {
         }
         assert!(tmp.path().join("taken").is_symlink() && !tmp.path().join("made").exists());
         assert_eq!(std::fs::read(tmp.path().join("file")).unwrap(), b"old");
-        assert_eq!(write_shard_member(&member("free"), true).ok(), Some(3));
+        assert_eq!(
+            write_shard_member(&member("free"), true, None).ok(),
+            Some(3)
+        );
         assert_eq!(std::fs::read(tmp.path().join("free")).unwrap(), b"new");
         // Without the option the file that is there is written over.
-        assert_eq!(write_shard_member(&member("file"), false).ok(), Some(3));
+        assert_eq!(
+            write_shard_member(&member("file"), false, None).ok(),
+            Some(3)
+        );
         assert_eq!(std::fs::read(tmp.path().join("file")).unwrap(), b"new");
     }
 

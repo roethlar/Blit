@@ -8,6 +8,8 @@ pub use compare::{
     file_needs_copy_with_mode_opened,
 };
 #[cfg(unix)]
+pub use file_copy::open_to_write;
+#[cfg(unix)]
 pub(crate) use file_copy::resume::{effective_user, is_link, resolve_destination, Resolved};
 pub use file_copy::resume::{Place, DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE};
 #[cfg(all(test, unix))]

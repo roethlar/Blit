@@ -414,15 +414,6 @@ impl MadeAt {
 /// [`create_regular_within`].
 #[cfg(unix)]
 fn acquire_to_write(dst: &Path, within: Option<&Path>) -> std::io::Result<(File, Option<MadeAt>)> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let options = |make: bool| {
-        let mut open = std::fs::OpenOptions::new();
-        open.write(true).custom_flags(libc::O_NONBLOCK);
-        if make {
-            open.create_new(true);
-        }
-        open
-    };
     let refused = |error: std::io::Error| {
         if error.raw_os_error() == Some(libc::ENXIO) {
             std::io::Error::other(format!(
@@ -435,13 +426,13 @@ fn acquire_to_write(dst: &Path, within: Option<&Path>) -> std::io::Result<(File,
     };
     // A name that keeps changing between the opens is given up on.
     for _ in 0..4 {
-        match options(true).open(dst) {
+        match open_to_write(dst, within, true) {
             Ok(file) => return Ok((file, Some(MadeAt::Name(dst.to_path_buf())))),
             Err(taken) if taken.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(refused(error)),
         }
         between_the_two_opens(dst);
-        match options(false).open(dst) {
+        match open_to_write(dst, within, false) {
             Ok(file) => return Ok((file, None)),
             Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => {
                 // Taken a moment ago, leading to nothing now: a link to
@@ -469,6 +460,216 @@ fn acquire_to_write(dst: &Path, within: Option<&Path>) -> std::io::Result<(File,
         "{} kept changing while it was opened",
         dst.display()
     )))
+}
+
+/// One of the opener's two opens of `dst` to write it, without waiting:
+/// `make`, by a creation that fails if the name is taken; else what has the
+/// name. cr-ecm36-1: with a root, on Linux, made beneath it — the place
+/// found from the root down, and the kernel refusing any way out of it
+/// (`openat2`, `RESOLVE_BENEATH`): a directory on the way replaced by a
+/// link out since the place was judged cannot lead the open out. Without
+/// `openat2` (an older kernel), and elsewhere, by the name, as before.
+#[cfg(unix)]
+pub fn open_to_write(dst: &Path, within: Option<&Path>, make: bool) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    #[cfg(target_os = "linux")]
+    if let Some(root) = within {
+        if let Some(opened) = open_beneath(dst, root, make) {
+            return opened;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = within;
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).custom_flags(libc::O_NONBLOCK);
+    if make {
+        open.create_new(true);
+    }
+    open.open(dst)
+}
+
+/// [`open_to_write`] beneath `root` (canonical), or `None` where it cannot
+/// be: no `openat2` here, or a root that is the destination file itself.
+#[cfg(target_os = "linux")]
+fn open_beneath(dst: &Path, root: &Path, make: bool) -> Option<std::io::Result<File>> {
+    use std::os::unix::io::{FromRawFd as _, OwnedFd};
+    let Some(name) = dst.file_name() else {
+        return Some(Err(std::io::Error::other(format!(
+            "{} names no file",
+            dst.display()
+        ))));
+    };
+    let parent = match dst.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    // Written beneath the root already, by its own name: as it is — the
+    // kernel refuses any `..` or link in it that leads out. Else where its
+    // directory lies beneath the root, found once for the directory.
+    let lexical = dst
+        .strip_prefix(root)
+        .ok()
+        .filter(|beneath| !beneath.as_os_str().is_empty())
+        .map(|beneath| {
+            use std::os::unix::ffi::OsStrExt as _;
+            let mut bytes = Vec::with_capacity(beneath.as_os_str().len() + 1);
+            bytes.extend_from_slice(beneath.as_os_str().as_bytes());
+            Ok(Ok(bytes))
+        });
+    let beneath = match lexical.unwrap_or_else(|| place_beneath(parent, root, name)) {
+        Ok(Ok(beneath)) => beneath,
+        // A destination that is one file: its root is the file itself.
+        Ok(Err(directory)) if directory.join(name) == root => return None,
+        Ok(Err(_)) => {
+            return Some(Err(std::io::Error::other(format!(
+                "{} leads out of the destination",
+                dst.display()
+            ))))
+        }
+        Err(error) => return Some(Err(error)),
+    };
+    let Ok(beneath) = std::ffi::CString::new(beneath) else {
+        return Some(Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)));
+    };
+    let held = held_root(root)?;
+    let mut flags = libc::O_WRONLY | libc::O_NONBLOCK | libc::O_CLOEXEC;
+    if make {
+        flags |= libc::O_CREAT | libc::O_EXCL;
+    }
+    // SAFETY: `open_how` is plain integers; zero is each field's empty
+    // value, and the three the call reads are set below.
+    let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+    how.flags = flags as u64;
+    how.mode = if make { 0o666 } else { 0 };
+    how.resolve = libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS;
+    // SAFETY: the held root is open for the call; `beneath` is a
+    // NUL-terminated path and `how` a properly sized `open_how`, both
+    // outliving it.
+    let opened = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            held,
+            beneath.as_ptr(),
+            &how as *const libc::open_how,
+            std::mem::size_of::<libc::open_how>(),
+        )
+    };
+    if opened < 0 {
+        let error = std::io::Error::last_os_error();
+        return match error.raw_os_error() {
+            // No `openat2` here (a kernel before 5.6, or a filter that
+            // refuses it): by the name, as before.
+            Some(libc::ENOSYS) | Some(libc::EPERM) => None,
+            Some(libc::EXDEV) => Some(Err(std::io::Error::other(format!(
+                "{} leads out of the destination",
+                dst.display()
+            )))),
+            _ => Some(Err(error)),
+        };
+    }
+    // SAFETY: `opened` is an open descriptor nothing else owns.
+    Some(Ok(File::from(unsafe {
+        OwnedFd::from_raw_fd(opened as i32)
+    })))
+}
+
+#[cfg(target_os = "linux")]
+thread_local! {
+    /// Where the last directory this thread wrote into lies beneath the last
+    /// root — or its canonical form, where it does not — and the root held:
+    /// a copy writes many files of one directory in a row. A place gone
+    /// stale only names, beneath the root, where the directory really is —
+    /// the open there is still made beneath the root.
+    #[allow(clippy::type_complexity)]
+    static LAST_DIRECTORY: std::cell::RefCell<
+        Vec<(std::path::PathBuf, std::path::PathBuf, Result<Vec<u8>, std::path::PathBuf>)>,
+    > = const { std::cell::RefCell::new(Vec::new()) };
+    static HELD_ROOT: std::cell::RefCell<Option<(std::path::PathBuf, std::os::unix::io::OwnedFd)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `name` in `parent`, as the bytes of its path beneath `root` (canonical);
+/// or, where `parent` does not lie beneath it, `parent`'s canonical form.
+/// The place of `parent` is remembered for the next file of it.
+#[cfg(target_os = "linux")]
+fn place_beneath(
+    parent: &Path,
+    root: &Path,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<Result<Vec<u8>, std::path::PathBuf>> {
+    use std::os::unix::ffi::OsStrExt as _;
+    // The few directories a thread's writes go between, the latest first.
+    const KEPT: usize = 16;
+    LAST_DIRECTORY.with(|last| {
+        let mut last = last.borrow_mut();
+        let found = last
+            .iter()
+            .position(|(of, under, _)| of == parent && under == root);
+        match found {
+            Some(0) => {}
+            Some(at) => {
+                let entry = last.remove(at);
+                last.insert(0, entry);
+            }
+            None => {
+                let canonical = std::fs::canonicalize(parent)?;
+                let place = match canonical.strip_prefix(root) {
+                    Ok(beneath) => Ok(beneath.as_os_str().as_bytes().to_vec()),
+                    Err(_) => Err(canonical),
+                };
+                last.insert(0, (parent.to_path_buf(), root.to_path_buf(), place));
+                last.truncate(KEPT);
+            }
+        }
+        let Some((_, _, place)) = last.first() else {
+            unreachable!("the place was just remembered");
+        };
+        Ok(match place {
+            Ok(directory) => {
+                let mut bytes = Vec::with_capacity(directory.len() + name.len() + 2);
+                if !directory.is_empty() {
+                    bytes.extend_from_slice(directory);
+                    bytes.push(b'/');
+                }
+                bytes.extend_from_slice(name.as_bytes());
+                Ok(bytes)
+            }
+            Err(canonical) => Err(canonical.clone()),
+        })
+    })
+}
+
+/// The destination's root held (`O_PATH`) — opened once per thread and
+/// root — as the descriptor an open beneath it starts from; `None` when it
+/// cannot be held (a root that is one file).
+#[cfg(target_os = "linux")]
+fn held_root(root: &Path) -> Option<std::os::unix::io::RawFd> {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::io::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    HELD_ROOT.with(|held| {
+        let mut held = held.borrow_mut();
+        if let Some((of, fd)) = held.as_ref() {
+            if of == root {
+                return Some(fd.as_raw_fd());
+            }
+        }
+        let name = std::ffi::CString::new(root.as_os_str().as_bytes()).ok()?;
+        // SAFETY: `name` is a NUL-terminated path that outlives the call.
+        let fd = unsafe {
+            libc::open(
+                name.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return None;
+        }
+        // SAFETY: `fd` is an open descriptor nothing else owns.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let raw = fd.as_raw_fd();
+        *held = Some((root.to_path_buf(), fd));
+        Some(raw)
+    })
 }
 
 /// Test seam (cr-ecm35-1): runs between the creation that found the name
@@ -937,6 +1138,28 @@ mod mode_tests {
         assert!(made.is_err(), "refused: {made:?}");
         assert!(!outside.join("new.bin").exists(), "nothing made outside");
         assert!(link.is_symlink(), "the link is left as it was");
+    }
+
+    /// cr-ecm36-1 (Linux): the opener's own opens are made beneath the
+    /// destination's root: a directory on the way that is a link out of it
+    /// — however it came to be one — leads nothing out. By the name, the
+    /// creation followed it and made the file outside.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_directory_on_the_way_that_leads_out_makes_nothing_outside() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("dst");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink("../outside", root.join("sub")).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let made = create_regular_within(&root.join("sub").join("f.bin"), Some(&root));
+        assert!(made.is_err(), "refused: {made:?}");
+        assert!(!outside.join("f.bin").exists(), "nothing made outside");
+        let made = open_to_write(&root.join("sub").join("g.bin"), Some(&root), true);
+        assert!(made.is_err(), "refused: {made:?}");
+        assert!(!outside.join("g.bin").exists(), "nothing made outside");
     }
 
     /// cr-ecm35-1: a chain of 40 links to nothing — as many as the system
