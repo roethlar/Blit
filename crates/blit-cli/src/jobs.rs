@@ -385,9 +385,10 @@ struct LoggedLeftovers {
     /// lost nothing: it settles a file's status both ways.
     complete: bool,
     left: HashSet<(String, Option<String>)>,
-    /// cr-ecm34-6: a failure's event does not say whether it left its copy
-    /// (a log written before the field): `left` is not the whole answer.
-    left_unknown: bool,
+    /// cr-ecm34-6, cr-ecm35-5: the failed files whose events do not say
+    /// whether they left their copy, by identity: for those, `left` is not
+    /// the answer.
+    left_unknown: HashSet<(String, Option<String>)>,
 }
 
 /// The failed files that left the run's own incomplete copy, by identity.
@@ -413,7 +414,8 @@ fn own_leftovers(
         let ambiguous = !record.left_in_place_exact
             && raw.is_some()
             && record.left_in_place.iter().any(|left| left == path);
-        if ambiguous && !(logged.read && logged.complete && !logged.left_unknown) {
+        if ambiguous && !(logged.read && logged.complete && !logged.left_unknown.contains(identity))
+        {
             eyre::bail!(
                 "job {} ran with --ignore-existing, and its record (from an earlier blit) \
                  cannot say whether the failed file {} left its own incomplete copy at \
@@ -481,7 +483,8 @@ fn failed_identities(
         // revive it; one stream's events never clear another's evidence;
         // what each stream holds at its end is united.
         type Identities = HashSet<(String, Option<String>)>;
-        let mut streams: HashMap<(String, Role), (Identities, Identities)> = HashMap::new();
+        let mut streams: HashMap<(String, Role), (Identities, Identities, Identities)> =
+            HashMap::new();
         for log in found {
             let Ok(lines) = job_log::open_log(&log.path) else {
                 logged.complete = false;
@@ -490,7 +493,7 @@ fn failed_identities(
             logged.read = true;
             let mut whole = log.finished;
             let mut ended = false;
-            let (left, still_failed) = streams
+            let (left, still_failed, unknown) = streams
                 .entry((log.key.participant().to_string(), log.key.role()))
                 .or_default();
             for line in lines {
@@ -505,12 +508,18 @@ fn failed_identities(
                         left_in_place,
                         ..
                     } => {
+                        let identity = (path.clone(), raw.clone());
                         match left_in_place {
                             Some(true) => {
-                                left.insert((path.clone(), raw.clone()));
+                                unknown.remove(&identity);
+                                left.insert(identity);
                             }
-                            Some(false) => {}
-                            None => logged.left_unknown = true,
+                            Some(false) => {
+                                unknown.remove(&identity);
+                            }
+                            None => {
+                                unknown.insert(identity);
+                            }
                         }
                         still_failed.insert((path, raw));
                     }
@@ -520,6 +529,7 @@ fn failed_identities(
                     job_log::EventBody::FileCopied { path, raw, .. } => {
                         let identity = (path, raw);
                         left.remove(&identity);
+                        unknown.remove(&identity);
                         still_failed.remove(&identity);
                     }
                     job_log::EventBody::FileSent { path, raw } => {
@@ -532,8 +542,9 @@ fn failed_identities(
             }
             logged.complete &= whole && ended;
         }
-        for (left, still_failed) in streams.into_values() {
+        for (left, still_failed, unknown) in streams.into_values() {
             logged.left.extend(left);
+            logged.left_unknown.extend(unknown);
             known.extend(still_failed);
         }
         if legacy && !(logged.read && logged.complete) {
@@ -2156,7 +2167,7 @@ mod retry_name_tests {
             read: true,
             complete: false,
             left: [(text.clone(), raw.clone())].into(),
-            left_unknown: false,
+            left_unknown: HashSet::new(),
         };
         assert_eq!(
             own_leftovers(&record, &failed, &names_it).unwrap(),
@@ -2168,7 +2179,7 @@ mod retry_name_tests {
             read: true,
             complete: true,
             left: HashSet::new(),
-            left_unknown: false,
+            left_unknown: HashSet::new(),
         };
         assert!(own_leftovers(&record, &failed, &complete_without)
             .unwrap()
@@ -2177,7 +2188,7 @@ mod retry_name_tests {
             read: true,
             complete: false,
             left: HashSet::new(),
-            left_unknown: false,
+            left_unknown: HashSet::new(),
         };
         assert!(own_leftovers(&record, &failed, &incomplete_without).is_err());
         // cr-ecm34-6: a complete log whose events do not say — written
@@ -2187,9 +2198,20 @@ mod retry_name_tests {
             read: true,
             complete: true,
             left: HashSet::new(),
-            left_unknown: true,
+            left_unknown: [(text.clone(), raw.clone())].into(),
         };
         assert!(own_leftovers(&record, &failed, &complete_unsaid).is_err());
+        // cr-ecm35-5: an unknown is its own file's: one for another file
+        // leaves this one settled by the complete log — not the run's own.
+        let unsaid_elsewhere = LoggedLeftovers {
+            read: true,
+            complete: true,
+            left: HashSet::new(),
+            left_unknown: [("other.txt".to_string(), None)].into(),
+        };
+        assert!(own_leftovers(&record, &failed, &unsaid_elsewhere)
+            .unwrap()
+            .is_empty());
         // Old record, a raw-named failure whose text is not in the list:
         // not the run's own, no ambiguity.
         let other: HashSet<(String, Option<String>)> =

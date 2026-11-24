@@ -922,10 +922,12 @@ pub struct LogRead {
     /// copy, by text and escaped bytes (review cr-jl4fix2-1: the status is
     /// the entry's, not its text's).
     pub left_in_place: Vec<(String, Option<String>)>,
-    /// cr-ecm34-6: a failure's event does not say whether its write left
-    /// its copy — a log written before the field — so `left_in_place` is
-    /// not the whole list.
-    pub left_unknown: bool,
+    /// cr-ecm34-6, cr-ecm35-5: the failures whose event does not say whether
+    /// their write left its copy — a log written before the field, or a file
+    /// past a cut list — by identity; a later copy of one, or a later event
+    /// that says, settles it. While any stays, `left_in_place` is not the
+    /// whole list.
+    pub left_unknown: Vec<(String, Option<String>)>,
 }
 
 impl LogRead {
@@ -955,7 +957,14 @@ impl LogRead {
                 raw,
                 left_in_place,
             } => {
-                self.left_unknown |= left_in_place.is_none();
+                let identity = (path.clone(), raw.clone());
+                match left_in_place {
+                    None if !self.left_unknown.contains(&identity) => {
+                        self.left_unknown.push(identity)
+                    }
+                    None => {}
+                    Some(_) => self.left_unknown.retain(|unknown| unknown != &identity),
+                }
                 if left_in_place == Some(true)
                     && !self
                         .left_in_place
@@ -982,6 +991,8 @@ impl LogRead {
                     .retain(|failed| !(failed.path == path && failed.raw == raw));
                 self.left_in_place
                     .retain(|left| !(left.0 == path && left.1 == raw));
+                self.left_unknown
+                    .retain(|unknown| !(unknown.0 == path && unknown.1 == raw));
             }
             EventBody::FileSent { path, raw } => {
                 self.failures
@@ -1021,7 +1032,7 @@ impl LogRead {
         ended.failures_truncated = truncated;
         (ended.left_in_place, ended.left_in_place_raw) = self.left_in_place_lists();
         ended.left_in_place_exact = true;
-        ended.left_in_place_truncated = truncated || self.left_unknown;
+        ended.left_in_place_truncated = truncated || !self.left_unknown.is_empty();
         ended
     }
 
@@ -1596,7 +1607,7 @@ mod tests {
                 left_in_place: Some(false),
             },
         ));
-        assert!(!said.left_unknown);
+        assert!(said.left_unknown.is_empty());
         let record = RunRecord::starting(RUN, &spec());
         assert!(!said.ended_record(&record, false).left_in_place_truncated);
         let mut unsaid = read.clone();
@@ -1609,8 +1620,22 @@ mod tests {
                 left_in_place: None,
             },
         ));
-        assert!(unsaid.left_unknown);
+        assert_eq!(unsaid.left_unknown, [("c.txt".to_string(), None)]);
         assert!(unsaid.ended_record(&record, false).left_in_place_truncated);
+        // cr-ecm35-5: the unknown is that file's: a later copy of it settles
+        // it, and the list is whole again. It kept the whole list incomplete
+        // after the file had landed.
+        let mut landed = unsaid.clone();
+        landed.read_line(event(
+            6,
+            EventBody::FileCopied {
+                path: "c.txt".into(),
+                bytes: None,
+                raw: None,
+            },
+        ));
+        assert!(landed.left_unknown.is_empty());
+        assert!(!landed.ended_record(&record, false).left_in_place_truncated);
         let mut own = read.clone();
         own.read_line(event(
             5,

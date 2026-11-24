@@ -135,7 +135,10 @@ pub struct FailedFile {
     pub path: String,
     pub raw: Option<Vec<u8>>,
     pub reason: Option<String>,
-    pub left_in_place: bool,
+    /// Whether its failure left this run's copy — `None` where the account
+    /// does not say (cr-ecm35-5): a file past the reason cap missing from a
+    /// left-in-place list that was cut short.
+    pub left_in_place: Option<bool>,
 }
 
 impl RunTotals {
@@ -158,9 +161,11 @@ impl RunTotals {
             {
                 continue;
             }
+            // A failure the report kept says it itself (contract 30).
             files.push(FailedFile {
-                left_in_place: failure.left_in_place
-                    || left(&failure.relative_path, raw.as_deref()),
+                left_in_place: Some(
+                    failure.left_in_place || left(&failure.relative_path, raw.as_deref()),
+                ),
                 path: failure.relative_path.clone(),
                 raw,
                 reason: Some(failure.reason.clone()),
@@ -178,8 +183,17 @@ impl RunTotals {
             if named {
                 continue;
             }
+            // cr-ecm35-5: one past the cap is told by the lists alone — and
+            // missing from a list cut short, it is not known.
+            let left_in_place = if left(path, raw.as_deref()) {
+                Some(true)
+            } else if self.left_in_place_truncated {
+                None
+            } else {
+                Some(false)
+            };
             files.push(FailedFile {
-                left_in_place: left(path, raw.as_deref()),
+                left_in_place,
                 path: path.clone(),
                 raw,
                 reason: None,
@@ -706,9 +720,22 @@ impl RunLog {
                         .is_none()
                         .then(|| raw.as_deref().and_then(crate::raw_name::unescape_raw))
                         .flatten();
+                    // A path past the cap named by the bytes heard live is
+                    // told by those bytes, as the lists keep them
+                    // (cr-jl4fix2-1) — and missing from a list cut short, it
+                    // is not known (cr-ecm35-5). A failure the report kept
+                    // says it itself.
                     let left_in_place = match heard {
-                        Some(bytes) => totals.left_in_place_raw.contains(&bytes),
-                        None => file.left_in_place,
+                        Some(bytes) if file.reason.is_none() => {
+                            if totals.left_in_place_raw.contains(&bytes) {
+                                Some(true)
+                            } else if totals.left_in_place_truncated {
+                                None
+                            } else {
+                                Some(false)
+                            }
+                        }
+                        _ => file.left_in_place,
                     };
                     bodies.push(EventBody::FileFailed {
                         reason: file
@@ -716,7 +743,7 @@ impl RunLog {
                             .unwrap_or_else(|| NO_REASON_REPORTED.to_string()),
                         path: file.path,
                         raw,
-                        left_in_place: Some(left_in_place),
+                        left_in_place,
                     });
                 }
             }
@@ -1069,6 +1096,38 @@ mod tests {
         merged.merge(RunTotals::from(&summary));
         assert_eq!(merged.failed_paths_raw.len(), merged.failed_paths.len());
         assert_eq!(merged.failed_paths_raw[2], b"dup\xfe.bin".to_vec());
+    }
+
+    /// cr-ecm35-5: a failed file past the reason cap is told left or not by
+    /// the lists alone, and missing from a list cut short it is not known —
+    /// logged so, never as known nothing. Logged as nothing left, a recovered
+    /// `--ignore-existing` retry could keep its own partial as a file.
+    #[test]
+    fn a_failure_missing_from_a_cut_list_is_not_known() {
+        let totals = RunTotals {
+            files_failed: 2,
+            failed_paths: vec!["in.bin".into(), "out.bin".into()],
+            left_in_place: vec!["in.bin".into()],
+            left_in_place_truncated: true,
+            ..RunTotals::default()
+        };
+        let said: Vec<(String, Option<bool>)> = totals
+            .failed_files()
+            .into_iter()
+            .map(|file| (file.path, file.left_in_place))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                ("in.bin".to_string(), Some(true)),
+                ("out.bin".to_string(), None)
+            ]
+        );
+        let whole = RunTotals {
+            left_in_place_truncated: false,
+            ..totals
+        };
+        assert_eq!(whole.failed_files()[1].left_in_place, Some(false));
     }
 
     /// cr-ecm35-3: two failed files of one text, the reason cap falling
