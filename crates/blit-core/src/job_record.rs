@@ -937,8 +937,13 @@ impl LogRead {
             return;
         };
         match event.body {
-            EventBody::FileFailed { path, reason, raw } => {
-                if reason.contains(crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE)
+            EventBody::FileFailed {
+                path,
+                reason,
+                raw,
+                left_in_place,
+            } => {
+                if left_in_place
                     && !self
                         .left_in_place
                         .iter()
@@ -1527,6 +1532,7 @@ mod tests {
             path: "a.txt".into(),
             reason: "denied".into(),
             raw: None,
+            left_in_place: false,
         };
         let mut read = LogRead {
             logs: 1,
@@ -1544,9 +1550,26 @@ mod tests {
         ));
         assert_eq!(read.failures.len(), 1, "each failure once");
         assert!(read.complete());
-        // Review cr-jl4-1: a whole reason says when the write left its own
-        // incomplete copy.
+        // Review cr-jl4-1, D-2026-11-24-1: the event says when the write
+        // left its own incomplete copy — by its field, not its words.
         assert!(read.left_in_place.is_empty());
+        let mut words = read.clone();
+        words.read_line(event(
+            5,
+            EventBody::FileFailed {
+                path: format!(
+                    "{}.txt",
+                    crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
+                ),
+                reason: format!(
+                    "source: cannot open: {}",
+                    crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
+                ),
+                raw: None,
+                left_in_place: false,
+            },
+        ));
+        assert!(words.left_in_place.is_empty(), "words say nothing");
         let mut own = read.clone();
         own.read_line(event(
             5,
@@ -1557,6 +1580,7 @@ mod tests {
                     crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
                 ),
                 raw: None,
+                left_in_place: true,
             },
         ));
         assert_eq!(own.left_in_place, [("b.txt".to_string(), None)]);
@@ -1596,6 +1620,7 @@ mod tests {
                     crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
                 ),
                 raw: Some("dup\\xff".into()),
+                left_in_place: true,
             },
         ));
         raw_left.read_line(event(

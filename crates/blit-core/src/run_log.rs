@@ -441,11 +441,16 @@ impl RunLog {
                         },
                     }]
                 }
-                ProgressEvent::FileFailed { path, reason } => {
+                ProgressEvent::FileFailed {
+                    path,
+                    reason,
+                    left_in_place,
+                } => {
                     let body = EventBody::FileFailed {
                         path: path.clone(),
                         reason: reason.clone(),
                         raw: raw(path),
+                        left_in_place: *left_in_place,
                     };
                     active.failed.insert((path.clone(), raw(path)));
                     vec![body]
@@ -608,10 +613,18 @@ impl RunLog {
                 if named.is_empty() {
                     let raw = active.raw_names.get(path).cloned();
                     if failed.insert((path.clone(), raw.clone())) {
+                        // By the entry's own bytes when it has them, as
+                        // below (cr-jl4fix2-1).
+                        let left_in_place =
+                            match raw.as_deref().and_then(crate::raw_name::unescape_raw) {
+                                Some(bytes) => totals.left_in_place_raw.contains(&bytes),
+                                None => totals.left_in_place.contains(path),
+                            };
                         bodies.push(EventBody::FileFailed {
                             path: path.clone(),
                             reason: NO_REASON_REPORTED.to_string(),
                             raw,
+                            left_in_place,
                         });
                     }
                 }
@@ -622,10 +635,16 @@ impl RunLog {
                         .map(crate::raw_name::escape_raw)
                         .or_else(|| active.raw_names.get(path).cloned());
                     if failed.insert((path.clone(), raw.clone())) {
+                        let left_in_place = failure.left_in_place
+                            || match &failure.raw_relative_path {
+                                Some(bytes) => totals.left_in_place_raw.contains(bytes),
+                                None => totals.left_in_place.contains(path),
+                            };
                         bodies.push(EventBody::FileFailed {
                             path: path.clone(),
                             reason: failure.reason.clone(),
                             raw,
+                            left_in_place,
                         });
                     }
                 }
@@ -895,6 +914,7 @@ mod tests {
                 relative_path: "dup\u{FFFD}.bin".into(),
                 reason: "duplicate".into(),
                 raw_relative_path: Some(b"dup\xff.bin".to_vec()),
+                left_in_place: false,
             }],
             ..RunTotals::default()
         };
@@ -913,6 +933,65 @@ mod tests {
             })
             .collect();
         assert_eq!(raws, [Some(crate::raw_name::escape_raw(b"dup\xff.bin"))]);
+    }
+
+    /// D-2026-11-24-1 (cr-ecm33-5): a failure the summary names without a
+    /// reason is logged left in place by the entry's own bytes when it has
+    /// them — the raw set, never the text set, which may be another entry's.
+    #[tokio::test]
+    async fn an_unnamed_failure_is_left_in_place_by_its_own_bytes() {
+        use crate::job_log::{open_log, LogLine};
+        for (raw_left, text_left, logged_left) in [(true, false, true), (false, true, false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let log = RunLog::new(
+                Some(LogPlace {
+                    dir: dir.path().to_path_buf(),
+                    participant: "m1".into(),
+                    keep: DEFAULT_KEEP,
+                    finished: None,
+                }),
+                "0123456789abcdef0123456789abcdef",
+            );
+            log.start(Role::Initiator, RunInfo::default(), None);
+            let progress = crate::remote::transfer::RemoteTransferProgress::audit_only(
+                log.audit_lane_at(End::Receiving).expect("a lane"),
+            );
+            let text = "dup\u{FFFD}.bin".to_string();
+            progress
+                .report_raw_name(text.clone(), b"dup\xfe.bin".to_vec())
+                .await;
+            drop(progress);
+            let totals = RunTotals {
+                files_failed: 1,
+                failed_paths: vec![text.clone()],
+                left_in_place: if text_left {
+                    vec![text.clone()]
+                } else {
+                    Vec::new()
+                },
+                left_in_place_raw: if raw_left {
+                    vec![b"dup\xfe.bin".to_vec()]
+                } else {
+                    Vec::new()
+                },
+                ..RunTotals::default()
+            };
+            let report = log
+                .close(Outcome::Failed, None, Some(totals))
+                .await
+                .expect("a report");
+            let left: Vec<bool> = open_log(&report.path.expect("a log"))
+                .unwrap()
+                .filter_map(|line| match line.unwrap() {
+                    LogLine::Event(event) => match event.body {
+                        EventBody::FileFailed { left_in_place, .. } => Some(left_in_place),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(left, [logged_left], "raw {raw_left}, text {text_left}");
+        }
     }
 
     /// Review cr-jl3afix2-1: a failure named live hides no other failure
@@ -952,11 +1031,13 @@ mod tests {
                     relative_path: text.clone(),
                     reason: "denied".into(),
                     raw_relative_path: None,
+                    left_in_place: false,
                 },
                 FileFailure {
                     relative_path: text.clone(),
                     reason: "duplicate".into(),
                     raw_relative_path: Some(b"dup\xff.bin".to_vec()),
+                    left_in_place: false,
                 },
             ],
             ..RunTotals::default()

@@ -492,10 +492,13 @@ fn failed_identities(
                     continue;
                 };
                 match event.body {
-                    job_log::EventBody::FileFailed { path, raw, reason } => {
-                        if reason
-                            .contains(blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE)
-                        {
+                    job_log::EventBody::FileFailed {
+                        path,
+                        raw,
+                        left_in_place,
+                        ..
+                    } => {
+                        if left_in_place {
                             left.insert((path.clone(), raw.clone()));
                         }
                         still_failed.insert((path, raw));
@@ -1540,7 +1543,10 @@ async fn print_failed_files(
         named.unfinished |= !header.finished;
         for line in LogLines::new(lines) {
             if let LogLine::Event(job_log::Event {
-                body: job_log::EventBody::FileFailed { path, reason, raw },
+                body:
+                    job_log::EventBody::FileFailed {
+                        path, reason, raw, ..
+                    },
                 ..
             }) = line?
             {
@@ -2158,6 +2164,60 @@ mod retry_name_tests {
     /// Review cr-jl4fix4-1: an old record with a whole failure list still
     /// has this machine's log read for an ambiguous raw-named failure, and
     /// a finished log that names the identity makes the file the run's own.
+    /// D-2026-11-24-1 (cr-ecm33-5): a log marks a file left in place by its
+    /// event's field, never by its words — a failure whose path and reason
+    /// both hold the very sentence is not this run's leftover.
+    #[test]
+    fn a_logs_words_mark_nothing_left_in_place() {
+        use blit_core::job_log::{EventBody, Outcome, Role, RunInfo};
+        use blit_core::run_log::LogPlace;
+        let dir = tempfile::tempdir().unwrap();
+        let run_id = "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
+        let sentence = blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE;
+        let place = LogPlace {
+            dir: dir.path().join("jobs").join("logs"),
+            participant: "m1".into(),
+            keep: 50,
+            finished: None,
+        };
+        let writer = place
+            .start(run_id, 1, Role::Initiator, RunInfo::default())
+            .expect("a log");
+        writer.record(EventBody::FileFailed {
+            path: format!("{sentence}.txt"),
+            reason: format!("source: cannot open: {sentence}"),
+            raw: None,
+            left_in_place: false,
+        });
+        writer.record(EventBody::FileFailed {
+            path: "left.txt".into(),
+            reason: "write failed".into(),
+            raw: None,
+            left_in_place: true,
+        });
+        assert!(writer.finish(Outcome::Failed, None).complete);
+        let mut record = RunRecord::starting(
+            run_id,
+            &JobSpec::new(
+                "m1",
+                "copy",
+                "/".into(),
+                blit_core::job_record::SpecEndpoint::Local { path: "/a/".into() },
+                blit_core::job_record::SpecEndpoint::Local { path: "/b/".into() },
+                Default::default(),
+                None,
+            ),
+        );
+        // Two failed, none named: the record is short, and the log is read.
+        record.files_failed = 2;
+        let (_, logged) = failed_identities(dir.path(), &record).unwrap();
+        assert!(
+            logged.read && logged.complete,
+            "the log was read, and is whole"
+        );
+        assert_eq!(logged.left, [("left.txt".to_string(), None)].into());
+    }
+
     #[test]
     fn an_old_records_ambiguity_is_settled_from_a_whole_log() {
         use blit_core::job_log::{EventBody, Outcome, Role, RunInfo};
@@ -2182,6 +2242,7 @@ mod retry_name_tests {
                 blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
             ),
             raw: raw.clone(),
+            left_in_place: true,
         });
         let report = writer.finish(Outcome::Failed, None);
         assert!(report.complete, "{report:?}");
@@ -2227,6 +2288,7 @@ mod retry_name_tests {
             path: text.clone(),
             reason: "write failed".into(),
             raw: raw.clone(),
+            left_in_place: false,
         });
         writer.record(EventBody::LogIncomplete {
             reason: "disk full".into(),
@@ -2252,6 +2314,7 @@ mod retry_name_tests {
                 blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
             ),
             raw: raw.clone(),
+            left_in_place: true,
         });
         assert!(writer.finish(Outcome::Failed, None).complete);
         let writer = place
@@ -2265,6 +2328,7 @@ mod retry_name_tests {
             path: text.clone(),
             reason: "write failed".into(),
             raw: raw.clone(),
+            left_in_place: false,
         });
         assert!(writer.finish(Outcome::Failed, None).complete);
         record.run_id = two_roles.into();
@@ -2287,6 +2351,7 @@ mod retry_name_tests {
                 blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
             ),
             raw: raw.clone(),
+            left_in_place: true,
         });
         writer.record(EventBody::FileSent {
             path: text.clone(),
@@ -2318,6 +2383,7 @@ mod retry_name_tests {
                 path: mine.clone(),
                 reason: marker.clone(),
                 raw: mine_raw.clone(),
+                left_in_place: true,
             });
             writer.record(EventBody::FileCopied {
                 path: theirs.clone(),
@@ -2345,6 +2411,7 @@ mod retry_name_tests {
                     path: text.clone(),
                     reason: marker.clone(),
                     raw: raw.clone(),
+                    left_in_place: true,
                 },
             ),
             (
@@ -2361,6 +2428,7 @@ mod retry_name_tests {
                     path: text.clone(),
                     reason: "write failed".into(),
                     raw: raw.clone(),
+                    left_in_place: false,
                 },
             ),
         ] {
@@ -2386,6 +2454,7 @@ mod retry_name_tests {
             path: text.clone(),
             reason: marker.clone(),
             raw: raw.clone(),
+            left_in_place: true,
         });
         assert!(writer.finish(Outcome::Failed, None).complete);
         let elsewhere = LogPlace {

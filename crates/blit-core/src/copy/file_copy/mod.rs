@@ -334,11 +334,13 @@ pub fn create_regular(dst: &Path) -> std::io::Result<File> {
         if made {
             drop(file);
             if let Err(unremoved) = std::fs::remove_file(dst) {
-                return Err(std::io::Error::other(format!(
-                    "{}: {error}; the empty file made at {} could not be removed: {unremoved}",
-                    crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE,
-                    dst.display()
-                )));
+                return Err(std::io::Error::other(
+                    crate::remote::transfer::sink::LeftInPlace(format!(
+                        "{}: {error}; the empty file made at {} could not be removed: {unremoved}",
+                        crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE,
+                        dst.display()
+                    )),
+                ));
             }
         }
         return Err(error);

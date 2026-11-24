@@ -270,6 +270,7 @@ impl PassFailures {
                     self.unretried
                 ),
                 raw_relative_path: None,
+                left_in_place: false,
             });
         }
     }
@@ -726,6 +727,7 @@ mod tests {
             relative_path: path.to_string(),
             reason: "source: cannot open: boom".to_string(),
             raw_relative_path: None,
+            left_in_place: false,
         }
     }
 
@@ -1438,6 +1440,7 @@ mod cr_fix2_2_tests {
                 relative_path: "a".to_string(),
                 reason: "source: missing at retry".to_string(),
                 raw_relative_path: None,
+                left_in_place: false,
             }],
             failed_paths: vec!["a".to_string()],
             failed_paths_truncated: false,

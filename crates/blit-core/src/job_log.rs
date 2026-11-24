@@ -274,6 +274,11 @@ pub enum EventBody {
         reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         raw: Option<String>,
+        /// D-2026-11-24-1: its failure left this run's own incomplete copy
+        /// at the destination — never read from `reason`. A log written
+        /// before the field was has none, and is read as nothing left.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        left_in_place: bool,
     },
     /// Work outstanding but nothing moving for `idle_ms`.
     Stall { idle_ms: u64, detail: String },
@@ -1510,7 +1515,9 @@ fn describe(body: &EventBody) -> String {
         }
         EventBody::FileSent { path, raw } => format!("sent     {}", shown(path, raw)),
         EventBody::FileDeleted { path, raw } => format!("deleted  {}", shown(path, raw)),
-        EventBody::FileFailed { path, reason, raw } => {
+        EventBody::FileFailed {
+            path, reason, raw, ..
+        } => {
             format!("FAILED   {}: {reason}", shown(path, raw))
         }
         EventBody::Stall { idle_ms, detail } => {
@@ -2031,6 +2038,7 @@ mod tests {
                 path: "b".into(),
                 reason: "denied".into(),
                 raw: None,
+                left_in_place: false,
             },
             EventBody::FileDeleted {
                 path: "c".into(),
@@ -2120,6 +2128,7 @@ mod tests {
                 path: "a".into(),
                 reason: "r".into(),
                 raw: None,
+                left_in_place: false,
             },
         ))
         .unwrap();
@@ -2892,6 +2901,7 @@ mod tests {
                 path: "caf\u{fffd}".into(),
                 reason: "denied".into(),
                 raw: Some("caf\\xe9".into()),
+                left_in_place: false,
             }),
             "FAILED   raw:caf\\xe9: denied"
         );
@@ -2900,6 +2910,7 @@ mod tests {
                 path: "c".into(),
                 reason: "denied".into(),
                 raw: None,
+                left_in_place: false,
             }),
             "FAILED   c: denied"
         );

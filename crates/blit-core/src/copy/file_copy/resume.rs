@@ -825,7 +825,7 @@ impl Resolved {
             Ok(found) => (found.dev(), found.ino()),
             Err(error) => {
                 let said = left(format!("looking at it failed: {error}"));
-                return Err(error).context(said);
+                return Err(error).context(crate::remote::transfer::sink::LeftInPlace(said));
             }
         };
         let unmade = || -> Option<String> {
@@ -858,7 +858,7 @@ impl Resolved {
                 ));
                 Err(match unmade() {
                     None => error,
-                    Some(left) => error.wrap_err(left),
+                    Some(left) => error.wrap_err(crate::remote::transfer::sink::LeftInPlace(left)),
                 })
             }
         }

@@ -187,6 +187,10 @@ pub struct FileFailure {
     /// set where the failure is made, so a name that collides with another
     /// in its lossy text still names its own file (review cr-jl3afix1-1).
     pub raw_relative_path: Option<Vec<u8>>,
+    /// D-2026-11-24-1: the failure left this run's own incomplete copy at
+    /// the destination — set where that is known, never read from
+    /// `reason`, which is for people.
+    pub left_in_place: bool,
 }
 
 impl FileFailure {
@@ -224,6 +228,7 @@ impl FileFailure {
             reason: wire.reason.clone(),
             raw_relative_path: (!wire.raw_relative_path.is_empty())
                 .then(|| wire.raw_relative_path.clone()),
+            left_in_place: false,
         }
     }
 }
@@ -272,10 +277,10 @@ pub struct SinkOutcome {
     /// here, answer conservatively".
     failed_paths: std::collections::HashSet<String>,
     /// cr-rework-1: the exact subset of `failed_paths` whose failure left
-    /// this run's own incomplete copy at the destination — recorded from
-    /// the reason [`settle_failed_target`] annotates, here at the one
-    /// point every failure passes through, so it never depends on the
-    /// capped report. Merged like `failed_paths`.
+    /// this run's own incomplete copy at the destination — recorded here,
+    /// at the one point every failure passes through, from the failure's
+    /// own flag (D-2026-11-24-1: never from its words), so it never
+    /// depends on the capped report. Merged like `failed_paths`.
     left_in_place: std::collections::HashSet<String>,
     /// JOB_LOGS review cr-jl4fix2-1: the same for entries whose names are
     /// not UTF-8, by their exact bytes — `left_in_place` then holds only
@@ -327,17 +332,34 @@ impl SinkOutcome {
         &self.removed_incomplete
     }
 
+    /// Whether `relative_path`'s failure left this run's incomplete copy in
+    /// place, by the exact set (D-2026-11-24-1).
+    pub fn left_in_place_holds(&self, relative_path: &str) -> bool {
+        self.left_in_place.contains(relative_path)
+    }
+
     /// One file that could not be written. Nothing is counted as landed
     /// for it — a failed file is never a written file, whatever partial
     /// bytes reached the destination.
     pub fn failed(relative_path: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::failed_leaving(relative_path, reason, false)
+    }
+
+    /// [`failed`](Self::failed), saying whether the failure left this run's
+    /// incomplete copy at the destination (D-2026-11-24-1).
+    pub fn failed_leaving(
+        relative_path: impl Into<String>,
+        reason: impl Into<String>,
+        left_in_place: bool,
+    ) -> Self {
         let mut outcome = Self::default();
-        outcome.record_failure(relative_path, reason);
+        outcome.record_failure_leaving(relative_path, None, reason, left_in_place);
         outcome
     }
 
-    /// Record one per-file failure. The reported list stops growing at
-    /// [`MAX_REPORTED_FILE_FAILURES`]; the total keeps counting.
+    /// Record one per-file failure that left nothing of this run's behind.
+    /// The reported list stops growing at [`MAX_REPORTED_FILE_FAILURES`];
+    /// the total keeps counting.
     pub fn record_failure(&mut self, relative_path: impl Into<String>, reason: impl Into<String>) {
         self.record_named_failure(relative_path, None, reason);
     }
@@ -349,6 +371,19 @@ impl SinkOutcome {
         relative_path: impl Into<String>,
         raw_relative_path: Option<Vec<u8>>,
         reason: impl Into<String>,
+    ) {
+        self.record_failure_leaving(relative_path, raw_relative_path, reason, false);
+    }
+
+    /// Record one per-file failure, saying whether it left this run's own
+    /// incomplete copy at the destination. D-2026-11-24-1: that is said
+    /// here, as a flag, by whoever knows it — never read from `reason`.
+    pub fn record_failure_leaving(
+        &mut self,
+        relative_path: impl Into<String>,
+        raw_relative_path: Option<Vec<u8>>,
+        reason: impl Into<String>,
+        left_in_place: bool,
     ) {
         let relative_path = relative_path.into();
         let reason = reason.into();
@@ -369,7 +404,7 @@ impl SinkOutcome {
         if let Some(raw) = &raw_relative_path {
             self.failed_raw.insert(relative_path.clone(), raw.clone());
         }
-        if reason.contains(INCOMPLETE_LEFT_IN_PLACE) {
+        if left_in_place {
             match &raw_relative_path {
                 Some(raw) => {
                     self.left_in_place_raw.insert(raw.clone());
@@ -384,6 +419,7 @@ impl SinkOutcome {
                 relative_path,
                 reason,
                 raw_relative_path,
+                left_in_place,
             });
         }
     }
@@ -757,7 +793,11 @@ fn per_file_failure(
     error: eyre::Report,
 ) -> Result<SinkOutcome> {
     if failure_is_containable(dst_root, relative_path, &error) {
-        Ok(SinkOutcome::failed(relative_path, format!("{error:#}")))
+        Ok(SinkOutcome::failed_leaving(
+            relative_path,
+            format!("{error:#}"),
+            leaves_in_place(&error),
+        ))
     } else {
         Err(error)
     }
@@ -1083,7 +1123,7 @@ pub struct FsTransferSink {
     /// serves every socket of a session's receive plane, so this holds
     /// for a file whose blocks and completion arrive on different
     /// sockets.
-    failed_resume_reasons: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    failed_resume_reasons: std::sync::Mutex<std::collections::HashMap<String, (String, bool)>>,
     /// Resume partials already held unfinished this session
     /// ([`TransferSink::hold_resume_partial`] runs before every block).
     resume_held: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -1274,11 +1314,12 @@ impl FsTransferSink {
             .lock()
             .expect("failed-resume-reasons lock poisoned")
             .entry(relative_path.to_string())
-            .or_insert_with(|| format!("{error:#}"));
+            .or_insert_with(|| (format!("{error:#}"), leaves_in_place(error)));
     }
 
-    /// Take the held resume-block failure for `relative_path`, if any.
-    fn take_resume_block_failure(&self, relative_path: &str) -> Option<String> {
+    /// Take the held resume-block failure for `relative_path`, if any: its
+    /// reason, and whether it left this run's copy in place.
+    fn take_resume_block_failure(&self, relative_path: &str) -> Option<(String, bool)> {
         self.failed_resume_reasons
             .lock()
             .expect("failed-resume-reasons lock poisoned")
@@ -1478,16 +1519,13 @@ impl FsTransferSink {
         // run to resume — never at the source's size, which the truncation
         // above just gave it and every compare would take for finished.
         let windows_bytes = stamped.map_err(|error| {
-            with_settle_note(
-                error,
-                settle_failed_target(
-                    dst,
-                    Some(std_file),
-                    total_size,
-                    OnFailure::KeepUnfinished { created: false },
-                )
-                .note,
-            )
+            let settled = settle_failed_target(
+                dst,
+                Some(std_file),
+                total_size,
+                OnFailure::KeepUnfinished { created: false },
+            );
+            with_settle_note(error, settled.note, settled.left)
         })?;
         Ok(SinkOutcome::written(1, windows_bytes))
     }
@@ -1757,7 +1795,8 @@ impl TransferSink for FsTransferSink {
                             }
                         }
                     }
-                    SinkOutcome::failed(&relative_path, reason)
+                    let (reason, left) = reason;
+                    SinkOutcome::failed_leaving(&relative_path, reason, left)
                 } else {
                     match self
                         .finalize_resumed_file(
@@ -2259,8 +2298,10 @@ impl RecordWriter for FsRecordWriter<'_> {
         // file did not land, and the source is the end that said why
         // first; what stayed behind is added to it (cr-win-1).
         let mut outcome = match settled.note {
-            Some(note) => SinkOutcome::failed(&path, format!("{reason}; {note}")),
-            None => SinkOutcome::failed(&path, reason),
+            Some(note) => {
+                SinkOutcome::failed_leaving(&path, format!("{reason}; {note}"), settled.left)
+            }
+            None => SinkOutcome::failed_leaving(&path, reason, settled.left),
         };
         if settled.removed {
             outcome.mark_removed_incomplete(&path);
@@ -2431,6 +2472,34 @@ fn run_after_copy_fault_hook(_dst: &Path) -> std::io::Result<()> {
 /// paths regardless — the copy there is this run's own, not one the user
 /// asked to keep.
 pub const INCOMPLETE_LEFT_IN_PLACE: &str = "an incomplete copy was left at the destination";
+
+/// D-2026-11-24-1: the fact that a failure left this run's own incomplete
+/// copy at the destination, carried on the failure's error as a typed
+/// context — read by its type ([`leaves_in_place`]), never by its words.
+/// Its text is what a person reads, and says so in
+/// [`INCOMPLETE_LEFT_IN_PLACE`]'s words.
+#[derive(Debug)]
+pub struct LeftInPlace(pub String);
+
+impl std::fmt::Display for LeftInPlace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for LeftInPlace {}
+
+/// Whether `error` carries [`LeftInPlace`] — as a context anywhere in its
+/// chain, or inside an I/O error it was made from.
+pub fn leaves_in_place(error: &eyre::Report) -> bool {
+    error.downcast_ref::<LeftInPlace>().is_some()
+        || error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::get_ref)
+                .is_some_and(|inner| inner.is::<LeftInPlace>())
+        })
+}
 
 /// cr-ecm13-1: what a retry under `--ignore-existing` says of a path at
 /// which the run had left its own incomplete copy, when a file stands
@@ -3199,11 +3268,15 @@ fn hold_partial_unfinished(
 struct Settled {
     note: Option<String>,
     removed: bool,
+    /// D-2026-11-24-1: this write's incomplete copy stayed at the
+    /// destination. `note` says so to people; this says so to the code.
+    left: bool,
 }
 
 const REMOVED: Settled = Settled {
     note: None,
     removed: true,
+    left: false,
 };
 
 fn settle_failed_target(
@@ -3277,6 +3350,7 @@ fn settle_failed_target_known(
                 Settled {
                     note: Some(note),
                     removed: false,
+                    left: true,
                 }
             };
             if not_its_own() {
@@ -3317,6 +3391,7 @@ fn settle_failed_target_known(
             Settled {
                 note,
                 removed: false,
+                left: true,
             }
         }
         OnFailure::KeepUnfinished { created } => {
@@ -3336,25 +3411,28 @@ fn settle_failed_target_known(
                     );
                 }
             }
-            let note = match marked {
-                Ok(()) => created.then(|| {
-                    format!(
-                        "{INCOMPLETE_LEFT_IN_PLACE}, one byte longer than the source, for the \
-                         next run to resume"
-                    )
-                }),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => {
+            if let Err(error) = &marked {
+                if error.kind() != std::io::ErrorKind::NotFound {
                     log::warn!(
                         "could not mark the resume partial {} unfinished: {error}",
                         dst.display()
                     );
-                    created.then(|| format!("{INCOMPLETE_LEFT_IN_PLACE}: {error}"))
                 }
-            };
+            }
+            // A partial this run made stays, unless it is gone.
+            let left = created
+                && !matches!(&marked, Err(error) if error.kind() == std::io::ErrorKind::NotFound);
+            let note = left.then(|| match &marked {
+                Ok(()) => format!(
+                    "{INCOMPLETE_LEFT_IN_PLACE}, one byte longer than the source, for the \
+                     next run to resume"
+                ),
+                Err(error) => format!("{INCOMPLETE_LEFT_IN_PLACE}: {error}"),
+            });
             Settled {
                 note,
                 removed: false,
+                left,
             }
         }
     }
@@ -3380,7 +3458,7 @@ impl From<eyre::Report> for FailedWrite {
 impl FailedWrite {
     fn settled(error: eyre::Report, settled: Settled) -> Self {
         Self {
-            error: with_settle_note(error, settled.note),
+            error: with_settle_note(error, settled.note, settled.left),
             removed: settled.removed,
         }
     }
@@ -3400,9 +3478,11 @@ fn failed_write_outcome(
     Ok(outcome)
 }
 
-/// Attach [`settle_failed_target`]'s note, if any, to a file's failure.
-fn with_settle_note(error: eyre::Report, note: Option<String>) -> eyre::Report {
+/// Attach [`settle_failed_target`]'s note, if any, to a file's failure —
+/// as [`LeftInPlace`] when the copy stayed (D-2026-11-24-1).
+fn with_settle_note(error: eyre::Report, note: Option<String>, left: bool) -> eyre::Report {
     match note {
+        Some(note) if left => error.wrap_err(LeftInPlace(note)),
         Some(note) => error.wrap_err(note),
         None => error,
     }
@@ -4285,7 +4365,8 @@ pub(super) fn fold_shard_member_results<S>(
                 if removed {
                     outcome.mark_removed_incomplete(relative_path.clone());
                 }
-                outcome.record_failure(relative_path, format!("{error:#}"))
+                let left = leaves_in_place(&error);
+                outcome.record_failure_leaving(relative_path, None, format!("{error:#}"), left)
             }
         }
     }
@@ -4869,6 +4950,41 @@ impl TransferSink for NullSink {
 mod tests {
     use super::*;
 
+    /// D-2026-11-24-1 (cr-ecm33-5): whether a failure left this run's copy
+    /// in place is said by the flag its maker sets, never read from words:
+    /// a failure whose path and reason both hold the very sentence is not
+    /// left in place; one made with [`LeftInPlace`] on its error — under
+    /// further context, or inside an I/O error — is. Read from the words,
+    /// an untouched destination was counted left in place.
+    #[test]
+    fn left_in_place_is_said_by_its_flag_never_by_its_words() {
+        let mut outcome = SinkOutcome::default();
+        outcome.record_failure(
+            format!("{INCOMPLETE_LEFT_IN_PLACE}.bin"),
+            format!("source: cannot open {INCOMPLETE_LEFT_IN_PLACE}.bin"),
+        );
+        assert!(
+            outcome.wire_left_in_place().0.is_empty(),
+            "words say nothing"
+        );
+        assert!(!outcome.failures[0].left_in_place);
+
+        let wrapped = eyre::eyre!("a write failed")
+            .wrap_err(LeftInPlace("left".into()))
+            .wrap_err("resume copy r.bin");
+        assert!(leaves_in_place(&wrapped), "under further context");
+        let inside = eyre::Report::new(std::io::Error::other(LeftInPlace("left".into())))
+            .wrap_err("making the file");
+        assert!(leaves_in_place(&inside), "inside an I/O error");
+        assert!(!leaves_in_place(&eyre::eyre!(
+            "{INCOMPLETE_LEFT_IN_PLACE}: words alone"
+        )));
+        let tmp = tempdir().unwrap();
+        let failed = per_file_failure(tmp.path(), "r.bin", wrapped).unwrap();
+        assert_eq!(failed.wire_left_in_place().0, ["r.bin"]);
+        assert!(failed.failures[0].left_in_place);
+    }
+
     /// JOB_LOGS review cr-jl4fix2-1: a left-in-place status belongs to the
     /// entry that failed, by its bytes when its name is not its text.
     #[test]
@@ -4876,11 +4992,16 @@ mod tests {
         let reason = format!("write failed: {INCOMPLETE_LEFT_IN_PLACE}");
         let mut outcome = SinkOutcome::default();
         // Recorded with its bytes: the raw set, not the text set.
-        outcome.record_named_failure("dup\u{FFFD}", Some(b"dup\xff".to_vec()), reason.clone());
+        outcome.record_failure_leaving(
+            "dup\u{FFFD}",
+            Some(b"dup\xff".to_vec()),
+            reason.clone(),
+            true,
+        );
         // Recorded by text alone, as a write site does: named at the end
         // from the manifest, which grants one entry per text.
-        outcome.record_failure("own\u{FFFD}", reason.clone());
-        outcome.record_failure("plain.txt", reason);
+        outcome.record_failure_leaving("own\u{FFFD}", None, reason.clone(), true);
+        outcome.record_failure_leaving("plain.txt", None, reason, true);
         let named = outcome.named_raw(|text| match text {
             "own\u{FFFD}" => Some(b"own\xfe".to_vec()),
             _ => None,
@@ -6935,6 +7056,7 @@ mod tests {
                 relative_path: format!("x{index}.bin"),
                 reason: "direct".into(),
                 raw_relative_path: None,
+                left_in_place: false,
             })
             .collect();
         unbounded.files_failed_total = unbounded.failures.len() as u64;
@@ -7186,6 +7308,7 @@ mod tests {
             relative_path: "dir/one.bin".into(),
             reason: "write dir/one.bin: Access is denied".into(),
             raw_relative_path: None,
+            left_in_place: false,
         };
         assert_eq!(FileFailure::from_wire(&failure.to_wire()), failure);
     }
@@ -8979,6 +9102,8 @@ mod cr_win_1_tests {
             "{}",
             outcome.failures[0].reason
         );
+        assert!(outcome.failures[0].left_in_place, "said by its flag");
+        assert!(outcome.left_in_place_holds("r.bin"));
         assert_eq!(
             std::fs::metadata(&at).unwrap().len(),
             9,
@@ -9076,6 +9201,7 @@ mod cr_win_1_tests {
             "{}",
             outcome.failures[0].reason
         );
+        assert!(outcome.failures[0].left_in_place, "said by its flag");
         assert_eq!(
             std::fs::metadata(dst.join("ro.bin")).unwrap().len(),
             9,
@@ -10284,6 +10410,7 @@ mod cr_win_1_tests {
             "{:?}",
             made.failures
         );
+        assert!(!made.failures[0].left_in_place, "{:?}", made.failures);
         let there = sink
             .write_payload(PreparedPayload::File(make_file_header("old.bin", 10)))
             .await
@@ -10739,6 +10866,7 @@ mod cr_win_1_tests {
             let settled = settle_failed_target(&dest, Some(held), 10, OnFailure::Remove);
             if link_to_it {
                 assert!(!settled.removed, "the partial is reachable at the name");
+                assert!(settled.left, "{settled:?}");
                 assert!(
                     settled
                         .note
@@ -11208,11 +11336,12 @@ mod cr_win_1_tests {
     fn a_file_kept_where_a_copy_was_left_is_recorded_as_such() {
         assert!(A_FILE_WHERE_A_COPY_WAS_LEFT.contains(INCOMPLETE_LEFT_IN_PLACE));
         let mut outcome = SinkOutcome::default();
-        outcome.record_named_failure("kept.bin", None, A_FILE_WHERE_A_COPY_WAS_LEFT);
-        outcome.record_named_failure(
+        outcome.record_failure_leaving("kept.bin", None, A_FILE_WHERE_A_COPY_WAS_LEFT, true);
+        outcome.record_failure_leaving(
             "raw\u{fffd}.bin",
             Some(b"raw\xff.bin".to_vec()),
             A_FILE_WHERE_A_COPY_WAS_LEFT,
+            true,
         );
         outcome.record_failure("other.bin", "source: cannot open");
         assert_eq!(outcome.wire_left_in_place().0, ["kept.bin"]);
@@ -11312,6 +11441,7 @@ mod cr_win_1_tests {
             return;
         };
         assert!(!note.removed, "the target stayed");
+        assert!(note.left, "the target stayed, and its flag says so");
         let note = note.note.expect("the target stayed, so the reason says so");
         assert!(note.contains(INCOMPLETE_LEFT_IN_PLACE), "{note}");
         assert_eq!(std::fs::metadata(&dst).unwrap().len(), 6);

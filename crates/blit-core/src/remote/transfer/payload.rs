@@ -102,6 +102,7 @@ pub async fn prepare_payload_with(
                         relative_path: header.relative_path,
                         reason: hydration_failure_reason(&err),
                         raw_relative_path: header.raw_relative_path,
+                        left_in_place: false,
                     }),
                 }
             };
@@ -125,6 +126,7 @@ pub async fn prepare_payload_with(
                         relative_path: header.relative_path,
                         reason: hydration_failure_reason(&err),
                         raw_relative_path: header.raw_relative_path,
+                        left_in_place: false,
                     }),
                 }
             }
@@ -168,6 +170,7 @@ pub async fn prepare_payload_with(
                         relative_path: header.relative_path,
                         reason: hydration_failure_reason(&err),
                         raw_relative_path: header.raw_relative_path,
+                        left_in_place: false,
                     }),
                 }
             };
@@ -505,6 +508,7 @@ pub fn build_tar_shard_with(
                 relative_path: header.relative_path.clone(),
                 reason,
                 raw_relative_path: header.raw_relative_path.clone(),
+                left_in_place: false,
             });
         };
 

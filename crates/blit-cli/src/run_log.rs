@@ -1012,11 +1012,13 @@ mod tests {
                     relative_path: shown.clone(),
                     reason: "denied".into(),
                     raw_relative_path: None,
+                    left_in_place: false,
                 },
                 blit_core::remote::transfer::sink::FileFailure {
                     relative_path: shown.clone(),
                     reason: "duplicate".into(),
                     raw_relative_path: Some(b"bad\xfe.txt".to_vec()),
+                    left_in_place: false,
                 },
             ],
             // Review cr-jl4-1: which failures left their own copy is kept.

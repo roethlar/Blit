@@ -77,7 +77,13 @@ pub enum ProgressEvent {
     /// wire `path` did not land, and `reason` says why — so a job log can
     /// name every failed file as it fails. Moves no count: the
     /// destination's summary `files_failed` is authoritative.
-    FileFailed { path: String, reason: String },
+    FileFailed {
+        path: String,
+        reason: String,
+        /// D-2026-11-24-1: the failure left this run's incomplete copy in
+        /// place — never read from `reason`.
+        left_in_place: bool,
+    },
     /// DESTINATION side (JOB_LOGS jl-1b): the mirror-delete pass removed
     /// the entry at the wire `path`; a directory's path ends in `/`. `raw`
     /// is the entry's exact name bytes when they are not valid UTF-8
@@ -630,7 +636,7 @@ mod progress_totals_tests {
                 r#"FileComplete { path: "f0" }"#,
                 r#"FileComplete { path: "f1" }"#,
                 r#"FileComplete { path: "f2" }"#,
-                r#"FileFailed { path: "g", reason: "denied" }"#,
+                r#"FileFailed { path: "g", reason: "denied", left_in_place: false }"#,
                 r#"Deleted { path: "old", raw: None }"#,
             ]
         );
@@ -1174,12 +1180,14 @@ impl RemoteTransferProgress {
     /// that is reported failed with [`REASON_NOT_KEPT`].
     pub async fn report_file_outcome(&self, path: &str, outcome: &super::sink::SinkOutcome) {
         if outcome.file_failed(path) {
-            let reason = outcome
+            let kept = outcome
                 .failures
                 .iter()
-                .find(|failure| failure.relative_path == path)
-                .map_or(REASON_NOT_KEPT, |failure| failure.reason.as_str());
-            self.report_file_failed(path.to_string(), reason.to_string())
+                .find(|failure| failure.relative_path == path);
+            let reason = kept.map_or(REASON_NOT_KEPT, |failure| failure.reason.as_str());
+            let left = kept.is_some_and(|failure| failure.left_in_place)
+                || outcome.left_in_place_holds(path);
+            self.report_file_failed_leaving(path.to_string(), reason.to_string(), left)
                 .await;
         } else {
             self.report_file_complete(path.to_string()).await;
@@ -1189,14 +1197,30 @@ impl RemoteTransferProgress {
     /// Report a file that did not land on the DESTINATION — see
     /// [`ProgressEvent::FileFailed`].
     pub async fn report_file_failed(&self, path: String, reason: String) {
+        self.report_file_failed_leaving(path, reason, false).await;
+    }
+
+    /// [`report_file_failed`](Self::report_file_failed), saying whether the
+    /// failure left this run's incomplete copy in place (D-2026-11-24-1).
+    pub async fn report_file_failed_leaving(
+        &self,
+        path: String,
+        reason: String,
+        left_in_place: bool,
+    ) {
         if self.audit.is_some() {
             self.audit(ProgressEvent::FileFailed {
                 path: path.clone(),
                 reason: reason.clone(),
+                left_in_place,
             })
             .await;
         }
-        let _ = self.sender.send(ProgressEvent::FileFailed { path, reason });
+        let _ = self.sender.send(ProgressEvent::FileFailed {
+            path,
+            reason,
+            left_in_place,
+        });
     }
 
     /// Report an entry the mirror-delete pass removed — see

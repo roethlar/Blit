@@ -5712,10 +5712,11 @@ async fn destination_session_inner(
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner),
                 ) {
-                    contained_failures.record_named_failure(
+                    contained_failures.record_failure_leaving(
                         path,
                         raw,
                         crate::remote::transfer::sink::A_FILE_WHERE_A_COPY_WAS_LEFT,
+                        true,
                     );
                 }
                 // Review cr-jl4fix2-1: each failure, and its left-in-place

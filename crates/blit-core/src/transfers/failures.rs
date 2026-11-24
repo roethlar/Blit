@@ -85,6 +85,7 @@ mod tests {
             relative_path: relative_path.to_string(),
             reason: reason.to_string(),
             raw_relative_path: None,
+            left_in_place: false,
         }
     }
 
