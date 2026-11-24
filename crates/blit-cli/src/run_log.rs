@@ -677,32 +677,22 @@ fn finish_record(
         record.files_deleted = totals.files_deleted;
         record.files_failed = totals.files_failed;
         record.bytes_copied = totals.bytes_copied;
-        // Each named failure as its report made it — review cr-jl3afix1-1:
-        // by its own bytes when it has them, else the bytes the log knows
-        // for its text — then each failed path no failure names.
-        let mut failures: Vec<Failure> = totals
-            .failures
-            .iter()
-            .map(|failure| Failure {
-                path: failure.relative_path.clone(),
-                reason: failure.reason.clone(),
-                raw: failure
-                    .raw_relative_path
+        // Each failed file once, by its identity — review cr-jl3afix1-1: by
+        // its own bytes when it has them, else the bytes the log knows for its
+        // text — from the one join the log uses too (cr-ecm35-3).
+        record.failures = totals
+            .failed_files()
+            .into_iter()
+            .map(|file| Failure {
+                raw: file
+                    .raw
                     .as_deref()
                     .map(blit_core::raw_name::escape_raw)
-                    .or_else(|| raws.get(&failure.relative_path).cloned()),
+                    .or_else(|| raws.get(&file.path).cloned()),
+                path: file.path,
+                reason: file.reason.unwrap_or_default(),
             })
             .collect();
-        for path in &totals.failed_paths {
-            if !failures.iter().any(|failure| &failure.path == path) {
-                failures.push(Failure {
-                    path: path.clone(),
-                    reason: String::new(),
-                    raw: raws.get(path).cloned(),
-                });
-            }
-        }
-        record.failures = failures;
         record.failures_truncated =
             totals.failed_paths_truncated || (record.failures.len() as u64) < totals.files_failed;
         record.left_in_place = totals.left_in_place;
@@ -985,6 +975,63 @@ mod tests {
 
     /// Review cr-jl3a-3: a run's record names a failed non-UTF-8 file by
     /// its exact bytes as well as its text.
+    /// cr-ecm35-3: the saved record names a failure past the reason cap by
+    /// the bytes the summary carries for its path — the log heard no name
+    /// live — so a retry asks for that file. Named by the text alone, its
+    /// bytes were lost while the list was taken for whole.
+    #[test]
+    fn a_failure_past_the_cap_is_saved_by_its_own_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunStore::new(dir.path());
+        let run_id = job_log::new_run_id().unwrap();
+        let spec = JobSpec::new(
+            "m1",
+            "copy",
+            "/".into(),
+            SpecEndpoint::Local { path: "/a/".into() },
+            SpecEndpoint::Local { path: "/b/".into() },
+            SpecOptions::default(),
+            None,
+        );
+        let record = RunRecord::starting(&run_id, &spec);
+        let live = store.begin(&spec, &record).unwrap();
+        let recorded = Recorded {
+            store: store.clone(),
+            spec,
+            record,
+            keep: 50,
+            _live: live,
+        };
+        let totals = RunTotals {
+            files_failed: 2,
+            failed_paths: vec!["a.txt".into(), "b\u{FFFD}.txt".into()],
+            failed_paths_raw: vec![Vec::new(), b"b\xfe.txt".to_vec()],
+            failures: vec![blit_core::remote::transfer::sink::FileFailure {
+                relative_path: "a.txt".into(),
+                reason: "denied".into(),
+                raw_relative_path: None,
+                left_in_place: false,
+            }],
+            ..RunTotals::default()
+        };
+        finish_record(
+            recorded,
+            None,
+            Outcome::Failed,
+            None,
+            Some(totals),
+            &std::collections::HashMap::new(),
+            false,
+            None,
+        );
+        let record = store.load(&run_id).unwrap().1;
+        assert!(!record.failures_truncated);
+        assert_eq!(
+            record.failures[1].raw,
+            Some(blit_core::raw_name::escape_raw(b"b\xfe.txt"))
+        );
+    }
+
     #[test]
     fn a_record_keeps_a_failed_names_exact_bytes() {
         let dir = tempfile::tempdir().unwrap();

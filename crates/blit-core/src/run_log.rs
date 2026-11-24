@@ -123,6 +123,72 @@ impl RunTotals {
     }
 }
 
+/// One failed file of a run's account, by its identity — its text, and its
+/// bytes when its name is not text — with the reason the report kept for it,
+/// when it kept one, and whether its failure left this run's copy
+/// (cr-ecm35-3). One list, from [`RunTotals::failed_files`], for the log and
+/// the saved record alike: each joined its failures to its paths by the
+/// text alone, and two files of one text, the reason cap falling between
+/// them, were named once — or the second without its bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailedFile {
+    pub path: String,
+    pub raw: Option<Vec<u8>>,
+    pub reason: Option<String>,
+    pub left_in_place: bool,
+}
+
+impl RunTotals {
+    /// Every failed file the account names, each once: the failures the
+    /// report kept, then each failed path none of them is. A path is one of
+    /// them by its identity when the account carries the paths' bytes, and
+    /// by its text when it carries none (a peer that sent none).
+    pub fn failed_files(&self) -> Vec<FailedFile> {
+        let carried = self.failed_paths_raw.iter().any(|bytes| !bytes.is_empty());
+        let left = |path: &str, raw: Option<&[u8]>| match raw {
+            Some(bytes) => self.left_in_place_raw.iter().any(|left| left == bytes),
+            None => self.left_in_place.iter().any(|left| left == path),
+        };
+        let mut files: Vec<FailedFile> = Vec::new();
+        for failure in &self.failures {
+            let raw = failure.raw_relative_path.clone();
+            if files
+                .iter()
+                .any(|file| file.path == failure.relative_path && file.raw == raw)
+            {
+                continue;
+            }
+            files.push(FailedFile {
+                left_in_place: failure.left_in_place
+                    || left(&failure.relative_path, raw.as_deref()),
+                path: failure.relative_path.clone(),
+                raw,
+                reason: Some(failure.reason.clone()),
+            });
+        }
+        for (index, path) in self.failed_paths.iter().enumerate() {
+            let raw = self
+                .failed_paths_raw
+                .get(index)
+                .filter(|bytes| !bytes.is_empty())
+                .cloned();
+            let named = files
+                .iter()
+                .any(|file| &file.path == path && (!carried || file.raw == raw));
+            if named {
+                continue;
+            }
+            files.push(FailedFile {
+                left_in_place: left(path, raw.as_deref()),
+                path: path.clone(),
+                raw,
+                reason: None,
+            });
+        }
+        files
+    }
+}
+
 /// A summary's `failed_paths_raw` at their places: one entry for every
 /// path (the wire sends either that, or none when no name needs bytes).
 pub fn raw_at_their_places(paths: &[String], raw: &[Vec<u8>]) -> Vec<Vec<u8>> {
@@ -625,57 +691,33 @@ impl RunLog {
             // names collapse to one text are two files — and each named
             // once: one already named live, with those bytes, is not again.
             let mut failed = std::mem::take(&mut active.failed);
-            for (index, path) in totals.failed_paths.iter().enumerate() {
-                let named: Vec<&FileFailure> = totals
-                    .failures
-                    .iter()
-                    .filter(|failure| &failure.relative_path == path)
-                    .collect();
-                if named.is_empty() {
-                    // cr-ecm34-5: by the bytes the summary carries for this
-                    // path when it has them — a run whose log heard no
-                    // name live, past the reason cap, names it exactly.
-                    let raw = totals
-                        .failed_paths_raw
-                        .get(index)
-                        .filter(|bytes| !bytes.is_empty())
-                        .map(|bytes| crate::raw_name::escape_raw(bytes))
-                        .or_else(|| active.raw_names.get(path).cloned());
-                    if failed.insert((path.clone(), raw.clone())) {
-                        // By the entry's own bytes when it has them, as
-                        // below (cr-jl4fix2-1).
-                        let left_in_place =
-                            match raw.as_deref().and_then(crate::raw_name::unescape_raw) {
-                                Some(bytes) => totals.left_in_place_raw.contains(&bytes),
-                                None => totals.left_in_place.contains(path),
-                            };
-                        bodies.push(EventBody::FileFailed {
-                            path: path.clone(),
-                            reason: NO_REASON_REPORTED.to_string(),
-                            raw,
-                            left_in_place: Some(left_in_place),
-                        });
-                    }
-                }
-                for failure in named {
-                    let raw = failure
-                        .raw_relative_path
-                        .as_deref()
-                        .map(crate::raw_name::escape_raw)
-                        .or_else(|| active.raw_names.get(path).cloned());
-                    if failed.insert((path.clone(), raw.clone())) {
-                        let left_in_place = failure.left_in_place
-                            || match &failure.raw_relative_path {
-                                Some(bytes) => totals.left_in_place_raw.contains(bytes),
-                                None => totals.left_in_place.contains(path),
-                            };
-                        bodies.push(EventBody::FileFailed {
-                            path: path.clone(),
-                            reason: failure.reason.clone(),
-                            raw,
-                            left_in_place: Some(left_in_place),
-                        });
-                    }
+            // cr-ecm35-3: each failed file once, by its identity, from the
+            // one join the saved record uses too; one named without its bytes
+            // by the bytes heard live for its text, as before.
+            for file in totals.failed_files() {
+                let raw = file
+                    .raw
+                    .as_deref()
+                    .map(crate::raw_name::escape_raw)
+                    .or_else(|| active.raw_names.get(&file.path).cloned());
+                if failed.insert((file.path.clone(), raw.clone())) {
+                    let heard = file
+                        .raw
+                        .is_none()
+                        .then(|| raw.as_deref().and_then(crate::raw_name::unescape_raw))
+                        .flatten();
+                    let left_in_place = match heard {
+                        Some(bytes) => totals.left_in_place_raw.contains(&bytes),
+                        None => file.left_in_place,
+                    };
+                    bodies.push(EventBody::FileFailed {
+                        reason: file
+                            .reason
+                            .unwrap_or_else(|| NO_REASON_REPORTED.to_string()),
+                        path: file.path,
+                        raw,
+                        left_in_place: Some(left_in_place),
+                    });
                 }
             }
             if totals.failed_paths_truncated {
@@ -1027,6 +1069,67 @@ mod tests {
         merged.merge(RunTotals::from(&summary));
         assert_eq!(merged.failed_paths_raw.len(), merged.failed_paths.len());
         assert_eq!(merged.failed_paths_raw[2], b"dup\xfe.bin".to_vec());
+    }
+
+    /// cr-ecm35-3: two failed files of one text, the reason cap falling
+    /// between them, are two files — each logged by its own bytes, the one
+    /// past the cap with no reason. Joined by the text, the second was not
+    /// logged at all.
+    #[tokio::test]
+    async fn two_failures_of_one_text_past_the_cap_are_two_files() {
+        use crate::job_log::{open_log, LogLine};
+        let dir = tempfile::tempdir().unwrap();
+        let log = RunLog::new(
+            Some(LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: DEFAULT_KEEP,
+                finished: None,
+            }),
+            "0123456789abcdef0123456789abcdef",
+        );
+        log.start(Role::Initiator, RunInfo::default(), None);
+        let text = "dup\u{FFFD}".to_string();
+        let totals = RunTotals {
+            files_failed: 2,
+            failed_paths: vec![text.clone(), text.clone()],
+            failed_paths_raw: vec![b"dup\xff".to_vec(), b"dup\xfe".to_vec()],
+            failures: vec![FileFailure {
+                relative_path: text.clone(),
+                reason: "denied".into(),
+                raw_relative_path: Some(b"dup\xff".to_vec()),
+                left_in_place: false,
+            }],
+            ..RunTotals::default()
+        };
+        assert_eq!(totals.failed_files().len(), 2);
+        let report = log
+            .close(Outcome::Failed, None, Some(totals))
+            .await
+            .expect("a report");
+        let failed: Vec<(String, Option<String>)> = open_log(&report.path.expect("a log"))
+            .unwrap()
+            .filter_map(|line| match line.unwrap() {
+                LogLine::Event(event) => match event.body {
+                    EventBody::FileFailed { reason, raw, .. } => Some((reason, raw)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            failed,
+            [
+                (
+                    "denied".to_string(),
+                    Some(crate::raw_name::escape_raw(b"dup\xff"))
+                ),
+                (
+                    NO_REASON_REPORTED.to_string(),
+                    Some(crate::raw_name::escape_raw(b"dup\xfe"))
+                ),
+            ]
+        );
     }
 
     /// D-2026-11-24-1 (cr-ecm33-5): a failure the summary names without a
