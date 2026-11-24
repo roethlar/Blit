@@ -689,9 +689,13 @@ impl SinkOutcome {
     ) -> (Vec<String>, Vec<Vec<u8>>, bool) {
         let (text, text_truncated) = self.wire_left_in_place();
         let (raw, raw_truncated) = self.wire_left_in_place_raw();
+        // cr-ecm38-5: an entry linked to its exact name says it, shortened
+        // or not (cr-ecm37-5).
         let said = reported
             .iter()
-            .filter(|failure| failure.left_unknown && !failure.path_shortened)
+            .filter(|failure| {
+                failure.left_unknown && (!failure.path_shortened || failure.failed_path_at > 0)
+            })
             .count() as u64;
         let unsaid = self.left_unknown_total > said;
         (text, raw, text_truncated || raw_truncated || unsaid)
@@ -10354,6 +10358,22 @@ mod cr_win_1_tests {
         assert!(outcome.failures[0]
             .reason
             .starts_with("source: read error; "));
+    }
+
+    /// cr-ecm38-5: a "not known" failure whose shortened entry is linked to
+    /// its exact name is said by the report: the leftover account stays
+    /// exact. Counted unsaid, it withheld an eligible retry under
+    /// --ignore-existing.
+    #[test]
+    fn a_linked_unknown_is_said() {
+        let long = format!("{}/name.bin", "d".repeat(MAX_FAILURE_PATH_BYTES + 500));
+        let mut outcome = SinkOutcome::default();
+        outcome.merge_failures(&SinkOutcome::failed_unknown(long, "unseen"));
+        let (paths, raw, _) = outcome.wire_failed_identities();
+        let wired = outcome.wire_failures_linked(&paths, &raw);
+        assert!(wired[0].path_shortened && wired[0].left_unknown);
+        assert_eq!(wired[0].failed_path_at, 1);
+        assert!(!outcome.wire_left_account(&wired).2, "the account is exact");
     }
 
     /// cr-ecm38-6: a rendering — a path already shortened — takes no link,

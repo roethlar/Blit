@@ -127,6 +127,15 @@ pub(crate) struct PassFailures {
     /// survived a retry — said here, never read back from their reasons,
     /// whose words may be anything, a file's name among them.
     pub retried: bool,
+    /// cr-ecm38-5: the named failures no pass was given — withheld, such as
+    /// a leftover not known under --ignore-existing — kept by name with
+    /// their reasons (`withheld`) and identities (`withheld_paths`, text and
+    /// bytes, empty for a text name), outside what the next pass is given.
+    /// Counted in `unretried` with the anonymous remainder; the summary names
+    /// them beside the pass's own failures. Counted alone, they lost their
+    /// names and reasons.
+    pub withheld: Vec<FileFailure>,
+    pub withheld_paths: Vec<(String, Vec<u8>)>,
 }
 
 impl PassFailures {
@@ -144,6 +153,8 @@ impl PassFailures {
             removed_incomplete_truncated: summary.removed_incomplete_truncated,
             unretried: 0,
             retried: false,
+            withheld: Vec::new(),
+            withheld_paths: Vec::new(),
         }
     }
 
@@ -161,6 +172,8 @@ impl PassFailures {
             removed_incomplete_truncated: summary.removed_incomplete_truncated,
             unretried: 0,
             retried: false,
+            withheld: Vec::new(),
+            withheld_paths: Vec::new(),
         }
     }
 
@@ -181,6 +194,8 @@ impl PassFailures {
             removed_incomplete_truncated: removed_truncated,
             unretried: 0,
             retried: false,
+            withheld: Vec::new(),
+            withheld_paths: Vec::new(),
         }
     }
 
@@ -302,6 +317,21 @@ impl PassFailures {
         }
     }
 
+    /// cr-ecm38-5: the report as a summary carries it — the pass's own
+    /// failures and the withheld ones, each with its identity in the list:
+    /// `(failures, paths, raw at their places)`.
+    fn reported(&self) -> (Vec<FileFailure>, Vec<String>, Vec<Vec<u8>>) {
+        let mut failures = self.failures.clone();
+        failures.extend(self.withheld.iter().cloned());
+        let mut paths = self.failed_paths.clone();
+        let mut raw = at_their_places(&self.failed_paths, &self.failed_paths_raw);
+        for (path, bytes) in &self.withheld_paths {
+            paths.push(path.clone());
+            raw.push(bytes.clone());
+        }
+        (failures, paths, raw)
+    }
+
     /// Fold a second session of the same pass into this report.
     fn merge(&mut self, other: PassFailures) {
         self.files_failed = self.files_failed.saturating_add(other.files_failed);
@@ -315,6 +345,8 @@ impl PassFailures {
         self.removed_incomplete.extend(other.removed_incomplete);
         self.removed_incomplete_truncated |= other.removed_incomplete_truncated;
         self.unretried = self.unretried.saturating_add(other.unretried);
+        self.withheld.extend(other.withheld);
+        self.withheld_paths.extend(other.withheld_paths);
     }
 
     /// Mark every remaining failure as one that survived a retry — once:
@@ -338,7 +370,13 @@ impl PassFailures {
     /// report the rest — so its failure report IS the pending set of the
     /// paths it retried. What the pass was never given (the unnamed
     /// remainder of a truncated set) is carried forward unchanged.
-    fn after_pass(&self, retried: usize, truncated: bool, mut next: PassFailures) -> PassFailures {
+    fn after_pass(
+        &self,
+        given: &RetrySet,
+        truncated: bool,
+        mut next: PassFailures,
+    ) -> PassFailures {
+        let retried = given.len();
         let previously_named = self.files_failed.saturating_sub(self.unretried);
         let not_given = if truncated {
             previously_named.saturating_sub(retried as u64)
@@ -347,6 +385,31 @@ impl PassFailures {
         };
         next.unretried = self.unretried.saturating_add(not_given);
         next.files_failed = next.files_failed.saturating_add(next.unretried);
+        // cr-ecm38-5: those of them this report names go on by name, with
+        // their reasons, beside the anonymous remainder.
+        next.withheld = self.withheld.clone();
+        next.withheld_paths = self.withheld_paths.clone();
+        if truncated {
+            let was_given = |path: &str, bytes: &[u8]| {
+                if bytes.is_empty() {
+                    given.text.contains(std::path::Path::new(path))
+                } else {
+                    given.raw.contains(bytes)
+                }
+            };
+            for (at, path) in self.failed_paths.iter().enumerate() {
+                let bytes = self.failed_paths_raw.get(at).cloned().unwrap_or_default();
+                if !was_given(path, &bytes) {
+                    next.withheld_paths.push((path.clone(), bytes));
+                }
+            }
+            for failure in &self.failures {
+                let bytes = failure.raw_relative_path.clone().unwrap_or_default();
+                if !failure.path_shortened && !was_given(&failure.relative_path, &bytes) {
+                    next.withheld.push(failure.clone());
+                }
+            }
+        }
         // cr-rework-2: a leftover stays this run's own copy for as long as
         // its path keeps failing. A pass that failed it on the source side
         // never touched the copy, so its report — which names no leftover
@@ -408,15 +471,17 @@ impl PassFailures {
     /// Write the final state back onto a wire-shaped summary.
     pub(crate) fn apply_to_summary(&self, summary: &mut TransferSummary) {
         summary.files_failed = self.files_failed;
-        // cr-ecm37-5: each entry linked to its exact name in the list.
+        // cr-ecm37-5: each entry linked to its exact name in the list; and
+        // cr-ecm38-5: the withheld named beside the pass's own.
+        let (failures, paths, raw) = self.reported();
         summary.failures = blit_core::remote::transfer::sink::failures_to_report(
-            &self.failures,
-            &self.failed_paths,
-            &where_any(&self.failed_paths_raw),
+            &failures,
+            &paths,
+            &where_any(&raw),
         );
-        summary.failed_paths = self.failed_paths.clone();
+        summary.failed_paths = paths;
         summary.failed_paths_truncated = self.failed_paths_truncated;
-        summary.failed_paths_raw = where_any(&self.failed_paths_raw);
+        summary.failed_paths_raw = where_any(&raw);
         summary.left_in_place_raw = self.left_in_place_raw.clone();
         summary.left_in_place = self.left_in_place.clone();
         summary.left_in_place_truncated = self.left_in_place_truncated;
@@ -427,10 +492,12 @@ impl PassFailures {
     /// Write the final state back onto a local summary.
     pub(crate) fn apply_to_local(&self, summary: &mut LocalMirrorSummary) {
         summary.files_failed = self.files_failed;
-        summary.failures = self.failures.clone();
-        summary.failed_paths = self.failed_paths.clone();
+        // cr-ecm38-5: the withheld named beside the pass's own.
+        let (failures, paths, raw) = self.reported();
+        summary.failures = failures;
+        summary.failed_paths = paths;
         summary.failed_paths_truncated = self.failed_paths_truncated;
-        summary.failed_paths_raw = where_any(&self.failed_paths_raw);
+        summary.failed_paths_raw = where_any(&raw);
         summary.left_in_place_raw = self.left_in_place_raw.clone();
         summary.left_in_place = self.left_in_place.clone();
         summary.left_in_place_truncated = self.left_in_place_truncated;
@@ -545,15 +612,17 @@ impl RetryOutcome {
         summary.tcp_fallback_used |= self.in_stream_carrier_used;
         summary.files_failed = self.final_failures.files_failed;
         // cr-ecm38-6: linked, as every report is (cr-ecm37-5). Unlinked, a
-        // long name's reason was lost on reading the summary back.
+        // long name's reason was lost on reading the summary back. And
+        // cr-ecm38-5: the withheld named beside the pass's own.
+        let (failures, paths, raw) = self.final_failures.reported();
         summary.failures = blit_core::remote::transfer::sink::failures_to_report(
-            &self.final_failures.failures,
-            &self.final_failures.failed_paths,
-            &where_any(&self.final_failures.failed_paths_raw),
+            &failures,
+            &paths,
+            &where_any(&raw),
         );
-        summary.failed_paths = self.final_failures.failed_paths.clone();
+        summary.failed_paths = paths;
         summary.failed_paths_truncated = self.final_failures.failed_paths_truncated;
-        summary.failed_paths_raw = where_any(&self.final_failures.failed_paths_raw);
+        summary.failed_paths_raw = where_any(&raw);
         summary.left_in_place_raw = self.final_failures.left_in_place_raw.clone();
         summary.left_in_place = self.final_failures.left_in_place.clone();
         summary.left_in_place_truncated = self.final_failures.left_in_place_truncated;
@@ -660,6 +729,7 @@ where
         }
         let total = retries;
         let n = set.len();
+        let given = set.clone();
         tokio::select! {
             biased;
             () = interrupt.as_mut() => {
@@ -734,7 +804,7 @@ where
         added_bytes = added_bytes.saturating_add(result.bytes_transferred);
         in_stream_carrier_used |= result.in_stream_carrier_used;
         files_resumed = files_resumed.saturating_add(result.files_resumed);
-        current = current.after_pass(n, truncated, result.failures);
+        current = current.after_pass(&given, truncated, result.failures);
         passes_run = pass;
     }
     if passes_run > 0 {
@@ -766,6 +836,45 @@ async fn wait_before_pass(args: &TransferArgs, _pass: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cr-ecm38-5: a failure withheld from the retry — a leftover not known
+    /// under --ignore-existing — stays in the run's report by name, with its
+    /// reason, counted as not retried, while the other is retried. Counted
+    /// alone, it lost its name and reason.
+    #[tokio::test]
+    async fn a_withheld_failure_keeps_its_name_and_reason() {
+        let mut a = args(1);
+        a.ignore_existing = true;
+        let mut main = failures(&["u.bin", "k.bin"]);
+        main.failures[0].left_unknown = true;
+        main.failures[0].reason = "not known".into();
+        let out = run_retry_passes(&a, main, |pass_args| {
+            assert_eq!(
+                pass_args.retry_only,
+                Some([PathBuf::from("k.bin")].into()),
+                "only the other is given"
+            );
+            async move {
+                Ok(PassResult {
+                    files_transferred: 1,
+                    bytes_transferred: 1,
+                    failures: PassFailures::default(),
+                    in_stream_carrier_used: false,
+                    files_resumed: 0,
+                })
+            }
+        })
+        .await
+        .expect("loop");
+        let mut summary = TransferSummary::default();
+        out.fold_into_summary(&mut summary);
+        assert_eq!(summary.files_failed, 1);
+        assert_eq!(out.final_failures.unretried, 1, "counted as not retried");
+        assert_eq!(summary.failed_paths, ["u.bin"]);
+        assert_eq!(summary.failures.len(), 1, "{:?}", summary.failures);
+        assert_eq!(summary.failures[0].relative_path, "u.bin");
+        assert_eq!(summary.failures[0].reason, "not known");
+    }
 
     /// cr-ecm38-6: a delegated retry's report is linked to its exact names
     /// like any other, so a long name read back is that name, with its
@@ -911,6 +1020,8 @@ mod tests {
             removed_incomplete_truncated: false,
             unretried: 0,
             retried: false,
+            withheld: Vec::new(),
+            withheld_paths: Vec::new(),
         }
     }
 
@@ -1664,6 +1775,8 @@ mod cr_fix2_2_tests {
             removed_incomplete_truncated: false,
             unretried: 0,
             retried: false,
+            withheld: Vec::new(),
+            withheld_paths: Vec::new(),
         };
         let mut args = TransferArgs::for_tests("src", "dst");
         args.retries = 2;
