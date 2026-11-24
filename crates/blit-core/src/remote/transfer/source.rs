@@ -826,7 +826,12 @@ fn spawn_manifest_task_with(
                 if let Err(err) = scan_open(&absolute) {
                     match err.kind() {
                         ErrorKind::NotFound => {
-                            record_unreadable_entry(&unreadable, &rel, "not found");
+                            record_unreadable_entry(
+                                &unreadable,
+                                &rel,
+                                raw_relative_path.clone(),
+                                "not found",
+                            );
                             return Ok(());
                         }
                         // win-2 (D-2026-09-28-2, D-2026-09-28-4): any other
@@ -947,6 +952,7 @@ fn spawn_manifest_task_with(
             record_unreadable_entry(
                 &unreadable,
                 &suppressed.path,
+                None,
                 &format!("scan suppressed: {}", suppressed.message),
             );
         }
@@ -1005,6 +1011,7 @@ fn file_header_with_windows_metadata(
             record_unreadable_entry(
                 unreadable,
                 &relative_path,
+                None,
                 &format!("Windows metadata: {error:#}"),
             );
             return None;
@@ -1021,11 +1028,17 @@ fn file_header_with_windows_metadata(
     })
 }
 
-fn record_unreadable_entry(list: &Arc<Mutex<Vec<Unreadable>>>, rel: &str, reason: &str) {
+fn record_unreadable_entry(
+    list: &Arc<Mutex<Vec<Unreadable>>>,
+    rel: &str,
+    raw: Option<Vec<u8>>,
+    reason: &str,
+) {
     log::warn!("scan skipping '{}' ({})", rel, reason);
     if let Ok(mut guard) = list.lock() {
         guard.push(Unreadable {
             path: rel.to_string(),
+            raw,
             reason: reason.to_string(),
         });
     }
@@ -1038,6 +1051,9 @@ fn record_unreadable_entry(list: &Arc<Mutex<Vec<Unreadable>>>, rel: &str, reason
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unreadable {
     pub path: String,
+    /// cr-ecm36-4: its exact bytes where its name is not text — two names of
+    /// one text are two entries.
+    pub raw: Option<Vec<u8>>,
     pub reason: String,
 }
 

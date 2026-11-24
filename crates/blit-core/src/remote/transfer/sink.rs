@@ -290,13 +290,12 @@ pub struct SinkOutcome {
     /// never share the status. A write site records a failure by its text;
     /// [`named_raw`](Self::named_raw) names it from the session's manifest.
     left_in_place_raw: std::collections::HashSet<Vec<u8>>,
-    /// cr-ecm13-3: the exact bytes of each failed entry whose name is not
-    /// text, by the text `failed_paths` holds it under. The exact set went
-    /// to the initiator as text alone, and the text of such a name is
-    /// ANOTHER name: a retry asked for `dup` + U+FFFD where `dup` + byte
-    /// `FF` had failed, and the file that really bears that name was sent
-    /// again in its place.
-    failed_raw: std::collections::HashMap<String, Vec<u8>>,
+    /// cr-ecm13-3, cr-ecm36-4: each failed entry by its exact identity — its
+    /// text, and its bytes where its name is not text. Keyed by the text,
+    /// every name of one text was one entry with one name's bytes: seventy
+    /// failed names of one spelling went out as one, the rest counted as
+    /// unnamed, and the retry refused.
+    failed_identities: std::collections::HashSet<(String, Option<Vec<u8>>)>,
     /// cr-rework-3: the exact set of failed paths whose incomplete copy
     /// this outcome's writes positively removed. The retry loop keeps a
     /// path classified as this run's leftover only while the copy is
@@ -318,7 +317,7 @@ impl SinkOutcome {
             failed_paths: std::collections::HashSet::new(),
             left_in_place: std::collections::HashSet::new(),
             left_in_place_raw: std::collections::HashSet::new(),
-            failed_raw: std::collections::HashMap::new(),
+            failed_identities: std::collections::HashSet::new(),
             removed_incomplete: std::collections::HashSet::new(),
         }
     }
@@ -403,9 +402,8 @@ impl SinkOutcome {
         log::warn!("file failed, session continues: {named} ({reason})");
         self.files_failed_total = self.files_failed_total.saturating_add(1);
         self.failed_paths.insert(relative_path.clone());
-        if let Some(raw) = &raw_relative_path {
-            self.failed_raw.insert(relative_path.clone(), raw.clone());
-        }
+        self.failed_identities
+            .insert((relative_path.clone(), raw_relative_path.clone()));
         if left_in_place {
             match &raw_relative_path {
                 Some(raw) => {
@@ -441,7 +439,7 @@ impl SinkOutcome {
     /// so the initiator carries the unnamed remainder forward instead of
     /// letting a later clean pass erase it.
     pub fn has_unnamed_failures(&self) -> bool {
-        self.files_failed_total > self.failed_paths.len() as u64
+        self.files_failed_total > self.failed_identities.len() as u64
     }
 
     /// Whether this outcome failed `relative_path`.
@@ -456,7 +454,7 @@ impl SinkOutcome {
     /// report cap — answers `true` for every path rather than let a
     /// failed file be reported complete.
     pub fn file_failed(&self, relative_path: &str) -> bool {
-        if self.files_failed_total > self.failed_paths.len() as u64 {
+        if self.has_unnamed_failures() {
             return true;
         }
         self.failed_paths.contains(relative_path)
@@ -486,12 +484,8 @@ impl SinkOutcome {
         self.failures
             .extend(other.failures.iter().take(room).cloned());
         self.failed_paths.extend(other.failed_paths.iter().cloned());
-        self.failed_raw.extend(
-            other
-                .failed_raw
-                .iter()
-                .map(|(text, raw)| (text.clone(), raw.clone())),
-        );
+        self.failed_identities
+            .extend(other.failed_identities.iter().cloned());
         self.left_in_place
             .extend(other.left_in_place.iter().cloned());
         self.left_in_place_raw
@@ -537,10 +531,18 @@ impl SinkOutcome {
                 failure.raw_relative_path = raw_of(&failure.relative_path);
             }
         }
-        // cr-ecm13-3: and every failed path, for the exact set.
-        for text in &self.failed_paths {
-            if let Some(raw) = raw_of(text) {
-                self.failed_raw.entry(text.clone()).or_insert(raw);
+        // cr-ecm13-3: and every failed path recorded by its text alone, for
+        // the exact set.
+        let unnamed: Vec<String> = self
+            .failed_identities
+            .iter()
+            .filter(|(_, raw)| raw.is_none())
+            .map(|(text, _)| text.clone())
+            .collect();
+        for text in unnamed {
+            if let Some(raw) = raw_of(&text) {
+                self.failed_identities.remove(&(text.clone(), None));
+                self.failed_identities.insert((text, Some(raw)));
             }
         }
         let moved: Vec<(String, Vec<u8>)> = self
@@ -598,7 +600,17 @@ impl SinkOutcome {
     /// is a work list, not a report, so it carries every path it can and
     /// says when it could not carry them all (`(paths, truncated)`).
     pub fn wire_failed_paths(&self) -> (Vec<String>, bool) {
-        let mut out: Vec<String> = Vec::new();
+        let (paths, _, truncated) = self.wire_failed_identities();
+        (paths, truncated)
+    }
+
+    /// cr-ecm36-4: the exact failed set in wire form, one entry for each
+    /// failed entry by its identity — `(paths, raw at their places,
+    /// truncated)`; no raw list at all when every name is text. Two names of
+    /// one text are two entries, each with its own bytes.
+    pub fn wire_failed_identities(&self) -> (Vec<String>, Vec<Vec<u8>>, bool) {
+        let mut paths: Vec<String> = Vec::new();
+        let mut raw: Vec<Vec<u8>> = Vec::new();
         let mut remaining = MAX_WIRE_FAILED_PATHS_ENCODED_BYTES;
         // cr-fix2-2: failures with no path identity (a scoped scan's
         // dropped overflow) make the set inexact even when every named
@@ -607,25 +619,45 @@ impl SinkOutcome {
         let unnamed = self.has_unnamed_failures();
         // Deterministic order: the report's order for the named ones,
         // then the rest sorted, so a retry set is reproducible.
-        let mut ordered: Vec<&String> = self.failures.iter().map(|f| &f.relative_path).collect();
-        let mut rest: Vec<&String> = self
-            .failed_paths
+        let mut ordered: Vec<(&String, &Option<Vec<u8>>)> = Vec::new();
+        let mut placed: std::collections::HashSet<(&String, &Option<Vec<u8>>)> =
+            std::collections::HashSet::new();
+        for failure in &self.failures {
+            let identity = (&failure.relative_path, &failure.raw_relative_path);
+            if self.failed_identities.contains(&(
+                failure.relative_path.clone(),
+                failure.raw_relative_path.clone(),
+            )) && placed.insert(identity)
+            {
+                ordered.push(identity);
+            }
+        }
+        let mut rest: Vec<(&String, &Option<Vec<u8>>)> = self
+            .failed_identities
             .iter()
-            .filter(|p| !self.failures.iter().any(|f| &f.relative_path == *p))
+            .map(|(text, bytes)| (text, bytes))
+            .filter(|identity| !placed.contains(identity))
             .collect();
         rest.sort();
         ordered.extend(rest);
-        for path in ordered {
+        let mut truncated = unnamed;
+        for (path, bytes) in ordered {
             // 4 bytes of envelope per repeated string entry is a safe
-            // over-estimate (tag + length varint).
+            // over-estimate (tag + length varint); a name's bytes are never
+            // more than its text's.
             let cost = path.len().saturating_add(4);
             if cost > remaining {
-                return (out, true);
+                truncated = true;
+                break;
             }
             remaining -= cost;
-            out.push(path.clone());
+            paths.push(path.clone());
+            raw.push(bytes.clone().unwrap_or_default());
         }
-        (out, unnamed)
+        if raw.iter().all(Vec::is_empty) {
+            raw.clear();
+        }
+        (paths, raw, truncated)
     }
 
     /// cr-ecm13-3: the exact bytes of each of `paths` — what
@@ -634,13 +666,9 @@ impl SinkOutcome {
     /// one that is. No list at all when every name is text. (Bounded with
     /// the paths: a name's bytes are never more than its text's.)
     pub fn wire_failed_paths_raw(&self, paths: &[String]) -> Vec<Vec<u8>> {
-        if !paths.iter().any(|path| self.failed_raw.contains_key(path)) {
-            return Vec::new();
-        }
-        paths
-            .iter()
-            .map(|path| self.failed_raw.get(path).cloned().unwrap_or_default())
-            .collect()
+        let (listed, raw, _) = self.wire_failed_identities();
+        debug_assert_eq!(listed.as_slice(), paths, "the list wire_failed_paths gave");
+        raw
     }
 
     pub fn wire_failures(&self) -> Vec<crate::generated::FileFailure> {
@@ -10046,6 +10074,26 @@ mod cr_win_1_tests {
         assert!(outcome.failures[0]
             .reason
             .starts_with("source: read error; "));
+    }
+
+    /// cr-ecm36-4: seventy failed names of one text are seventy entries,
+    /// each by its own bytes: none is counted unnamed, and the exact set in
+    /// wire form names every one. Keyed by the text, they were one entry,
+    /// the rest unnamed, and the retry refused.
+    #[test]
+    fn many_names_of_one_text_are_each_their_own_failure() {
+        let mut outcome = SinkOutcome::default();
+        for n in 0..70u8 {
+            let mut raw = b"dup".to_vec();
+            raw.push(0x80 + n);
+            outcome.record_named_failure("dup\u{FFFD}", Some(raw), "denied");
+        }
+        assert!(!outcome.has_unnamed_failures());
+        let (paths, raw, truncated) = outcome.wire_failed_identities();
+        assert!(!truncated);
+        assert_eq!(paths.len(), 70);
+        let distinct: std::collections::HashSet<&Vec<u8>> = raw.iter().collect();
+        assert_eq!(distinct.len(), 70, "each by its own bytes");
     }
 
     /// cr-ecm35-4: a record the source closes failed, whose fresh partial this

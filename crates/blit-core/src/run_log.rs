@@ -153,14 +153,17 @@ impl RunTotals {
             None => self.left_in_place.iter().any(|left| left == path),
         };
         let mut files: Vec<FailedFile> = Vec::new();
+        // cr-ecm36-4: by hash, not by searching the list for each — a run of
+        // tens of thousands of failures took seconds.
+        let mut named: std::collections::HashSet<(String, Option<Vec<u8>>)> =
+            std::collections::HashSet::new();
+        let mut named_texts: std::collections::HashSet<String> = std::collections::HashSet::new();
         for failure in &self.failures {
             let raw = failure.raw_relative_path.clone();
-            if files
-                .iter()
-                .any(|file| file.path == failure.relative_path && file.raw == raw)
-            {
+            if !named.insert((failure.relative_path.clone(), raw.clone())) {
                 continue;
             }
+            named_texts.insert(failure.relative_path.clone());
             // A failure the report kept says it itself (contract 30).
             files.push(FailedFile {
                 left_in_place: Some(
@@ -177,10 +180,12 @@ impl RunTotals {
                 .get(index)
                 .filter(|bytes| !bytes.is_empty())
                 .cloned();
-            let named = files
-                .iter()
-                .any(|file| &file.path == path && (!carried || file.raw == raw));
-            if named {
+            let is_named = if carried {
+                !named.insert((path.clone(), raw.clone()))
+            } else {
+                named_texts.contains(path) || !named.insert((path.clone(), raw.clone()))
+            };
+            if is_named {
                 continue;
             }
             // cr-ecm35-5: one past the cap is told by the lists alone — and

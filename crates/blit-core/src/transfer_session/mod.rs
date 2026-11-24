@@ -1578,7 +1578,12 @@ fn requested_but_unscanned(
     for (rel, raw_relative_path) in requested {
         // cr-ecm35-8: the scan's own entry for this path, by the path — a
         // prefix of a message found another file's (`a (backup)` for `a`).
-        let reason = match unreadable.iter().find(|entry| entry.path == rel) {
+        // cr-ecm36-4: and by its bytes — two names of one text are two
+        // entries, and one's reason is not the other's.
+        let reason = match unreadable.iter().find(|entry| {
+            entry.path == rel
+                && entry.raw.as_deref().unwrap_or_default() == raw_relative_path.as_slice()
+        }) {
             Some(entry) => format!("source: unreadable at retry: {}", entry.reason),
             None => "source: missing at retry (not found by the retry scan)".to_string(),
         };
@@ -5733,9 +5738,9 @@ async fn destination_session_inner(
                 // status, by the exact bytes the manifest granted its text.
                 let contained_failures =
                     contained_failures.named_raw(|text| granted_raw_names.get(text).cloned());
-                let (retry_paths, retry_paths_truncated) = contained_failures.wire_failed_paths();
+                let (retry_paths, failed_paths_raw, retry_paths_truncated) =
+                    contained_failures.wire_failed_identities();
                 // cr-ecm13-3: and the bytes of those that are not text.
-                let failed_paths_raw = contained_failures.wire_failed_paths_raw(&retry_paths);
                 let (left_in_place, left_in_place_truncated) =
                     contained_failures.wire_left_in_place();
                 let (left_in_place_raw, left_in_place_raw_truncated) =
@@ -7641,6 +7646,40 @@ mod tests {
         assert_eq!(own_name(&entry), by_the_character.as_bytes());
     }
 
+    /// cr-ecm36-4: two requested names of one text are two files: the scan's
+    /// entry for one, by its bytes, is that one's reason only — the other
+    /// is reported missing. Found by the text, both took the one reason.
+    #[cfg(unix)]
+    #[test]
+    fn a_scan_entry_is_found_by_its_bytes_too() {
+        use crate::remote::transfer::source::Unreadable;
+        use std::os::unix::ffi::OsStrExt as _;
+        let scope: HashSet<PathBuf> = [
+            PathBuf::from(std::ffi::OsStr::from_bytes(b"dup\xff")),
+            PathBuf::from(std::ffi::OsStr::from_bytes(b"dup\xfe")),
+        ]
+        .into();
+        let unreadable = [Unreadable {
+            path: "dup\u{FFFD}".into(),
+            raw: Some(b"dup\xff".to_vec()),
+            reason: "Permission denied".into(),
+        }];
+        let (missing, _) =
+            requested_but_unscanned(Some(&scope), &[], &HashSet::new(), None, &unreadable);
+        let reasons: HashMap<Vec<u8>, &str> = missing
+            .iter()
+            .map(|failure| (failure.raw_relative_path.clone(), failure.reason.as_str()))
+            .collect();
+        assert_eq!(
+            reasons[&b"dup\xff".to_vec()],
+            "source: unreadable at retry: Permission denied"
+        );
+        assert_eq!(
+            reasons[&b"dup\xfe".to_vec()],
+            "source: missing at retry (not found by the retry scan)"
+        );
+    }
+
     /// cr-ecm35-8: a requested path the scan could not read is reported with
     /// the scan's own reason for it, found by the path — never another
     /// file's whose name begins as this one's does: `a (backup)`'s entry
@@ -7652,10 +7691,12 @@ mod tests {
         let unreadable = [
             Unreadable {
                 path: "a (backup)".into(),
+                raw: None,
                 reason: "not found".into(),
             },
             Unreadable {
                 path: "b".into(),
+                raw: None,
                 reason: "Permission denied".into(),
             },
         ];
