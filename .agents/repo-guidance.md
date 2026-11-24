@@ -25,6 +25,12 @@ Applied rules earned from actual rulings:
   violates SIMPLE. this can be a diagnostic option ONLY."*)
 - **Aborting a whole transfer over one survivable error violates all three**
   (D-2026-07-09-1) — the origin of the per-file containment work.
+- **No decision is read from prose** (D-2026-11-24-1, owner rule
+  2026-11-24: *"searching for a prose error message when you control the
+  entire pipeline is not acceptable. ever. rule."*). A fact the pipeline
+  knows — left in place, retried, taken — travels as a structured field to
+  every place that uses it; a message is for people and nothing parses it.
+  A display string is never an identity.
 
 ## Mission Detail
 
