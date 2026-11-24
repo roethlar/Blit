@@ -249,6 +249,14 @@ pub struct RunRecord {
     /// record is a file only when the run's log says it is one.
     #[serde(default)]
     pub failures_are_files: bool,
+    /// cr-ecm39-3: the leftover account says, for every failed file, whether
+    /// its failure left the run's own copy — one not known marks the account
+    /// incomplete (cr-ecm38-3; a daemon's answer since cr-ecm35-5). A record
+    /// from before may call the account whole although its run's log said a
+    /// failure's disposition was not known: read now, such a record's
+    /// `--ignore-existing` retry needs the run's whole log to say none was.
+    #[serde(default)]
+    pub dispositions_exact: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,6 +340,7 @@ impl RunRecord {
             source_removed: false,
             destination_nested: None,
             failures_are_files: true,
+            dispositions_exact: false,
         }
     }
 }
@@ -1047,6 +1056,7 @@ impl LogRead {
         (ended.left_in_place, ended.left_in_place_raw) = self.left_in_place_lists();
         ended.left_in_place_exact = true;
         ended.left_in_place_truncated = truncated || !self.left_unknown.is_empty();
+        ended.dispositions_exact = true;
         ended
     }
 
@@ -1114,6 +1124,7 @@ pub fn settle(
             (ended.left_in_place, ended.left_in_place_raw) = read.left_in_place_lists();
             ended.left_in_place_exact = true;
             ended.left_in_place_truncated = job.files_failed > 0;
+            ended.dispositions_exact = true;
             Ok(DaemonAnswer::Ended(Box::new(ended)))
         }
         Some(WatchSnapshot::NotFound) | None => {

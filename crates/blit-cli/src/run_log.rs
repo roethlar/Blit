@@ -692,6 +692,8 @@ fn finish_record(
             .map(|raw| blit_core::raw_name::escape_raw(raw))
             .collect();
         record.left_in_place_exact = true;
+        // cr-ecm39-3: and its leftover account says what is not known.
+        record.dispositions_exact = true;
     }
     if let Err(error) = recorded.store.update(&recorded.record) {
         eprintln!("blit: warning: could not finish this run's job record: {error}");
@@ -1173,6 +1175,7 @@ mod tests {
                 record.left_in_place_truncated, unknown,
                 "not known: {unknown}"
             );
+            assert!(record.dispositions_exact, "cr-ecm39-3: written so");
         }
     }
 

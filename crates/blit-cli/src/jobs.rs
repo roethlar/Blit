@@ -318,7 +318,8 @@ pub(crate) async fn job_to_retry(target: &str) -> Result<Option<JobToRun>> {
     let verb = if spec.verb == "move" {
         "move"
     } else {
-        let (failed, logged_left) = failed_identities(&config_dir, &record)?;
+        let older = spec.options.ignore_existing && !record.dispositions_exact;
+        let (failed, logged_left) = failed_identities(&config_dir, &record, older)?;
         // Review cr-jl4-1: under `--ignore-existing`, a path whose failed
         // write left this run's own incomplete copy is retried with the
         // flag off — the copy is not one the person asked to keep — as the
@@ -332,6 +333,7 @@ pub(crate) async fn job_to_retry(target: &str) -> Result<Option<JobToRun>> {
                     record.run_id
                 );
             }
+            dispositions_known(&record, &failed, &logged_left)?;
             let own_leftovers = own_leftovers(&record, &failed, &logged_left)?;
             let (own, own_raw) = retry_names(own_leftovers.iter());
             if !own.is_empty() || !own_raw.is_empty() {
@@ -434,9 +436,41 @@ fn own_leftovers(
 /// short — with, from the log's whole reasons, the texts of those whose
 /// failed write left the run's own incomplete copy. An error when they are
 /// still not all known — a retry would leave the rest.
+/// cr-ecm39-3: whether every failed file's disposition is known — by a record
+/// written so, or, for one from before, by the run's whole log, none of whose
+/// failures says it is not known. Else the retry under --ignore-existing is
+/// declined: it could keep a copy of the run's own as a file someone put
+/// there, as one did, leaving a nine-byte partial for an eight-byte source.
+fn dispositions_known(
+    record: &RunRecord,
+    failed: &HashSet<(String, Option<String>)>,
+    logged: &LoggedLeftovers,
+) -> Result<()> {
+    if record.dispositions_exact {
+        return Ok(());
+    }
+    if logged.read
+        && logged.complete
+        && failed
+            .iter()
+            .all(|identity| !logged.left_unknown.contains(identity))
+    {
+        return Ok(());
+    }
+    eyre::bail!(
+        "job {} ran with --ignore-existing, and its record (from an earlier blit) cannot say \
+         whether each failed file left its own incomplete copy at the destination, nor can this \
+         machine's whole log of the run; a retry could keep such a copy as a file to keep, so it \
+         is not made",
+        record.run_id
+    )
+}
+
+/// `need_log`: read the run's log whatever the record says (cr-ecm39-3).
 fn failed_identities(
     config_dir: &Path,
     record: &RunRecord,
+    need_log: bool,
 ) -> Result<(HashSet<(String, Option<String>)>, LoggedLeftovers)> {
     // cr-ecm34-7: every recorded failure is a file, whatever its name; the
     // failures no retry pass was given are not in the list, and the count
@@ -490,7 +524,7 @@ fn failed_identities(
                     .iter()
                     .any(|left| left == &failure.path)
         });
-    if short(&known) || ambiguous_legacy || legacy {
+    if short(&known) || ambiguous_legacy || legacy || need_log {
         // Review cr-jl4-3: the run's terminal state, read from its log in
         // order — a file that failed, and was not landed by a later pass —
         // not every failure the run ever met.
@@ -2342,7 +2376,7 @@ mod retry_name_tests {
         }];
         record.left_in_place = vec![text.clone()];
         record.left_in_place_exact = false;
-        let (failed, logged) = failed_identities(dir.path(), &record).unwrap();
+        let (failed, logged) = failed_identities(dir.path(), &record, false).unwrap();
         assert!(
             logged.read && logged.complete,
             "the log was read, and is whole"
@@ -2383,10 +2417,11 @@ mod retry_name_tests {
             }];
             record
         };
-        let error = match failed_identities(dir.path(), &old("7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a")) {
-            Ok((failed, _)) => panic!("retried as {failed:?}"),
-            Err(error) => error.to_string(),
-        };
+        let error =
+            match failed_identities(dir.path(), &old("7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"), false) {
+                Ok((failed, _)) => panic!("retried as {failed:?}"),
+                Err(error) => error.to_string(),
+            };
         assert!(error.contains("earlier blit"), "{error}");
 
         let run_id = "7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b";
@@ -2406,7 +2441,8 @@ mod retry_name_tests {
             left_in_place: Some(false),
         });
         assert!(writer.finish(Outcome::Failed, None).complete);
-        let (failed, _) = failed_identities(dir.path(), &old(run_id)).expect("settled by its log");
+        let (failed, _) =
+            failed_identities(dir.path(), &old(run_id), false).expect("settled by its log");
         assert_eq!(failed, [("(not retried)".to_string(), None)].into());
 
         // A whole log that names the run's real failure, and no file by the
@@ -2422,8 +2458,78 @@ mod retry_name_tests {
             left_in_place: Some(false),
         });
         assert!(writer.finish(Outcome::Failed, None).complete);
-        let (failed, _) = failed_identities(dir.path(), &old(counted)).expect("settled by its log");
+        let (failed, _) =
+            failed_identities(dir.path(), &old(counted), false).expect("settled by its log");
         assert_eq!(failed, [("real.txt".to_string(), None)].into());
+    }
+
+    /// cr-ecm39-3: a record from before cr-ecm38-3, its leftover account
+    /// called whole, has its dispositions settled for an --ignore-existing
+    /// retry only by the run's whole log: one that says a failure's is not
+    /// known declines it, as does no log; one that knows them all lets it
+    /// run. A record written so needs no log.
+    #[test]
+    fn an_older_records_dispositions_are_settled_from_a_whole_log() {
+        use blit_core::job_log::{EventBody, Outcome, Role, RunInfo};
+        use blit_core::run_log::LogPlace;
+        let dir = tempfile::tempdir().unwrap();
+        let spec = JobSpec::new(
+            "m1",
+            "copy",
+            "/".into(),
+            blit_core::job_record::SpecEndpoint::Local { path: "/a/".into() },
+            blit_core::job_record::SpecEndpoint::Local { path: "/b/".into() },
+            Default::default(),
+            None,
+        );
+        let place = LogPlace {
+            dir: dir.path().join("jobs").join("logs"),
+            participant: "m1".into(),
+            keep: 50,
+            finished: None,
+        };
+        let older = |run_id: &str| {
+            let mut record = RunRecord::starting(run_id, &spec);
+            record.files_failed = 1;
+            record.failures = vec![blit_core::job_record::Failure {
+                path: "p.bin".into(),
+                reason: "source: read error".into(),
+                raw: None,
+            }];
+            record.left_in_place_exact = true;
+            record.dispositions_exact = false;
+            record
+        };
+        let logged = |run_id: &str, left: Option<bool>| {
+            let writer = place
+                .start(run_id, 1, Role::Initiator, RunInfo::default())
+                .expect("a log");
+            writer.record(EventBody::FileFailed {
+                path: "p.bin".into(),
+                reason: "source: read error".into(),
+                raw: None,
+                left_in_place: left,
+            });
+            assert!(writer.finish(Outcome::Failed, None).complete);
+        };
+        let settle = |record: &RunRecord| {
+            let (failed, logged) = failed_identities(dir.path(), record, true).unwrap();
+            dispositions_known(record, &failed, &logged)
+        };
+        let unknown = "9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a";
+        logged(unknown, None);
+        assert!(settle(&older(unknown)).is_err(), "not known: declined");
+        let known = "9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b";
+        logged(known, Some(false));
+        assert!(settle(&older(known)).is_ok(), "known: retried");
+        let unlogged = "9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c";
+        assert!(settle(&older(unlogged)).is_err(), "no log: declined");
+        let mut written_so = older(unlogged);
+        written_so.dispositions_exact = true;
+        assert!(
+            settle(&written_so).is_ok(),
+            "a record written so needs no log"
+        );
     }
 
     /// cr-ecm39-2: a record whose list was cut is completed from its log
@@ -2480,11 +2586,12 @@ mod retry_name_tests {
         };
         let lost = "8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a";
         logged(lost, false);
-        assert!(failed_identities(dir.path(), &cut(lost)).is_err());
+        assert!(failed_identities(dir.path(), &cut(lost), false).is_err());
 
         let whole = "8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b";
         logged(whole, true);
-        let (failed, _) = failed_identities(dir.path(), &cut(whole)).expect("completed by its log");
+        let (failed, _) =
+            failed_identities(dir.path(), &cut(whole), false).expect("completed by its log");
         assert_eq!(
             failed,
             [("a.txt".to_string(), None), ("b.txt".to_string(), None)].into()
@@ -2539,11 +2646,12 @@ mod retry_name_tests {
         };
         let twice = "7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d";
         logged(twice, &[&long, &rendering]);
-        assert!(failed_identities(dir.path(), &cut(twice)).is_err());
+        assert!(failed_identities(dir.path(), &cut(twice), false).is_err());
 
         let once = "7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e";
         logged(once, &[&long]);
-        let (failed, _) = failed_identities(dir.path(), &cut(once)).expect("completed by its log");
+        let (failed, _) =
+            failed_identities(dir.path(), &cut(once), false).expect("completed by its log");
         assert_eq!(failed, [(long, None)].into());
     }
 
@@ -2581,10 +2689,10 @@ mod retry_name_tests {
                 raw: None,
             },
         ];
-        assert!(failed_identities(dir.path(), &record).is_err());
+        assert!(failed_identities(dir.path(), &record, false).is_err());
 
         record.failures.truncate(1);
-        let (failed, _) = failed_identities(dir.path(), &record).expect("a whole record");
+        let (failed, _) = failed_identities(dir.path(), &record, false).expect("a whole record");
         assert_eq!(failed, [(long, None)].into());
     }
 
@@ -2614,7 +2722,8 @@ mod retry_name_tests {
             reason: "denied".into(),
             raw: None,
         }];
-        let (failed, logged) = failed_identities(dir.path(), &record).expect("a whole record");
+        let (failed, logged) =
+            failed_identities(dir.path(), &record, false).expect("a whole record");
         assert_eq!(failed, [("(not retried)".to_string(), None)].into());
         assert!(!logged.read, "no log was needed");
     }
@@ -2665,7 +2774,7 @@ mod retry_name_tests {
         );
         // Two failed, none named: the record is short, and the log is read.
         record.files_failed = 2;
-        let (_, logged) = failed_identities(dir.path(), &record).unwrap();
+        let (_, logged) = failed_identities(dir.path(), &record, false).unwrap();
         assert!(
             logged.read && logged.complete,
             "the log was read, and is whole"
@@ -2723,7 +2832,7 @@ mod retry_name_tests {
         }];
         record.left_in_place = vec![text.clone()];
         record.left_in_place_exact = false;
-        let (failed, logged) = failed_identities(dir.path(), &record).unwrap();
+        let (failed, logged) = failed_identities(dir.path(), &record, false).unwrap();
         assert!(
             logged.read && logged.complete,
             "the log was read, and is whole"
@@ -2750,7 +2859,7 @@ mod retry_name_tests {
         });
         assert!(writer.finish(Outcome::Failed, None).path.is_some());
         record.run_id = other_run.into();
-        let (failed, logged) = failed_identities(dir.path(), &record).unwrap();
+        let (failed, logged) = failed_identities(dir.path(), &record, false).unwrap();
         assert!(logged.read && !logged.complete, "read, not whole");
         assert!(own_leftovers(&record, &failed, &logged).is_err());
 
@@ -2787,7 +2896,7 @@ mod retry_name_tests {
         });
         assert!(writer.finish(Outcome::Failed, None).complete);
         record.run_id = two_roles.into();
-        let (failed, logged) = failed_identities(dir.path(), &record).unwrap();
+        let (failed, logged) = failed_identities(dir.path(), &record, false).unwrap();
         assert!(logged.read && logged.complete);
         assert_eq!(
             own_leftovers(&record, &failed, &logged).unwrap(),
@@ -2814,7 +2923,7 @@ mod retry_name_tests {
         });
         assert!(writer.finish(Outcome::Failed, None).complete);
         record.run_id = sent_after.into();
-        let (_, logged) = failed_identities(dir.path(), &record).unwrap();
+        let (_, logged) = failed_identities(dir.path(), &record, false).unwrap();
         assert!(logged.left.contains(&(text.clone(), raw.clone())));
 
         // And two logs that each landed the other's leftover keep both —
@@ -2852,7 +2961,7 @@ mod retry_name_tests {
         // than the record counts.
         record.run_id = crossed.into();
         record.files_failed = 2;
-        let (_, logged) = failed_identities(dir.path(), &record).unwrap();
+        let (_, logged) = failed_identities(dir.path(), &record, false).unwrap();
         assert_eq!(
             logged.left,
             [(text.clone(), raw.clone()), (other_text, other_raw)].into()
@@ -2899,7 +3008,7 @@ mod retry_name_tests {
             assert!(writer.finish(Outcome::Failed, None).complete);
         }
         record.run_id = attempts.into();
-        let (failed, logged) = failed_identities(dir.path(), &record).unwrap();
+        let (failed, logged) = failed_identities(dir.path(), &record, false).unwrap();
         assert!(logged.read && logged.complete);
         assert!(logged.left.is_empty(), "{:?}", logged.left);
         assert!(failed.contains(&(text.clone(), raw.clone())));
@@ -2931,7 +3040,7 @@ mod retry_name_tests {
         });
         assert!(writer.finish(Outcome::Failed, None).complete);
         record.run_id = machines.into();
-        let (_, logged) = failed_identities(dir.path(), &record).unwrap();
+        let (_, logged) = failed_identities(dir.path(), &record, false).unwrap();
         assert!(logged.left.contains(&(text.clone(), raw.clone())));
     }
 
