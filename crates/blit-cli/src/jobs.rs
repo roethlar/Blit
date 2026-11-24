@@ -476,6 +476,8 @@ fn failed_identities(
     let short = |known: &HashSet<(String, Option<String>)>| {
         record.failures_truncated || (known.len() as u64) < record.files_failed
     };
+    let was_short = short(&known);
+    let named_by_record = known.len();
     let mut logged = LoggedLeftovers::default();
     // Review cr-jl4fix4-1: a record from before its lists kept identities,
     // naming a raw-named failure whose text is in its text list, needs the
@@ -582,6 +584,22 @@ fn failed_identities(
                  name, so nothing is retried; run the whole job again instead (`blit jobs save \
                  {} <name>`, then `blit jobs run <name>`)",
                 record.run_id,
+                record.run_id
+            );
+        }
+        // cr-ecm39-2: a list cut short is completed from the log only when the
+        // log is whole. One that lost events can still name a failure a later
+        // pass landed, which then stands in for one that is missing: the
+        // count matched, the files did not, and the retry left a failed file
+        // out and wrote over one that had landed.
+        if was_short && !(logged.read && logged.complete) {
+            eyre::bail!(
+                "job {} names only {} of the {} files it failed, and this machine's log of the run \
+                 is not whole, so which of them failed cannot be told; run the whole job again \
+                 instead (`blit jobs save {} <name>`, then `blit jobs run <name>`)",
+                record.run_id,
+                named_by_record,
+                record.files_failed,
                 record.run_id
             );
         }
@@ -2406,6 +2424,71 @@ mod retry_name_tests {
         assert!(writer.finish(Outcome::Failed, None).complete);
         let (failed, _) = failed_identities(dir.path(), &old(counted)).expect("settled by its log");
         assert_eq!(failed, [("real.txt".to_string(), None)].into());
+    }
+
+    /// cr-ecm39-2: a record whose list was cut is completed from its log
+    /// only when that log is whole: one that lost events, naming a stale
+    /// failure, matched the count with the wrong files. A whole log
+    /// completes it.
+    #[test]
+    fn a_cut_list_is_completed_only_from_a_whole_log() {
+        use blit_core::job_log::{EventBody, Outcome, Role, RunInfo};
+        use blit_core::run_log::LogPlace;
+        let dir = tempfile::tempdir().unwrap();
+        let spec = JobSpec::new(
+            "m1",
+            "copy",
+            "/".into(),
+            blit_core::job_record::SpecEndpoint::Local { path: "/a/".into() },
+            blit_core::job_record::SpecEndpoint::Local { path: "/b/".into() },
+            Default::default(),
+            None,
+        );
+        let place = LogPlace {
+            dir: dir.path().join("jobs").join("logs"),
+            participant: "m1".into(),
+            keep: 50,
+            finished: None,
+        };
+        let cut = |run_id: &str| {
+            let mut record = RunRecord::starting(run_id, &spec);
+            record.files_failed = 2;
+            record.failures_truncated = true;
+            record.failures = vec![blit_core::job_record::Failure {
+                path: "a.txt".into(),
+                reason: "denied".into(),
+                raw: None,
+            }];
+            record
+        };
+        let logged = |run_id: &str, whole: bool| {
+            let writer = place
+                .start(run_id, 1, Role::Initiator, RunInfo::default())
+                .expect("a log");
+            writer.record(EventBody::FileFailed {
+                path: "b.txt".into(),
+                reason: "denied".into(),
+                raw: None,
+                left_in_place: Some(false),
+            });
+            if !whole {
+                writer.record(EventBody::LogIncomplete {
+                    reason: "disk full".into(),
+                });
+            }
+            writer.finish(Outcome::Failed, None);
+        };
+        let lost = "8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a";
+        logged(lost, false);
+        assert!(failed_identities(dir.path(), &cut(lost)).is_err());
+
+        let whole = "8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b";
+        logged(whole, true);
+        let (failed, _) = failed_identities(dir.path(), &cut(whole)).expect("completed by its log");
+        assert_eq!(
+            failed,
+            [("a.txt".to_string(), None), ("b.txt".to_string(), None)].into()
+        );
     }
 
     /// cr-ecm38-7: a record whose list was cut, completed from a whole log
