@@ -13,6 +13,33 @@ pub enum RemotePath {
     Discovery,
 }
 
+/// Why [`RemoteEndpoint::parse`] read an input as not remote at all —
+/// carried as a type, so a caller tells the cases apart by it and never by
+/// the error's words (D-2026-11-24-1), which may hold the input itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotRemote {
+    /// The input is a local path.
+    LocalPath,
+    /// A remote-shaped input written with backslashes; the input as given.
+    Backslashes(String),
+}
+
+impl std::fmt::Display for NotRemote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LocalPath => f.write_str("input appears to be a local path"),
+            Self::Backslashes(got) => write!(
+                f,
+                "remote paths must use forward slashes, not backslashes.\n\
+                 Example: server:/module/path or server://path\n\
+                 Got: {got}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NotRemote {}
+
 /// Parsed representation of a canonical remote endpoint.
 #[derive(Debug, Clone)]
 pub struct RemoteEndpoint {
@@ -39,16 +66,9 @@ impl RemoteEndpoint {
         }
 
         match check_local_path(trimmed) {
-            LocalPathCheck::IsLocal => {
-                bail!("input appears to be a local path");
-            }
+            LocalPathCheck::IsLocal => return Err(NotRemote::LocalPath.into()),
             LocalPathCheck::RemoteWithBackslashes => {
-                bail!(
-                    "remote paths must use forward slashes, not backslashes.\n\
-                     Example: server:/module/path or server://path\n\
-                     Got: {}",
-                    trimmed
-                );
+                return Err(NotRemote::Backslashes(trimmed.to_string()).into());
             }
             LocalPathCheck::NotLocal => {}
         }

@@ -55,14 +55,15 @@ pub fn parse_transfer_endpoint(input: &str) -> Result<Endpoint> {
     match RemoteEndpoint::parse(input) {
         Ok(endpoint) => Ok(Endpoint::Remote(endpoint)),
         Err(err) => {
-            let err_msg = err.to_string();
-            // `RemoteEndpoint::parse` bails "input appears to be a
-            // local path" when `check_local_path` recognizes a local
-            // path — including Windows drive paths (`C:/path`,
-            // `C:\path`) whose `:/` would otherwise trip the
-            // remote-shaped-typo guard below. Honor that lower-level
-            // classification: it's local, not a typo'd remote.
-            if err_msg.contains("appears to be a local path") {
+            // `RemoteEndpoint::parse` refuses with `NotRemote::LocalPath`
+            // when `check_local_path` recognizes a local path — including
+            // Windows drive paths (`C:/path`, `C:\path`) whose `:/` would
+            // otherwise trip the remote-shaped-typo guard below. Honor
+            // that lower-level classification: it's local, not a typo'd
+            // remote. Read by its type, never its words (D-2026-11-24-1):
+            // another refusal's message may quote the input.
+            let not_remote = err.downcast_ref::<crate::remote::endpoint::NotRemote>();
+            if not_remote == Some(&crate::remote::endpoint::NotRemote::LocalPath) {
                 // D-2026-08-20-3: still name the daemon-address trap —
                 // `1.2.3.4:9911//x/` lands here (the `:` is followed by
                 // a digit, so `check_local_path` calls it local), and
@@ -73,7 +74,10 @@ pub fn parse_transfer_endpoint(input: &str) -> Result<Endpoint> {
                 }
                 return Ok(Endpoint::Local(PathBuf::from(input)));
             }
-            if err_msg.contains("forward slashes") {
+            if matches!(
+                not_remote,
+                Some(crate::remote::endpoint::NotRemote::Backslashes(_))
+            ) {
                 return Err(err);
             }
             // Anything that looks like a remote URI (scheme or
@@ -246,6 +250,32 @@ pub fn rel_path_to_string(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D-2026-11-24-1: the remote parser's refusals are told apart by their
+    /// type, never their words. A remote-shaped typo whose own refusal
+    /// quotes the input — an unterminated IPv6 host holding the words of
+    /// the local-path refusal — is still refused, not taken as a local
+    /// path; and an input without a remote shape whose refusal holds the
+    /// words of the backslash refusal is still a local path.
+    #[test]
+    fn a_refusals_words_do_not_classify_an_endpoint() {
+        let typo = "[input appears to be a local path:/m/x";
+        let refused = parse_transfer_endpoint(typo);
+        assert!(refused.is_err(), "{refused:?}");
+        let local = "[must use forward slashes:x";
+        assert!(
+            matches!(parse_transfer_endpoint(local), Ok(Endpoint::Local(_))),
+            "{:?}",
+            parse_transfer_endpoint(local)
+        );
+        // The typed refusals still classify as before.
+        assert!(matches!(
+            parse_transfer_endpoint("C:/data"),
+            Ok(Endpoint::Local(_))
+        ));
+        let backslashes = parse_transfer_endpoint("srv:\\m\\x");
+        assert!(backslashes.is_err(), "{backslashes:?}");
+    }
 
     /// d-68 R4: a Windows drive path (`C:/...` or `C:\...`) is a
     /// local destination even though it contains `:/`. The classifier
