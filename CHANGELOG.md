@@ -45,7 +45,9 @@ entry: numeric field was not a number … cksum`).
   after the main pass, re-scanned fresh: `--retries <N>` (`-R`, default 1,
   `0` disables) passes, `--retry-wait <SECONDS>` (`-W`, default 30) before
   each. Files that land on retry count once; survivors are reported once
-  with `(retried)`. Mirror deletions run at the end of the main pass and
+  with `(retried)`. Failures no pass could be given — more failed than the
+  report could name — stay failed and are counted on a line of their own
+  (`files_not_retried` in `--json`). Mirror deletions run at the end of the main pass and
   never touch the subtree under a failed path. A `--detach` job runs on
   the daemons and has no retry passes; the command says so once.
 - **Filenames that are not valid UTF-8 transfer**, rsync-style: the exact

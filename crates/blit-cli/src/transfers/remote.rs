@@ -403,9 +403,9 @@ pub struct DeferredPushState {
     pub destination: String,
 }
 
-pub fn print_deferred_push_result(args: &TransferArgs, state: &DeferredPushState) {
+pub fn print_deferred_push_result(args: &TransferArgs, state: &DeferredPushState, unretried: u64) {
     if args.json {
-        print_push_json(&state.summary, &state.destination);
+        print_push_json(&state.summary, &state.destination, unretried);
     } else {
         describe_push_result(&state.summary, &state.destination);
         // pfc-5: the end-of-operation block follows the summary, never
@@ -413,6 +413,7 @@ pub fn print_deferred_push_result(args: &TransferArgs, state: &DeferredPushState
         super::failures::print_failure_block(
             state.summary.files_failed,
             &super::failures::failures_from_wire(&state.summary.failures),
+            unretried,
         );
     }
 }
@@ -557,7 +558,7 @@ async fn run_remote_push_transfer_inner(
     };
     if !defer_output {
         super::render_result(lifecycle_trace, || {
-            print_deferred_push_result(args, &state);
+            print_deferred_push_result(args, &state, 0);
             Ok(())
         })?;
     }
@@ -593,9 +594,9 @@ pub async fn run_remote_pull_transfer_deferred(
     .await
 }
 
-pub fn print_deferred_pull_result(args: &TransferArgs, state: &DeferredPullState) {
+pub fn print_deferred_pull_result(args: &TransferArgs, state: &DeferredPullState, unretried: u64) {
     if args.json {
-        print_pull_json(&state.summary, &state.dest_root);
+        print_pull_json(&state.summary, &state.dest_root, unretried);
     } else {
         describe_pull_result(&state.summary, &state.dest_root);
         // pfc-5: the end-of-operation block follows the summary, never
@@ -603,6 +604,7 @@ pub fn print_deferred_pull_result(args: &TransferArgs, state: &DeferredPullState
         super::failures::print_failure_block(
             state.summary.files_failed,
             &super::failures::failures_from_wire(&state.summary.failures),
+            unretried,
         );
     }
 }
@@ -714,7 +716,7 @@ async fn run_remote_pull_transfer_inner(
     // never leaves a success-looking JSON document on stdout.
     if !defer_output {
         super::render_result(lifecycle_trace, || {
-            print_deferred_pull_result(args, &state);
+            print_deferred_pull_result(args, &state, 0);
             Ok(())
         })?;
     }
@@ -722,7 +724,11 @@ async fn run_remote_pull_transfer_inner(
     Ok(state)
 }
 
-fn print_pull_json(summary: &blit_core::generated::TransferSummary, dest_root: &Path) {
+fn print_pull_json(
+    summary: &blit_core::generated::TransferSummary,
+    dest_root: &Path,
+    unretried: u64,
+) {
     use serde_json::json;
     // otp-10b-2: the pull verb reports the session's
     // destination-computed summary — the same keys as the push verb's
@@ -746,11 +752,16 @@ fn print_pull_json(summary: &blit_core::generated::TransferSummary, dest_root: &
         "tcp_fallback": summary.in_stream_carrier_used,
         "files_failed": summary.files_failed,
         "failures": super::failures::failures_json(&failures),
+        "files_not_retried": unretried,
     });
     println!("{}", serde_json::to_string_pretty(&summary).unwrap());
 }
 
-fn print_push_json(summary: &blit_core::generated::TransferSummary, destination: &str) {
+fn print_push_json(
+    summary: &blit_core::generated::TransferSummary,
+    destination: &str,
+    unretried: u64,
+) {
     use serde_json::json;
     // otp-10a: the push verb reports the session's destination-computed
     // summary. Keys that only the deleted driver could fill
@@ -768,6 +779,7 @@ fn print_push_json(summary: &blit_core::generated::TransferSummary, destination:
         "tcp_fallback": summary.in_stream_carrier_used,
         "files_failed": summary.files_failed,
         "failures": super::failures::failures_json(&failures),
+        "files_not_retried": unretried,
     });
     println!("{}", serde_json::to_string_pretty(&summary).unwrap());
 }

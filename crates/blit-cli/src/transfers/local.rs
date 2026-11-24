@@ -78,6 +78,7 @@ pub fn print_local_transfer_summary(
     elapsed: Duration,
     src_path: &Path,
     dest_path: &Path,
+    unretried: u64,
 ) -> Result<()> {
     // Only presentation fields are read here; the compare mode (and
     // thus the move_verb flag) is irrelevant to printing.
@@ -89,6 +90,7 @@ pub fn print_local_transfer_summary(
         elapsed,
         src_path,
         dest_path,
+        unretried,
     );
     Ok(())
 }
@@ -110,12 +112,24 @@ fn emit_summary(
     elapsed: Duration,
     src_path: &Path,
     dest_path: &Path,
+    unretried: u64,
 ) {
     if json_output {
-        print_summary_json(options.mirror, summary, elapsed, src_path, dest_path);
+        print_summary_json(
+            options.mirror,
+            summary,
+            elapsed,
+            src_path,
+            dest_path,
+            unretried,
+        );
     } else {
         print_summary(options, summary, elapsed);
-        crate::transfers::failures::print_failure_block(summary.files_failed, &summary.failures);
+        crate::transfers::failures::print_failure_block(
+            summary.files_failed,
+            &summary.failures,
+            unretried,
+        );
     }
 }
 
@@ -191,6 +205,7 @@ async fn run_local_transfer_inner(
                     elapsed,
                     src_path,
                     dest_path,
+                    0,
                 );
                 Ok(())
             },
@@ -1173,6 +1188,7 @@ fn print_summary_json(
     elapsed: Duration,
     src: &Path,
     dst: &Path,
+    unretried: u64,
 ) {
     use serde_json::json;
     let duration = if summary.duration.is_zero() {
@@ -1203,6 +1219,7 @@ fn print_summary_json(
         "outcome": outcome,
         "files_failed": summary.files_failed,
         "failures": crate::transfers::failures::failures_json(&summary.failures),
+        "files_not_retried": unretried,
         "files_repaired": summary.files_repaired,
     });
     println!("{}", serde_json::to_string_pretty(&output).unwrap());

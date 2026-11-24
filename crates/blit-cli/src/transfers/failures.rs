@@ -69,7 +69,7 @@ fn sanitize(text: &str) -> String {
 /// reference the clp-3 guards and the format pins compare against.
 #[cfg(test)]
 pub(crate) fn failure_block(files_failed: u64, failures: &[FileFailure]) -> Option<String> {
-    failure_block_styled(files_failed, failures, Palette::disabled())
+    failure_block_styled(files_failed, failures, 0, Palette::disabled())
 }
 
 /// clp-3: the same block, coloured. A [`Palette::disabled`] palette returns
@@ -81,9 +81,14 @@ pub(crate) fn failure_block(files_failed: u64, failures: &[FileFailure]) -> Opti
 /// PATH stays default-foreground: it is the thing the operator copies out of
 /// the terminal, and colouring it makes it harder to read against an
 /// arbitrary background, not easier.
+///
+/// `unretried` (cr-ssc6-1) counts the failures no retry pass was given; the
+/// block says so in a line of its own, made here from the count
+/// (cr-ecm34-7) — never a failure entry, whose name a real file can have.
 pub(crate) fn failure_block_styled(
     files_failed: u64,
     failures: &[FileFailure],
+    unretried: u64,
     palette: Palette,
 ) -> Option<String> {
     if files_failed == 0 {
@@ -100,10 +105,18 @@ pub(crate) fn failure_block_styled(
             palette.paint(Role::Failure, &sanitize(&failure.reason))
         ));
     }
+    if unretried > 0 {
+        block.push_str(&format!(
+            "\n  {}",
+            palette.paint(Role::Failure, &not_retried(unretried))
+        ));
+    }
     // The carried list is bounded (entry count and encoded bytes); the
     // count is exact. A shorter list therefore means "elided here", never
     // "forgotten" — and the destination logged every one of them.
-    let elided = files_failed.saturating_sub(failures.len() as u64);
+    let elided = files_failed
+        .saturating_sub(failures.len() as u64)
+        .saturating_sub(unretried);
     if elided > 0 {
         block.push_str(&palette.paint(
             Role::Muted,
@@ -117,13 +130,18 @@ pub(crate) fn failure_block_styled(
     Some(block)
 }
 
+/// The line for failures no retry pass was given (cr-ssc6-1).
+fn not_retried(unretried: u64) -> String {
+    format!("{unretried} file(s) were not retried: the retry set could not name them all")
+}
+
 /// Print the block after a human-readable summary. No-op on a clean run.
 ///
 /// clp-3: the block goes to STDOUT, so the palette is resolved against
 /// stdout's own terminal state — not the live row's, which owns stderr.
-pub(crate) fn print_failure_block(files_failed: u64, failures: &[FileFailure]) {
+pub(crate) fn print_failure_block(files_failed: u64, failures: &[FileFailure], unretried: u64) {
     let palette = Palette::detect(console::Term::stdout().features().colors_supported());
-    if let Some(block) = failure_block_styled(files_failed, failures, palette) {
+    if let Some(block) = failure_block_styled(files_failed, failures, unretried, palette) {
         println!("{block}");
     }
 }
@@ -162,6 +180,26 @@ mod tests {
     /// and the coloured block must equal the plain one byte for byte. This
     /// is what lets `failure_block` above stay the plain form and keeps
     /// every pre-clp-3 assertion in this file honest.
+    /// cr-ecm34-7: the failures no retry pass was given are a count, said in
+    /// a line of their own, and not elided again; a real file named as the
+    /// old synthesized entry was is a file like any other.
+    #[test]
+    fn the_unretried_count_is_its_own_line() {
+        let block = failure_block_styled(
+            4,
+            &[failure("(not retried)", "boom")],
+            2,
+            Palette::disabled(),
+        )
+        .expect("block");
+        assert!(block.contains("\n  (not retried): boom"), "{block}");
+        assert!(
+            block.contains("\n  2 file(s) were not retried: the retry set could not name them all"),
+            "{block}"
+        );
+        assert!(block.contains("… and 1 more"), "{block}");
+    }
+
     #[test]
     fn colour_never_changes_the_block_text() {
         use crate::style::ColorDepth;
@@ -199,7 +237,7 @@ mod tests {
             let palette = Palette::with_depth(depth);
             for (count, failures) in &cases {
                 let plain = failure_block(*count, failures).expect("a block");
-                let styled = failure_block_styled(*count, failures, palette).expect("a block");
+                let styled = failure_block_styled(*count, failures, 0, palette).expect("a block");
                 assert_ne!(plain, styled, "{depth:?}: nothing was coloured at all");
                 assert_eq!(
                     strip(&styled),
@@ -221,6 +259,7 @@ mod tests {
                 "keep/this/path.bin",
                 "Access is denied. (os error 5)",
             )],
+            0,
             Palette::with_depth(ColorDepth::TrueColor),
         )
         .expect("a block");

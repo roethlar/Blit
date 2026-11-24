@@ -88,15 +88,23 @@ fn delegated_pull_options(
 // orchestration body that builds it lives in `blit-core`
 // (`transfers::remote`).
 
-pub fn print_deferred_delegated_result(args: &TransferArgs, state: &DeferredDelegatedState) {
+pub fn print_deferred_delegated_result(
+    args: &TransferArgs,
+    state: &DeferredDelegatedState,
+    unretried: u64,
+) {
     if args.json {
-        print_delegated_json(&state.summary, &state.src, &state.dst);
+        print_delegated_json(&state.summary, &state.src, &state.dst, unretried);
     } else {
         describe_delegated_result(&state.summary, &state.src, &state.dst);
         // pfc-5 / cr-pfc4-1: the delegated re-encode carries the same
         // report, read through the outcome's accessors, and renders through
         // the one block every route shares.
-        super::failures::print_failure_block(state.files_failed(), &state.contained_failures());
+        super::failures::print_failure_block(
+            state.files_failed(),
+            &state.contained_failures(),
+            unretried,
+        );
     }
 }
 
@@ -246,7 +254,7 @@ async fn run_remote_to_remote_direct_inner(
     let state = outcome?;
     if !defer_output {
         super::render_result(lifecycle_trace, || {
-            print_deferred_delegated_result(args, &state);
+            print_deferred_delegated_result(args, &state, 0);
             Ok(())
         })?;
     }
@@ -274,6 +282,7 @@ fn print_delegated_json(
     summary: &DelegatedPullSummary,
     src: &RemoteEndpoint,
     dst: &RemoteEndpoint,
+    unretried: u64,
 ) {
     use serde_json::json;
     // pfc-5: same two fields, same shape, as every other route's document.
@@ -290,6 +299,7 @@ fn print_delegated_json(
         "source_peer_observed": summary.source_peer_observed,
         "files_failed": summary.files_failed,
         "failures": super::failures::failures_json(&failures),
+        "files_not_retried": unretried,
     });
     println!("{}", serde_json::to_string_pretty(&body).unwrap());
 }

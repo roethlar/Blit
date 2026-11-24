@@ -433,20 +433,16 @@ fn failed_identities(
     config_dir: &Path,
     record: &RunRecord,
 ) -> Result<(HashSet<(String, Option<String>)>, LoggedLeftovers)> {
-    use crate::transfers::retry::UNRETRIED_PATH;
+    // cr-ecm34-7: every recorded failure is a file, whatever its name; the
+    // failures no retry pass was given are not in the list, and the count
+    // says the list is short.
     let mut known: HashSet<(String, Option<String>)> = record
         .failures
         .iter()
-        .filter(|failure| failure.path != UNRETRIED_PATH)
         .map(|failure| (failure.path.clone(), failure.raw.clone()))
         .collect();
     let short = |known: &HashSet<(String, Option<String>)>| {
-        record.failures_truncated
-            || record
-                .failures
-                .iter()
-                .any(|failure| failure.path == UNRETRIED_PATH)
-            || (known.len() as u64) < record.files_failed
+        record.failures_truncated || (known.len() as u64) < record.files_failed
     };
     let mut logged = LoggedLeftovers::default();
     // Review cr-jl4fix4-1: a record from before its lists kept identities,
@@ -2164,6 +2160,37 @@ mod retry_name_tests {
     /// Review cr-jl4fix4-1: an old record with a whole failure list still
     /// has this machine's log read for an ambiguous raw-named failure, and
     /// a finished log that names the identity makes the file the run's own.
+    /// cr-ecm34-7: a file whose name is the old synthesized entry's,
+    /// `(not retried)`, is a failed file like any other: the record that
+    /// names it and counts it is whole, and its retry asks for it — no log
+    /// needed. It was discarded as the placeholder, and the retry refused,
+    /// knowing none of the one file that failed.
+    #[test]
+    fn a_failure_named_as_the_old_placeholder_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = RunRecord::starting(
+            "6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c",
+            &JobSpec::new(
+                "m1",
+                "copy",
+                "/".into(),
+                blit_core::job_record::SpecEndpoint::Local { path: "/a/".into() },
+                blit_core::job_record::SpecEndpoint::Local { path: "/b/".into() },
+                Default::default(),
+                None,
+            ),
+        );
+        record.files_failed = 1;
+        record.failures = vec![blit_core::job_record::Failure {
+            path: "(not retried)".into(),
+            reason: "denied".into(),
+            raw: None,
+        }];
+        let (failed, logged) = failed_identities(dir.path(), &record).expect("a whole record");
+        assert_eq!(failed, [("(not retried)".to_string(), None)].into());
+        assert!(!logged.read, "no log was needed");
+    }
+
     /// D-2026-11-24-1 (cr-ecm33-5): a log marks a file left in place by its
     /// event's field, never by its words — a failure whose path and reason
     /// both hold the very sentence is not this run's leftover.

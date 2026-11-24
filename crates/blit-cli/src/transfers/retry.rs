@@ -260,27 +260,17 @@ impl PassFailures {
         self.unretried = self.unretried.saturating_add(other.unretried);
     }
 
-    /// Mark every remaining failure as one that survived a retry, and
-    /// name the ones no pass could reach — once: the report says whether
-    /// it was marked (D-2026-11-24-1), not its reasons' words.
+    /// Mark every remaining failure as one that survived a retry — once:
+    /// the report says whether it was marked (D-2026-11-24-1), not its
+    /// reasons' words. The ones no pass could reach stay a count,
+    /// `unretried`, which the report renders as its own line: never a
+    /// failure of a made-up name, which a real file can have (cr-ecm34-7).
     fn mark_retried(&mut self) {
         if std::mem::replace(&mut self.retried, true) {
             return;
         }
         for failure in &mut self.failures {
             failure.reason.push_str(RETRIED_SUFFIX);
-        }
-        if self.unretried > 0 {
-            self.failures.push(FileFailure {
-                relative_path: UNRETRIED_PATH.to_string(),
-                reason: format!(
-                    "{} file(s) were not retried: the retry set could not name them all; \
-                     re-run to converge",
-                    self.unretried
-                ),
-                raw_relative_path: None,
-                left_in_place: false,
-            });
         }
     }
 
@@ -389,10 +379,6 @@ impl PassFailures {
 
 /// Appended to the reason of a file that failed again on a retry pass.
 pub(crate) const RETRIED_SUFFIX: &str = " (retried)";
-
-/// The path column of the synthesized report entry for failures no retry
-/// pass was given (cr-ssc6-1).
-pub(crate) const UNRETRIED_PATH: &str = "(not retried)";
 
 /// cr-ssc6-3: `--detach` hands the transfer to the destination daemon
 /// and exits before any summary exists, so no retry pass can run on this
@@ -1155,11 +1141,10 @@ mod tests {
             out.final_failures.files_failed, 2,
             "the unclassified two stay failed"
         );
-        assert!(out
-            .final_failures
-            .failures
-            .iter()
-            .any(|f| f.reason.starts_with("2 file(s) were not retried")));
+        assert_eq!(
+            out.final_failures.unretried, 2,
+            "reported as not retried, by count (cr-ecm34-7)"
+        );
     }
 
     /// 2026-10-07 defect (b): Ctrl-C during the retry wait stops the
@@ -1337,23 +1322,16 @@ mod tests {
         .expect("loop");
         assert_eq!(out.passes_run, 1);
         // cr-ssc6-1: the three failures the report could not name were
-        // never retried, so they are still failed — counted, named once
-        // as a synthesized entry, and enough for the move gate to refuse.
+        // never retried, so they are still failed — counted, and enough for
+        // the move gate to refuse. cr-ecm34-7: a count, not a failure of a
+        // made-up name.
         assert_eq!(out.final_failures.files_failed, 3);
         assert_eq!(out.final_failures.unretried, 3);
-        let synth: Vec<_> = out
-            .final_failures
-            .failures
-            .iter()
-            .filter(|f| f.relative_path == UNRETRIED_PATH)
-            .collect();
-        assert_eq!(
-            synth.len(),
-            1,
-            "one synthesized entry: {:?}",
+        assert!(
+            out.final_failures.failures.is_empty(),
+            "no synthesized entry: {:?}",
             out.final_failures.failures
         );
-        assert!(synth[0].reason.starts_with("3 file(s) were not retried"));
         assert!(
             blit_core::transfers::failures::refuse_source_delete_on_failures(
                 "src",
@@ -1520,12 +1498,8 @@ mod cr_fix2_2_tests {
         );
         assert_eq!(out.final_failures.files_failed, 2);
         assert!(
-            out.final_failures
-                .failures
-                .iter()
-                .any(|f| f.relative_path == UNRETRIED_PATH
-                    && f.reason.starts_with("2 file(s) were not retried")),
-            "{:?}",
+            out.final_failures.failures.is_empty(),
+            "a count, not a failure of a made-up name (cr-ecm34-7): {:?}",
             out.final_failures.failures
         );
         assert!(

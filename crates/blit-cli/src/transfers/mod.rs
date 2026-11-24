@@ -847,6 +847,7 @@ async fn run_transfer_inner(
                     summary.duration,
                     &src,
                     &dst,
+                    retry.final_failures.unretried,
                 )
             })?;
             if retry.interrupted {
@@ -904,7 +905,7 @@ async fn run_transfer_inner(
                 retry.interrupted,
             );
             render_result(lifecycle_trace, || {
-                remote::print_deferred_push_result(args, &state);
+                remote::print_deferred_push_result(args, &state, retry.final_failures.unretried);
                 Ok(())
             })?;
             if retry.interrupted {
@@ -959,7 +960,7 @@ async fn run_transfer_inner(
                 retry.interrupted,
             );
             render_result(lifecycle_trace, || {
-                remote::print_deferred_pull_result(args, &state);
+                remote::print_deferred_pull_result(args, &state, retry.final_failures.unretried);
                 Ok(())
             })?;
             if retry.interrupted {
@@ -1025,7 +1026,11 @@ async fn run_transfer_inner(
                     retry.interrupted,
                 );
                 render_result(lifecycle_trace, || {
-                    remote_remote_direct::print_deferred_delegated_result(args, &state);
+                    remote_remote_direct::print_deferred_delegated_result(
+                        args,
+                        &state,
+                        retry.final_failures.unretried,
+                    );
                     Ok(())
                 })?;
                 if retry.interrupted {
@@ -1234,6 +1239,7 @@ async fn run_move_inner(
                     summary.duration,
                     &src_path,
                     &dst_path,
+                    retry.final_failures.unretried,
                 )
             })?;
             Ok(ExitCode::SUCCESS)
@@ -1325,7 +1331,7 @@ async fn run_move_inner(
             delete_remote_path(&remote, sent_tickets).await?;
             note_source_removed(args, &format_remote_endpoint(&remote));
             render_result(lifecycle_trace, || {
-                remote::print_deferred_pull_result(args, &state);
+                remote::print_deferred_pull_result(args, &state, retry.final_failures.unretried);
                 Ok(())
             })?;
             Ok(ExitCode::SUCCESS)
@@ -1411,7 +1417,7 @@ async fn run_move_inner(
             }
             note_source_removed(args, &src_path.display().to_string());
             render_result(lifecycle_trace, || {
-                remote::print_deferred_push_result(args, &state);
+                remote::print_deferred_push_result(args, &state, retry.final_failures.unretried);
                 Ok(())
             })?;
             Ok(ExitCode::SUCCESS)
@@ -1506,7 +1512,11 @@ async fn run_move_inner(
             delete_remote_path(&src, sent_tickets).await?;
             note_source_removed(args, &format_remote_endpoint(&src));
             render_result(lifecycle_trace, || {
-                remote_remote_direct::print_deferred_delegated_result(args, &state);
+                remote_remote_direct::print_deferred_delegated_result(
+                    args,
+                    &state,
+                    retry.final_failures.unretried,
+                );
                 Ok(())
             })?;
             Ok(ExitCode::SUCCESS)
