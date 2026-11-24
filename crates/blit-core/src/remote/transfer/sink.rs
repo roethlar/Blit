@@ -1649,11 +1649,28 @@ impl TransferSink for FsTransferSink {
     /// reason first, the destination's account after it, and its flag.
     async fn fail_resume_record(&self, relative_path: &str, reason: &str) -> Result<SinkOutcome> {
         let held = self.take_resume_block_failure(relative_path);
+        // cr-ecm35-4: a fresh partial this run made and holds stays, unstamped
+        // and one byte longer than its source, for the next run to resume —
+        // and the record says so.
+        let made = self
+            .resume_files
+            .lock()
+            .expect("resume-files lock poisoned")
+            .get(relative_path)
+            .is_some_and(|partial| partial.made);
         self.forget_resume(relative_path);
         Ok(match held {
             Some((held, left)) => {
                 SinkOutcome::failed_leaving(relative_path, format!("{reason}; {held}"), left)
             }
+            None if made => SinkOutcome::failed_leaving(
+                relative_path,
+                format!(
+                    "{reason}; {INCOMPLETE_LEFT_IN_PLACE}, one byte longer than the source, for the \
+                     next run to resume"
+                ),
+                true,
+            ),
             None => SinkOutcome::failed(relative_path, reason),
         })
     }
@@ -2814,6 +2831,10 @@ fn mark_unfinished(file: &std::fs::File, source_size: u64) -> std::io::Result<()
 struct HeldPartial {
     file: std::fs::File,
     identity: Option<(u64, u64)>,
+    /// cr-ecm35-4: this run made it — a fresh partial — so it is this run's
+    /// to account for when the record closes failed: left in place, one byte
+    /// longer than its source, for the next run to resume.
+    made: bool,
 }
 
 #[cfg(unix)]
@@ -2822,9 +2843,13 @@ impl HeldPartial {
     /// completion with it. A look that failed was dropped, and with it the
     /// completion's check that the file is still the one at the name: one
     /// put there since was reported complete.
-    fn of(file: std::fs::File, dst: &Path) -> Result<Self> {
+    fn of(file: std::fs::File, dst: &Path, made: bool) -> Result<Self> {
         let identity = Self::identity_of(&file, dst)?;
-        Ok(Self { file, identity })
+        Ok(Self {
+            file,
+            identity,
+            made,
+        })
     }
 
     /// Which file `file` is — the one held for `dst`.
@@ -2958,15 +2983,16 @@ fn hold_partial(
         None => {}
     }
     let _ = baseline;
-    let held = hold_partial_unfinished(dst, total_size, within);
+    let held = hold_partial_unfinished_made(dst, total_size, within);
     // cr-ecm23-2: on Unix every block and the completion go through what
     // the hold holds, so a hold that cannot be had is the file's failure:
     // its first look that failed was dropped, and the completion, holding
     // nothing, opened the name and reported the file written.
     #[cfg(unix)]
     {
-        let file = held.with_context(|| format!("holding the resume partial {}", dst.display()))?;
-        HeldPartial::of(file, dst).map(Some)
+        let (file, made) =
+            held.with_context(|| format!("holding the resume partial {}", dst.display()))?;
+        HeldPartial::of(file, dst, made).map(Some)
     }
     // Elsewhere than Unix the partial is written by its name, as before.
     #[cfg(not(unix))]
@@ -3078,7 +3104,11 @@ fn hold_whole(
         None => resolved.fresh_exclusive(dst, unfinished, ready)?,
     };
     while_a_file_is_made(dst);
-    Ok(Some(HeldPartial { file, identity }))
+    Ok(Some(HeldPartial {
+        file,
+        identity,
+        made: true,
+    }))
 }
 
 #[cfg(unix)]
@@ -3158,7 +3188,11 @@ fn hold_hashed(
             .with_context(|| format!("marking {} unfinished", dst.display()))
             .map_err(undo)?;
     }
-    Ok(Some(HeldPartial { file, identity }))
+    Ok(Some(HeldPartial {
+        file,
+        identity,
+        made: false,
+    }))
 }
 
 /// Test seam (cr-ecm28-4): marking a hashed hold's partial unfinished
@@ -3227,11 +3261,23 @@ fn hold_fault(_dst: &Path) -> Result<()> {
 /// than Unix its failure is passed over — a partial this end cannot open
 /// for writing cannot be patched either, so its blocks fail and the file is
 /// reported; on Unix it is the file's failure (cr-ecm23-2).
+#[cfg(all(test, unix))]
 fn hold_partial_unfinished(
     dst: &Path,
     total_size: u64,
     within: Option<&Path>,
 ) -> std::io::Result<std::fs::File> {
+    hold_partial_unfinished_made(dst, total_size, within).map(|(file, _)| file)
+}
+
+/// [`hold_partial_unfinished`], saying whether it made the partial
+/// (cr-ecm35-4): on Unix by a creation that fails if the name is taken, and
+/// only then by opening what has it. Elsewhere it cannot tell, and says not.
+fn hold_partial_unfinished_made(
+    dst: &Path,
+    total_size: u64,
+    within: Option<&Path>,
+) -> std::io::Result<(std::fs::File, bool)> {
     // cr-ecm19-4: a partial made here is made private (600), and one here
     // already is made so through this handle — whatever the mask it was
     // made under — before a block patches it. cr-ecm24-1: on Unix it is had
@@ -3240,7 +3286,15 @@ fn hold_partial_unfinished(
     #[cfg(unix)]
     let opened = crate::copy::resolve_destination(dst, within)
         .map_err(|error| std::io::Error::other(format!("{error:#}")))
-        .and_then(|resolved| resolved.open(libc::O_WRONLY | libc::O_CREAT));
+        .and_then(
+            |resolved| match resolved.open(libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL) {
+                Ok(file) => Ok((file, true)),
+                Err(taken) if taken.kind() == std::io::ErrorKind::AlreadyExists => {
+                    resolved.open(libc::O_WRONLY).map(|file| (file, false))
+                }
+                Err(error) => Err(error),
+            },
+        );
     #[cfg(not(unix))]
     let opened = {
         let _ = within;
@@ -3249,8 +3303,9 @@ fn hold_partial_unfinished(
             .create(true)
             .truncate(false)
             .open(dst)
+            .map(|file| (file, false))
     };
-    opened.and_then(|file| {
+    opened.and_then(|(file, made)| {
         while_a_file_is_made(dst);
         #[cfg(unix)]
         identity_fault(dst)?;
@@ -3267,7 +3322,7 @@ fn hold_partial_unfinished(
         if meta.is_file() && meta.len() <= total_size {
             mark_unfinished(&file, total_size)?;
         }
-        Ok(file)
+        Ok((file, made))
     })
 }
 
@@ -9895,6 +9950,49 @@ mod cr_win_1_tests {
         assert!(outcome.failures[0]
             .reason
             .starts_with("source: read error; "));
+    }
+
+    /// cr-ecm35-4: a record the source closes failed, whose fresh partial this
+    /// run made and holds, says the partial is left — one byte longer than
+    /// its source, for the next run to resume. It was reported as leaving
+    /// nothing; and one that reused the hashed file says nothing left.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_resume_record_says_the_partial_it_made_is_left() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        sink.note_resume_baseline("fresh.bin", ResumeBaseline::Whole);
+        sink.hold_resume_partial("fresh.bin", 8).await.unwrap();
+        assert_eq!(sink.held_resume_partials(), 1, "made and held");
+        let outcome = sink
+            .fail_resume_record("fresh.bin", "source: read error")
+            .await
+            .unwrap();
+        assert!(outcome.failures[0].left_in_place, "{outcome:?}");
+        assert!(outcome.left_in_place_holds("fresh.bin"));
+        assert_eq!(std::fs::metadata(dst.join("fresh.bin")).unwrap().len(), 9);
+
+        let at = dst.join("hashed.bin");
+        std::fs::write(&at, b"0123456789").unwrap();
+        sink.note_resume_baseline(
+            "hashed.bin",
+            ResumeBaseline::Hashed(crate::moved::Version::of(&std::fs::metadata(&at).unwrap())),
+        );
+        sink.hold_resume_partial("hashed.bin", 10).await.unwrap();
+        let outcome = sink
+            .fail_resume_record("hashed.bin", "source: read error")
+            .await
+            .unwrap();
+        assert!(!outcome.failures[0].left_in_place, "{outcome:?}");
     }
 
     /// cr-ecm22-5: a record the source closes failed lets its partial go —
