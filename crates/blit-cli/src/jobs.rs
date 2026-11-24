@@ -596,6 +596,22 @@ fn failed_identities(
                 record.run_id
             );
         }
+        // cr-ecm38-7: nor more, once the log has completed the list — the
+        // record's own check (cr-ecm37-6) holds for what its log adds: a log
+        // an earlier blit wrote can name a long file twice, once by a
+        // rendering of its name, and which is the file cannot be told.
+        if (known.len() as u64) > record.files_failed {
+            eyre::bail!(
+                "job {} failed {} files, and with its log it names {} — a log from an earlier \
+                 blit can name a long file twice, once by a shortened rendering of its name, and \
+                 which entry is the file cannot be told — so nothing is retried; run the whole \
+                 job again instead (`blit jobs save {} <name>`, then `blit jobs run <name>`)",
+                record.run_id,
+                record.files_failed,
+                known.len(),
+                record.run_id
+            );
+        }
     }
     Ok((known, logged))
 }
@@ -2392,6 +2408,62 @@ mod retry_name_tests {
         assert_eq!(failed, [("real.txt".to_string(), None)].into());
     }
 
+    /// cr-ecm38-7: a record whose list was cut, completed from a whole log
+    /// that names a long file and a shortened rendering of it, names more
+    /// files than it failed: nothing is retried. Retried, the rendering was
+    /// asked for as a file.
+    #[test]
+    fn a_list_its_log_completes_names_no_more_files_than_it_failed() {
+        use blit_core::job_log::{EventBody, Outcome, Role, RunInfo};
+        use blit_core::run_log::LogPlace;
+        let dir = tempfile::tempdir().unwrap();
+        let spec = JobSpec::new(
+            "m1",
+            "copy",
+            "/".into(),
+            blit_core::job_record::SpecEndpoint::Local { path: "/a/".into() },
+            blit_core::job_record::SpecEndpoint::Local { path: "/b/".into() },
+            Default::default(),
+            None,
+        );
+        let long = format!("{}/name.bin", "d".repeat(4600));
+        let rendering = format!("[truncated]…{}", &long[long.len() - 4000..]);
+        let place = LogPlace {
+            dir: dir.path().join("jobs").join("logs"),
+            participant: "m1".into(),
+            keep: 50,
+            finished: None,
+        };
+        let cut = |run_id: &str| {
+            let mut record = RunRecord::starting(run_id, &spec);
+            record.files_failed = 1;
+            record.failures_truncated = true;
+            record
+        };
+        let logged = |run_id: &str, names: &[&String]| {
+            let writer = place
+                .start(run_id, 1, Role::Initiator, RunInfo::default())
+                .expect("a log");
+            for name in names {
+                writer.record(EventBody::FileFailed {
+                    path: (*name).clone(),
+                    reason: "source: missing".into(),
+                    raw: None,
+                    left_in_place: Some(false),
+                });
+            }
+            assert!(writer.finish(Outcome::Failed, None).complete);
+        };
+        let twice = "7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d";
+        logged(twice, &[&long, &rendering]);
+        assert!(failed_identities(dir.path(), &cut(twice)).is_err());
+
+        let once = "7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e";
+        logged(once, &[&long]);
+        let (failed, _) = failed_identities(dir.path(), &cut(once)).expect("completed by its log");
+        assert_eq!(failed, [(long, None)].into());
+    }
+
     /// cr-ecm37-6: a record that names more files than it failed — an earlier
     /// blit's, which saved a long name twice, once by a shortened rendering
     /// of it — is not retried: which entry is the file cannot be told.
@@ -2692,12 +2764,17 @@ mod retry_name_tests {
             });
             assert!(writer.finish(Outcome::Failed, None).complete);
         }
+        // cr-ecm38-7: two files failed, one in each role's log, and the
+        // record counts them both — a list its log completes names no more
+        // than the record counts.
         record.run_id = crossed.into();
+        record.files_failed = 2;
         let (_, logged) = failed_identities(dir.path(), &record).unwrap();
         assert_eq!(
             logged.left,
             [(text.clone(), raw.clone()), (other_text, other_raw)].into()
         );
+        record.files_failed = 1;
 
         // Review cr-jl4fix6-1: one machine's sessions in one role are one
         // stream — attempt 1 leaves a copy, attempt 2 lands the file, a
