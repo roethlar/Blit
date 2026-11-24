@@ -450,7 +450,7 @@ impl RunLog {
                         path: path.clone(),
                         reason: reason.clone(),
                         raw: raw(path),
-                        left_in_place: *left_in_place,
+                        left_in_place: Some(*left_in_place),
                     };
                     active.failed.insert((path.clone(), raw(path)));
                     vec![body]
@@ -624,7 +624,7 @@ impl RunLog {
                             path: path.clone(),
                             reason: NO_REASON_REPORTED.to_string(),
                             raw,
-                            left_in_place,
+                            left_in_place: Some(left_in_place),
                         });
                     }
                 }
@@ -644,7 +644,7 @@ impl RunLog {
                             path: path.clone(),
                             reason: failure.reason.clone(),
                             raw,
-                            left_in_place,
+                            left_in_place: Some(left_in_place),
                         });
                     }
                 }
@@ -984,7 +984,7 @@ mod tests {
                 .unwrap()
                 .filter_map(|line| match line.unwrap() {
                     LogLine::Event(event) => match event.body {
-                        EventBody::FileFailed { left_in_place, .. } => Some(left_in_place),
+                        EventBody::FileFailed { left_in_place, .. } => left_in_place,
                         _ => None,
                     },
                     _ => None,

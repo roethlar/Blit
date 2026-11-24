@@ -910,10 +910,14 @@ pub struct LogRead {
     pub ended: Option<(u64, Outcome, Option<String>)>,
     pub summary: Option<crate::job_log::Summary>,
     pub failures: Vec<Failure>,
-    /// The failures whose reason says the write left its own incomplete
-    /// copy (a log keeps each reason whole), by text and escaped bytes
-    /// (review cr-jl4fix2-1: the status is the entry's, not its text's).
+    /// The failures whose event says the write left its own incomplete
+    /// copy, by text and escaped bytes (review cr-jl4fix2-1: the status is
+    /// the entry's, not its text's).
     pub left_in_place: Vec<(String, Option<String>)>,
+    /// cr-ecm34-6: a failure's event does not say whether its write left
+    /// its copy — a log written before the field — so `left_in_place` is
+    /// not the whole list.
+    pub left_unknown: bool,
 }
 
 impl LogRead {
@@ -943,7 +947,8 @@ impl LogRead {
                 raw,
                 left_in_place,
             } => {
-                if left_in_place
+                self.left_unknown |= left_in_place.is_none();
+                if left_in_place == Some(true)
                     && !self
                         .left_in_place
                         .iter()
@@ -1008,7 +1013,7 @@ impl LogRead {
         ended.failures_truncated = truncated;
         (ended.left_in_place, ended.left_in_place_raw) = self.left_in_place_lists();
         ended.left_in_place_exact = true;
-        ended.left_in_place_truncated = truncated;
+        ended.left_in_place_truncated = truncated || self.left_unknown;
         ended
     }
 
@@ -1532,7 +1537,7 @@ mod tests {
             path: "a.txt".into(),
             reason: "denied".into(),
             raw: None,
-            left_in_place: false,
+            left_in_place: Some(false),
         };
         let mut read = LogRead {
             logs: 1,
@@ -1566,10 +1571,38 @@ mod tests {
                     crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
                 ),
                 raw: None,
-                left_in_place: false,
+                left_in_place: Some(false),
             },
         ));
         assert!(words.left_in_place.is_empty(), "words say nothing");
+        // cr-ecm34-6: an event that does not say — a log from before the
+        // field — leaves the list not whole, and the record built from the
+        // log says so; one that says `false` does not.
+        let mut said = read.clone();
+        said.read_line(event(
+            5,
+            EventBody::FileFailed {
+                path: "c.txt".into(),
+                reason: "denied".into(),
+                raw: None,
+                left_in_place: Some(false),
+            },
+        ));
+        assert!(!said.left_unknown);
+        let record = RunRecord::starting(RUN, &spec());
+        assert!(!said.ended_record(&record, false).left_in_place_truncated);
+        let mut unsaid = read.clone();
+        unsaid.read_line(event(
+            5,
+            EventBody::FileFailed {
+                path: "c.txt".into(),
+                reason: "denied".into(),
+                raw: None,
+                left_in_place: None,
+            },
+        ));
+        assert!(unsaid.left_unknown);
+        assert!(unsaid.ended_record(&record, false).left_in_place_truncated);
         let mut own = read.clone();
         own.read_line(event(
             5,
@@ -1580,7 +1613,7 @@ mod tests {
                     crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
                 ),
                 raw: None,
-                left_in_place: true,
+                left_in_place: Some(true),
             },
         ));
         assert_eq!(own.left_in_place, [("b.txt".to_string(), None)]);
@@ -1620,7 +1653,7 @@ mod tests {
                     crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
                 ),
                 raw: Some("dup\\xff".into()),
-                left_in_place: true,
+                left_in_place: Some(true),
             },
         ));
         raw_left.read_line(event(

@@ -274,11 +274,13 @@ pub enum EventBody {
         reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         raw: Option<String>,
-        /// D-2026-11-24-1: its failure left this run's own incomplete copy
-        /// at the destination — never read from `reason`. A log written
-        /// before the field was has none, and is read as nothing left.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        left_in_place: bool,
+        /// D-2026-11-24-1: whether its failure left this run's own
+        /// incomplete copy at the destination — never read from `reason`.
+        /// Written always, `false` included (cr-ecm34-6): a log written
+        /// before the field was has none, and that is `None` — not known,
+        /// never taken for `false`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        left_in_place: Option<bool>,
     },
     /// Work outstanding but nothing moving for `idle_ms`.
     Stall { idle_ms: u64, detail: String },
@@ -1834,6 +1836,26 @@ mod tests {
     use filetime::FileTime;
     use tempfile::TempDir;
 
+    /// cr-ecm34-6: whether a failure left its copy is written always —
+    /// `false` too — so a log says it or says nothing; an event without
+    /// the field (a log from before it) reads as unknown, never `false`.
+    #[test]
+    fn a_failures_left_in_place_is_written_always_and_absent_is_unknown() {
+        let said = |left| EventBody::FileFailed {
+            path: "a".into(),
+            reason: "denied".into(),
+            raw: None,
+            left_in_place: left,
+        };
+        let mut value = serde_json::to_value(said(Some(false))).unwrap();
+        assert_eq!(value["left_in_place"], serde_json::Value::Bool(false));
+        value.as_object_mut().unwrap().remove("left_in_place");
+        match serde_json::from_value::<EventBody>(value).unwrap() {
+            EventBody::FileFailed { left_in_place, .. } => assert_eq!(left_in_place, None),
+            other => panic!("{other:?}"),
+        }
+    }
+
     fn key(run: &str) -> LogKey {
         LogKey::new(run, "m1", Role::Destination, 1).unwrap()
     }
@@ -2038,7 +2060,7 @@ mod tests {
                 path: "b".into(),
                 reason: "denied".into(),
                 raw: None,
-                left_in_place: false,
+                left_in_place: Some(false),
             },
             EventBody::FileDeleted {
                 path: "c".into(),
@@ -2128,13 +2150,13 @@ mod tests {
                 path: "a".into(),
                 reason: "r".into(),
                 raw: None,
-                left_in_place: false,
+                left_in_place: Some(false),
             },
         ))
         .unwrap();
         assert_eq!(
             line,
-            r#"{"ts_ms":1002,"seq":2,"kind":"file-failed","path":"a","reason":"r"}"#
+            r#"{"ts_ms":1002,"seq":2,"kind":"file-failed","path":"a","reason":"r","left_in_place":false}"#
         );
         let end = serde_json::to_string(&event(
             3,
@@ -2901,7 +2923,7 @@ mod tests {
                 path: "caf\u{fffd}".into(),
                 reason: "denied".into(),
                 raw: Some("caf\\xe9".into()),
-                left_in_place: false,
+                left_in_place: Some(false),
             }),
             "FAILED   raw:caf\\xe9: denied"
         );
@@ -2910,7 +2932,7 @@ mod tests {
                 path: "c".into(),
                 reason: "denied".into(),
                 raw: None,
-                left_in_place: false,
+                left_in_place: Some(false),
             }),
             "FAILED   c: denied"
         );

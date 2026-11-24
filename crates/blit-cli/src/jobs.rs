@@ -385,6 +385,9 @@ struct LoggedLeftovers {
     /// lost nothing: it settles a file's status both ways.
     complete: bool,
     left: HashSet<(String, Option<String>)>,
+    /// cr-ecm34-6: a failure's event does not say whether it left its copy
+    /// (a log written before the field): `left` is not the whole answer.
+    left_unknown: bool,
 }
 
 /// The failed files that left the run's own incomplete copy, by identity.
@@ -410,7 +413,7 @@ fn own_leftovers(
         let ambiguous = !record.left_in_place_exact
             && raw.is_some()
             && record.left_in_place.iter().any(|left| left == path);
-        if ambiguous && !(logged.read && logged.complete) {
+        if ambiguous && !(logged.read && logged.complete && !logged.left_unknown) {
             eyre::bail!(
                 "job {} ran with --ignore-existing, and its record (from an earlier blit) \
                  cannot say whether the failed file {} left its own incomplete copy at \
@@ -494,8 +497,12 @@ fn failed_identities(
                         left_in_place,
                         ..
                     } => {
-                        if left_in_place {
-                            left.insert((path.clone(), raw.clone()));
+                        match left_in_place {
+                            Some(true) => {
+                                left.insert((path.clone(), raw.clone()));
+                            }
+                            Some(false) => {}
+                            None => logged.left_unknown = true,
                         }
                         still_failed.insert((path, raw));
                     }
@@ -2125,6 +2132,7 @@ mod retry_name_tests {
             read: true,
             complete: false,
             left: [(text.clone(), raw.clone())].into(),
+            left_unknown: false,
         };
         assert_eq!(
             own_leftovers(&record, &failed, &names_it).unwrap(),
@@ -2136,6 +2144,7 @@ mod retry_name_tests {
             read: true,
             complete: true,
             left: HashSet::new(),
+            left_unknown: false,
         };
         assert!(own_leftovers(&record, &failed, &complete_without)
             .unwrap()
@@ -2144,8 +2153,19 @@ mod retry_name_tests {
             read: true,
             complete: false,
             left: HashSet::new(),
+            left_unknown: false,
         };
         assert!(own_leftovers(&record, &failed, &incomplete_without).is_err());
+        // cr-ecm34-6: a complete log whose events do not say — written
+        // before the field — cannot settle it either: refused, never read
+        // as "nothing left".
+        let complete_unsaid = LoggedLeftovers {
+            read: true,
+            complete: true,
+            left: HashSet::new(),
+            left_unknown: true,
+        };
+        assert!(own_leftovers(&record, &failed, &complete_unsaid).is_err());
         // Old record, a raw-named failure whose text is not in the list:
         // not the run's own, no ambiguity.
         let other: HashSet<(String, Option<String>)> =
@@ -2214,13 +2234,13 @@ mod retry_name_tests {
             path: format!("{sentence}.txt"),
             reason: format!("source: cannot open: {sentence}"),
             raw: None,
-            left_in_place: false,
+            left_in_place: Some(false),
         });
         writer.record(EventBody::FileFailed {
             path: "left.txt".into(),
             reason: "write failed".into(),
             raw: None,
-            left_in_place: true,
+            left_in_place: Some(true),
         });
         assert!(writer.finish(Outcome::Failed, None).complete);
         let mut record = RunRecord::starting(
@@ -2269,7 +2289,7 @@ mod retry_name_tests {
                 blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
             ),
             raw: raw.clone(),
-            left_in_place: true,
+            left_in_place: Some(true),
         });
         let report = writer.finish(Outcome::Failed, None);
         assert!(report.complete, "{report:?}");
@@ -2315,7 +2335,7 @@ mod retry_name_tests {
             path: text.clone(),
             reason: "write failed".into(),
             raw: raw.clone(),
-            left_in_place: false,
+            left_in_place: Some(false),
         });
         writer.record(EventBody::LogIncomplete {
             reason: "disk full".into(),
@@ -2341,7 +2361,7 @@ mod retry_name_tests {
                 blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
             ),
             raw: raw.clone(),
-            left_in_place: true,
+            left_in_place: Some(true),
         });
         assert!(writer.finish(Outcome::Failed, None).complete);
         let writer = place
@@ -2355,7 +2375,7 @@ mod retry_name_tests {
             path: text.clone(),
             reason: "write failed".into(),
             raw: raw.clone(),
-            left_in_place: false,
+            left_in_place: Some(false),
         });
         assert!(writer.finish(Outcome::Failed, None).complete);
         record.run_id = two_roles.into();
@@ -2378,7 +2398,7 @@ mod retry_name_tests {
                 blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
             ),
             raw: raw.clone(),
-            left_in_place: true,
+            left_in_place: Some(true),
         });
         writer.record(EventBody::FileSent {
             path: text.clone(),
@@ -2410,7 +2430,7 @@ mod retry_name_tests {
                 path: mine.clone(),
                 reason: marker.clone(),
                 raw: mine_raw.clone(),
-                left_in_place: true,
+                left_in_place: Some(true),
             });
             writer.record(EventBody::FileCopied {
                 path: theirs.clone(),
@@ -2438,7 +2458,7 @@ mod retry_name_tests {
                     path: text.clone(),
                     reason: marker.clone(),
                     raw: raw.clone(),
-                    left_in_place: true,
+                    left_in_place: Some(true),
                 },
             ),
             (
@@ -2455,7 +2475,7 @@ mod retry_name_tests {
                     path: text.clone(),
                     reason: "write failed".into(),
                     raw: raw.clone(),
-                    left_in_place: false,
+                    left_in_place: Some(false),
                 },
             ),
         ] {
@@ -2481,7 +2501,7 @@ mod retry_name_tests {
             path: text.clone(),
             reason: marker.clone(),
             raw: raw.clone(),
-            left_in_place: true,
+            left_in_place: Some(true),
         });
         assert!(writer.finish(Outcome::Failed, None).complete);
         let elsewhere = LogPlace {
