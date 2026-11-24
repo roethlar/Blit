@@ -344,20 +344,31 @@ fn render_live_row_styled(state: &LiveRowState, width: usize, palette: Palette) 
             format_bytes(totals.bytes)
         ),
     };
-    let (head, file) = match state.phase {
+    // The row, and the phase it is showing — which is not always
+    // `state.phase`: an up-to-date tree renders the walk, and a
+    // diff-complete tree renders the copy row before the first byte lands.
+    // Decided here, with the words (D-2026-11-24-1), never read back from
+    // them.
+    let (head, file, shown) = match state.phase {
         // The pass deletes inside one blocking call, so there is no
         // count to move until it is over.
         LivePhase::Deleting => (
             "deleting • removing extraneous destination entries".to_string(),
             None,
+            LivePhase::Deleting,
         ),
-        LivePhase::Copying => (copy_row(), state.current_file.as_deref()),
+        LivePhase::Copying => (
+            copy_row(),
+            state.current_file.as_deref(),
+            LivePhase::Copying,
+        ),
         LivePhase::Enumerating | LivePhase::Comparing => {
             if !state.diff_complete {
                 match state.phase {
                     LivePhase::Enumerating => (
                         format!("enumerating • {} files found", totals.enumerated_files),
                         None,
+                        LivePhase::Enumerating,
                     ),
                     _ => (
                         format!(
@@ -365,6 +376,7 @@ fn render_live_row_styled(state: &LiveRowState, width: usize, palette: Palette) 
                             totals.enumerated_files, totals.manifest_files
                         ),
                         None,
+                        LivePhase::Comparing,
                     ),
                 }
             } else if totals.manifest_files == 0 {
@@ -374,26 +386,19 @@ fn render_live_row_styled(state: &LiveRowState, width: usize, palette: Palette) 
                 (
                     format!("up to date • {} files checked", totals.enumerated_files),
                     None,
+                    LivePhase::Enumerating,
                 )
             } else {
                 // Need list final, first byte not yet observed — the
                 // apply pipeline is already running, so the copy row is
                 // the honest one.
-                (copy_row(), state.current_file.as_deref())
+                (
+                    copy_row(),
+                    state.current_file.as_deref(),
+                    LivePhase::Copying,
+                )
             }
         }
-    };
-    // The phase the ROW is showing, which is not always `state.phase`: an
-    // up-to-date tree renders the walk, and a diff-complete tree renders the
-    // copy row before the first byte lands.
-    let shown = if head.starts_with("copying") || head.starts_with("retrying") {
-        LivePhase::Copying
-    } else if head.starts_with("deleting") {
-        LivePhase::Deleting
-    } else if head.starts_with("comparing") {
-        LivePhase::Comparing
-    } else {
-        LivePhase::Enumerating
     };
     lay_out_row(head, file, width).render(palette, shown)
 }
@@ -1851,6 +1856,13 @@ mod live_row_tests {
             render_live_row(&state, ROW_COLUMNS),
             "up to date • 1000 files checked"
         );
+        // D-2026-11-24-1: the walk's phase, as decided with the words.
+        let palette = Palette::with_depth(ColorDepth::TrueColor);
+        let styled = render_live_row_styled(&state, ROW_COLUMNS, palette);
+        assert!(
+            styled.starts_with(&palette.paint(Role::PhaseEnumerating, "up to date")),
+            "{styled:?}"
+        );
     }
 
     /// With the need list final and files to move, the row is the copy
@@ -1869,6 +1881,13 @@ mod live_row_tests {
         assert_eq!(
             render_live_row(&state, ROW_COLUMNS),
             "copying • 0/4 files • 0 B"
+        );
+        // D-2026-11-24-1: the copy phase, as decided with the words.
+        let palette = Palette::with_depth(ColorDepth::TrueColor);
+        let styled = render_live_row_styled(&state, ROW_COLUMNS, palette);
+        assert!(
+            styled.starts_with(&palette.paint(Role::PhaseCopying, "copying")),
+            "{styled:?}"
         );
     }
 
