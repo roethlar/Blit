@@ -145,7 +145,7 @@ impl TransferSource for FaultySource {
     fn scan(
         &self,
         filter: Option<blit_core::fs_enum::FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<blit_core::remote::transfer::source::Unreadable>>>,
     ) -> (tokio::sync::mpsc::Receiver<FileHeader>, SourceScan) {
         self.inner.scan(filter, unreadable_paths)
     }
@@ -529,7 +529,7 @@ async fn windows_named_stream_that_changed_size_after_the_scan_is_skipped() {
         fn scan(
             &self,
             filter: Option<blit_core::fs_enum::FileFilter>,
-            unreadable_paths: Arc<Mutex<Vec<String>>>,
+            unreadable_paths: Arc<Mutex<Vec<blit_core::remote::transfer::source::Unreadable>>>,
         ) -> (tokio::sync::mpsc::Receiver<FileHeader>, SourceScan) {
             self.inner.scan(filter, unreadable_paths)
         }
@@ -1284,7 +1284,7 @@ impl TransferSource for ShardDriftSource {
     fn scan(
         &self,
         filter: Option<blit_core::fs_enum::FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<blit_core::remote::transfer::source::Unreadable>>>,
     ) -> (tokio::sync::mpsc::Receiver<FileHeader>, SourceScan) {
         self.inner.scan(filter, unreadable_paths)
     }
@@ -2169,7 +2169,7 @@ impl TransferSource for ManifestRewritingSource {
     fn scan(
         &self,
         filter: Option<blit_core::fs_enum::FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<blit_core::remote::transfer::source::Unreadable>>>,
     ) -> (tokio::sync::mpsc::Receiver<FileHeader>, SourceScan) {
         let (mut rx, scan) = self.inner.scan(filter, unreadable_paths);
         let (tx, out) = tokio::sync::mpsc::channel(64);
@@ -2657,7 +2657,7 @@ impl TransferSource for DuplicatingSource {
     fn scan(
         &self,
         filter: Option<blit_core::fs_enum::FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<blit_core::remote::transfer::source::Unreadable>>>,
     ) -> (tokio::sync::mpsc::Receiver<FileHeader>, SourceScan) {
         let (mut inner_rx, mut scan) = self.inner.scan(filter, unreadable_paths);
         let (tx, rx) = tokio::sync::mpsc::channel(64);

@@ -397,7 +397,7 @@ impl blit_core::remote::transfer::source::TransferSource for StuckAfterFirstChun
     fn scan(
         &self,
         filter: Option<FileFilter>,
-        unreadable: Arc<std::sync::Mutex<Vec<String>>>,
+        unreadable: Arc<std::sync::Mutex<Vec<blit_core::remote::transfer::source::Unreadable>>>,
     ) -> (
         tokio::sync::mpsc::Receiver<blit_core::generated::FileHeader>,
         blit_core::remote::transfer::source::SourceScan,
@@ -553,7 +553,7 @@ impl blit_core::remote::transfer::source::TransferSource for PutThereBeforeItsBy
     fn scan(
         &self,
         filter: Option<FileFilter>,
-        unreadable: Arc<std::sync::Mutex<Vec<String>>>,
+        unreadable: Arc<std::sync::Mutex<Vec<blit_core::remote::transfer::source::Unreadable>>>,
     ) -> (
         tokio::sync::mpsc::Receiver<blit_core::generated::FileHeader>,
         blit_core::remote::transfer::source::SourceScan,
@@ -1210,7 +1210,7 @@ impl blit_core::remote::transfer::source::TransferSource for TruncatedReadSource
     fn scan(
         &self,
         filter: Option<FileFilter>,
-        unreadable: Arc<std::sync::Mutex<Vec<String>>>,
+        unreadable: Arc<std::sync::Mutex<Vec<blit_core::remote::transfer::source::Unreadable>>>,
     ) -> (
         tokio::sync::mpsc::Receiver<blit_core::generated::FileHeader>,
         blit_core::remote::transfer::source::SourceScan,
@@ -2320,7 +2320,7 @@ impl blit_core::remote::transfer::source::TransferSource for CannotOpenSource {
     fn scan(
         &self,
         filter: Option<FileFilter>,
-        unreadable: Arc<std::sync::Mutex<Vec<String>>>,
+        unreadable: Arc<std::sync::Mutex<Vec<blit_core::remote::transfer::source::Unreadable>>>,
     ) -> (
         tokio::sync::mpsc::Receiver<blit_core::generated::FileHeader>,
         blit_core::remote::transfer::source::SourceScan,

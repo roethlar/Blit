@@ -969,7 +969,9 @@ impl TransferSource for TruncatedReadSource {
     fn scan(
         &self,
         filter: Option<blit_core::fs_enum::FileFilter>,
-        unreadable_paths: Arc<std::sync::Mutex<Vec<String>>>,
+        unreadable_paths: Arc<
+            std::sync::Mutex<Vec<blit_core::remote::transfer::source::Unreadable>>,
+        >,
     ) -> (tokio::sync::mpsc::Receiver<FileHeader>, SourceScan) {
         self.inner.scan(filter, unreadable_paths)
     }
@@ -1179,7 +1181,9 @@ impl TransferSource for GatedManifestSource {
     fn scan(
         &self,
         filter: Option<blit_core::fs_enum::FileFilter>,
-        unreadable_paths: Arc<std::sync::Mutex<Vec<String>>>,
+        unreadable_paths: Arc<
+            std::sync::Mutex<Vec<blit_core::remote::transfer::source::Unreadable>>,
+        >,
     ) -> (tokio::sync::mpsc::Receiver<FileHeader>, SourceScan) {
         let (mut inner_rx, mut scan) = self.inner.scan(filter, unreadable_paths);
         let (tx, rx) = tokio::sync::mpsc::channel(64);
@@ -3581,7 +3585,7 @@ impl TransferSource for FilterIgnoringSource {
     fn scan(
         &self,
         _filter: Option<blit_core::fs_enum::FileFilter>,
-        unreadable: Arc<std::sync::Mutex<Vec<String>>>,
+        unreadable: Arc<std::sync::Mutex<Vec<blit_core::remote::transfer::source::Unreadable>>>,
     ) -> (tokio::sync::mpsc::Receiver<FileHeader>, SourceScan) {
         // The filter arg is discarded on purpose (models a source impl
         // that ignores it, as the deleted relay source did).

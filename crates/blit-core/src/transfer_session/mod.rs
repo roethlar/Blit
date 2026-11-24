@@ -466,7 +466,7 @@ pub struct SourceInstruments {
     /// treat a partial transfer as success (the push verb, `blit move`)
     /// inspect this after the session returns. `None` = the session
     /// keeps its own private accumulator (unchanged behavior).
-    pub unreadable: Option<Arc<StdMutex<Vec<String>>>>,
+    pub unreadable: Option<Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>>>,
     /// Emit `[data-plane-client]` connect traces on the data-plane
     /// sockets this SOURCE acquires (`--trace-data-plane`).
     pub trace_data_plane: bool,
@@ -1545,7 +1545,7 @@ fn requested_but_unscanned(
     unnamed: &[String],
     scanned: &HashSet<Vec<u8>>,
     sole_name: Option<&str>,
-    unreadable: &[String],
+    unreadable: &[crate::remote::transfer::source::Unreadable],
 ) -> (Vec<crate::generated::FileFailure>, u64) {
     let Some(scope) = scope else {
         return (Vec::new(), 0);
@@ -1576,12 +1576,10 @@ fn requested_but_unscanned(
     requested.sort();
     requested.dedup();
     for (rel, raw_relative_path) in requested {
-        let prefix = format!("{rel} (");
-        let reason = match unreadable.iter().find(|entry| entry.starts_with(&prefix)) {
-            Some(entry) => format!(
-                "source: unreadable at retry: {}",
-                entry[prefix.len()..].trim_end_matches(')')
-            ),
+        // cr-ecm35-8: the scan's own entry for this path, by the path — a
+        // prefix of a message found another file's (`a (backup)` for `a`).
+        let reason = match unreadable.iter().find(|entry| entry.path == rel) {
+            Some(entry) => format!("source: unreadable at retry: {}", entry.reason),
             None => "source: missing at retry (not found by the retry scan)".to_string(),
         };
         let cost = rel.len() + reason.len() + 8;
@@ -2150,7 +2148,7 @@ async fn source_send_half(
         // (the push verb, `blit move`'s source-delete gate) supply their own
         // accumulator via `SourceInstruments` and inspect it after the
         // session returns; the wire behavior is identical either way.
-        let unreadable: Arc<StdMutex<Vec<String>>> =
+        let unreadable: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>> =
             instruments.unreadable.clone().unwrap_or_default();
         // cr-uv5-2: a move's account is written from what the walk SEES of
         // each file — cr-uv6-4: THIS scan's walk, whose record comes back
@@ -7643,6 +7641,40 @@ mod tests {
         assert_eq!(own_name(&entry), by_the_character.as_bytes());
     }
 
+    /// cr-ecm35-8: a requested path the scan could not read is reported with
+    /// the scan's own reason for it, found by the path — never another
+    /// file's whose name begins as this one's does: `a (backup)`'s entry
+    /// made `a`'s reason "backup) (not found".
+    #[test]
+    fn a_scan_entry_is_found_by_its_path_not_a_prefix() {
+        use crate::remote::transfer::source::Unreadable;
+        let scope: HashSet<PathBuf> = [PathBuf::from("a"), PathBuf::from("b")].into();
+        let unreadable = [
+            Unreadable {
+                path: "a (backup)".into(),
+                reason: "not found".into(),
+            },
+            Unreadable {
+                path: "b".into(),
+                reason: "Permission denied".into(),
+            },
+        ];
+        let (missing, _) =
+            requested_but_unscanned(Some(&scope), &[], &HashSet::new(), None, &unreadable);
+        let reasons: HashMap<&str, &str> = missing
+            .iter()
+            .map(|failure| (failure.relative_path.as_str(), failure.reason.as_str()))
+            .collect();
+        assert_eq!(
+            reasons["a"],
+            "source: missing at retry (not found by the retry scan)"
+        );
+        assert_eq!(
+            reasons["b"],
+            "source: unreadable at retry: Permission denied"
+        );
+    }
+
     /// cr-ecm13-3: a requested name that is not text, and was not found,
     /// is reported with its bytes — the retry after it asks by them.
     #[cfg(unix)]
@@ -7808,7 +7840,7 @@ mod tests {
         fn scan(
             &self,
             filter: Option<crate::fs_enum::FileFilter>,
-            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+            unreadable_paths: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
             let (mut inner_rx, mut scan) = self.inner.scan(filter, unreadable_paths);
             let (tx, rx) = mpsc::channel(64);
@@ -8408,7 +8440,7 @@ mod tests {
         fn scan(
             &self,
             filter: Option<crate::fs_enum::FileFilter>,
-            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+            unreadable_paths: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
             self.inner.scan(filter, unreadable_paths)
         }
@@ -8448,7 +8480,7 @@ mod tests {
         fn scan(
             &self,
             filter: Option<crate::fs_enum::FileFilter>,
-            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+            unreadable_paths: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
             let (mut inner_rx, mut scan) = self.inner.scan(filter, unreadable_paths);
             let (tx, rx) = mpsc::channel(64);
@@ -8492,7 +8524,7 @@ mod tests {
         fn scan(
             &self,
             _filter: Option<crate::fs_enum::FileFilter>,
-            _unreadable_paths: Arc<StdMutex<Vec<String>>>,
+            _unreadable_paths: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
             let (_tx, rx) = mpsc::channel(1);
             let fault_gate = Arc::clone(&self.fault_gate);

@@ -207,7 +207,8 @@ pub async fn run_push_session(
     // driver's exact posture (send what's readable, then error), which
     // `blit move`'s source-delete gate relies on: an error here means
     // move never deletes a source whose files were silently skipped.
-    let unreadable: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let unreadable: Arc<std::sync::Mutex<Vec<crate::remote::transfer::source::Unreadable>>> =
+        Arc::default();
 
     // ph-5: seed the sender-owned stream dial from what a previous run
     // on this exact route settled at, and capture what THIS run settles
@@ -265,7 +266,7 @@ pub async fn run_push_session(
         .lock()
         .map_err(|err| eyre!("unreadable-path accumulator poisoned: {err}"))?;
     if !unreadable.is_empty() {
-        let preview: Vec<_> = unreadable.iter().take(5).cloned().collect();
+        let preview: Vec<String> = unreadable.iter().take(5).map(ToString::to_string).collect();
         let mut message = format!(
             "{} file(s) were skipped due to permission or access errors: {}",
             unreadable.len(),

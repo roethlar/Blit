@@ -192,7 +192,7 @@ pub trait TransferSource: Send + Sync {
     fn scan(
         &self,
         filter: Option<FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan);
 
     /// Scan under the explicit lossy policy. Implementations that can avoid
@@ -201,7 +201,7 @@ pub trait TransferSource: Send + Sync {
     fn scan_without_windows_metadata(
         &self,
         filter: Option<FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         let (header_rx, scan) = self.scan(filter, unreadable_paths);
         strip_windows_metadata_from_scan(header_rx, scan)
@@ -256,7 +256,7 @@ pub trait TransferSource: Send + Sync {
     fn scan_seeing(
         &self,
         filter: Option<FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         preserve_windows_metadata: bool,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         if preserve_windows_metadata {
@@ -490,7 +490,7 @@ impl TransferSource for FsTransferSource {
     fn scan(
         &self,
         filter: Option<FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         let (headers, task) = spawn_manifest_task_with(
             self.root.clone(),
@@ -509,7 +509,7 @@ impl TransferSource for FsTransferSource {
     fn scan_without_windows_metadata(
         &self,
         filter: Option<FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         let (headers, task) = spawn_manifest_task_with(
             self.root.clone(),
@@ -561,7 +561,7 @@ impl TransferSource for FsTransferSource {
     fn scan_seeing(
         &self,
         filter: Option<FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         preserve_windows_metadata: bool,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         // cr-uv6-4: this scan's own record, and nobody else's.
@@ -718,7 +718,7 @@ impl EnumerationHeartbeat {
 fn spawn_manifest_task(
     root: PathBuf,
     filter: FileFilter,
-    unreadable: Arc<Mutex<Vec<String>>>,
+    unreadable: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
     preserve_windows_metadata: bool,
     heartbeat: EnumerationHeartbeat,
     phase_probe: LocalPhaseProbe,
@@ -784,7 +784,7 @@ pub(crate) static BEFORE_A_CONTENT_IS_OPENED_HOOKS: std::sync::Mutex<
 fn spawn_manifest_task_with(
     root: PathBuf,
     filter: FileFilter,
-    unreadable: Arc<Mutex<Vec<String>>>,
+    unreadable: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
     preserve_windows_metadata: bool,
     mut heartbeat: EnumerationHeartbeat,
     phase_probe: LocalPhaseProbe,
@@ -964,7 +964,7 @@ fn file_header_with_windows_metadata_policy(
     mtime_seconds: i64,
     permissions: u32,
     absolute_path: &Path,
-    unreadable: &Arc<Mutex<Vec<String>>>,
+    unreadable: &Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
     preserve_windows_metadata: bool,
     read_metadata: impl FnOnce(&Path) -> Result<Option<crate::generated::WindowsFileMetadata>>,
 ) -> Option<FileHeader> {
@@ -996,7 +996,7 @@ fn file_header_with_windows_metadata(
     mtime_seconds: i64,
     permissions: u32,
     absolute_path: &Path,
-    unreadable: &Arc<Mutex<Vec<String>>>,
+    unreadable: &Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
     read_metadata: impl FnOnce(&Path) -> Result<Option<crate::generated::WindowsFileMetadata>>,
 ) -> Option<FileHeader> {
     let windows_metadata = match read_metadata(absolute_path) {
@@ -1021,10 +1021,29 @@ fn file_header_with_windows_metadata(
     })
 }
 
-fn record_unreadable_entry(list: &Arc<Mutex<Vec<String>>>, rel: &str, reason: &str) {
+fn record_unreadable_entry(list: &Arc<Mutex<Vec<Unreadable>>>, rel: &str, reason: &str) {
     log::warn!("scan skipping '{}' ({})", rel, reason);
     if let Ok(mut guard) = list.lock() {
-        guard.push(format!("{} ({})", rel, reason));
+        guard.push(Unreadable {
+            path: rel.to_string(),
+            reason: reason.to_string(),
+        });
+    }
+}
+
+/// An entry a scan could not read: its path and why, kept apart
+/// (cr-ecm35-8, D-2026-11-24-1) — a path is found by itself, never by a
+/// prefix of a message, which another file's name can begin with. Shown to
+/// people as `path (reason)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unreadable {
+    pub path: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for Unreadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.path, self.reason)
     }
 }
 
@@ -1063,7 +1082,7 @@ impl TransferSource for WindowsMetadataDroppingSource {
     fn scan(
         &self,
         filter: Option<FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         self.inner
             .scan_without_windows_metadata(filter, unreadable_paths)
@@ -1096,7 +1115,7 @@ impl TransferSource for WindowsMetadataDroppingSource {
     fn scan_seeing(
         &self,
         filter: Option<FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         _preserve_windows_metadata: bool,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         self.inner.scan_seeing(filter, unreadable_paths, false)
@@ -1131,7 +1150,7 @@ impl TransferSource for FilteredSource {
         // by the orchestrator. The inner source walks with its exclude
         // rules only (audit-19 pruning); the whole filter runs here.
         _filter: Option<FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         self.scan_with_metadata_policy(unreadable_paths, true, false)
     }
@@ -1139,7 +1158,7 @@ impl TransferSource for FilteredSource {
     fn scan_without_windows_metadata(
         &self,
         _filter: Option<FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         self.scan_with_metadata_policy(unreadable_paths, false, false)
     }
@@ -1182,7 +1201,7 @@ impl TransferSource for FilteredSource {
     fn scan_seeing(
         &self,
         _filter: Option<FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         preserve_windows_metadata: bool,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         self.scan_with_metadata_policy(unreadable_paths, preserve_windows_metadata, true)
@@ -1192,7 +1211,7 @@ impl TransferSource for FilteredSource {
 impl FilteredSource {
     fn scan_with_metadata_policy(
         &self,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         preserve_windows_metadata: bool,
         seeing: bool,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
@@ -1272,7 +1291,7 @@ impl TransferSource for ChecksummingSource {
     fn scan(
         &self,
         filter: Option<FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         self.scan_with_metadata_policy(filter, unreadable_paths, true, false)
     }
@@ -1280,7 +1299,7 @@ impl TransferSource for ChecksummingSource {
     fn scan_without_windows_metadata(
         &self,
         filter: Option<FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         self.scan_with_metadata_policy(filter, unreadable_paths, false, false)
     }
@@ -1312,7 +1331,7 @@ impl TransferSource for ChecksummingSource {
     fn scan_seeing(
         &self,
         filter: Option<FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         preserve_windows_metadata: bool,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         self.scan_with_metadata_policy(filter, unreadable_paths, preserve_windows_metadata, true)
@@ -1323,7 +1342,7 @@ impl ChecksummingSource {
     fn scan_with_metadata_policy(
         &self,
         filter: Option<FileFilter>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        unreadable_paths: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         preserve_windows_metadata: bool,
         seeing: bool,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
@@ -1474,7 +1493,8 @@ mod enumeration_heartbeat_tests {
 
     /// Drive the real production scan and return the enumerated count.
     async fn run_scan(root: PathBuf, heartbeat: EnumerationHeartbeat) -> u64 {
-        let unreadable: Arc<Mutex<Vec<String>>> = Arc::default();
+        let unreadable: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>> =
+            Arc::default();
         let (mut headers, task) = spawn_manifest_task(
             root,
             FileFilter::default(),
@@ -1614,7 +1634,8 @@ mod scan_open_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("ok.txt"), b"fine").expect("fixture");
         std::fs::write(dir.path().join("locked.bin"), b"held").expect("fixture");
-        let unreadable: Arc<Mutex<Vec<String>>> = Arc::default();
+        let unreadable: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>> =
+            Arc::default();
         let (mut headers, task) = spawn_manifest_task_with(
             dir.path().to_path_buf(),
             FileFilter::default(),
@@ -1632,7 +1653,12 @@ mod scan_open_tests {
         }
         listed.sort();
         let result = task.await.expect("scan task joined");
-        let unreadable = unreadable.lock().expect("unreadable list").clone();
+        let unreadable = unreadable
+            .lock()
+            .expect("unreadable list")
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         (listed, unreadable, result)
     }
 
@@ -1683,7 +1709,8 @@ mod filtered_source_tests {
 
     #[test]
     fn windows_metadata_scan_error_marks_one_file_unreadable_and_keeps_neighbor() {
-        let unreadable: Arc<Mutex<Vec<String>>> = Arc::default();
+        let unreadable: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>> =
+            Arc::default();
         let failed = file_header_with_windows_metadata(
             "bad.bin".into(),
             1,
@@ -1711,12 +1738,14 @@ mod filtered_source_tests {
         assert_eq!(neighbor.relative_path, "good.bin");
         let unreadable = unreadable.lock().unwrap();
         assert_eq!(unreadable.len(), 1);
-        assert!(unreadable[0].contains("bad.bin (Windows metadata:"));
+        assert_eq!(unreadable[0].path, "bad.bin");
+        assert!(unreadable[0].reason.starts_with("Windows metadata:"));
     }
 
     #[test]
     fn explicit_lossy_fs_scan_does_not_inspect_windows_metadata() {
-        let unreadable: Arc<Mutex<Vec<String>>> = Arc::default();
+        let unreadable: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>> =
+            Arc::default();
         let header = file_header_with_windows_metadata_policy(
             "file.bin".into(),
             7,
@@ -1842,7 +1871,7 @@ mod filtered_source_tests {
         fn scan(
             &self,
             _filter: Option<FileFilter>,
-            _unreadable: Arc<Mutex<Vec<String>>>,
+            _unreadable: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
             let headers = self.headers.lock().unwrap().take().unwrap_or_default();
             let (tx, rx) = channel(64);
@@ -2113,7 +2142,8 @@ mod filtered_source_tests {
             Arc::new(FsTransferSource::new(dir.path().to_path_buf()));
         let mut filter = FileFilter::default();
         filter.exclude_files = vec!["blocked".to_string()];
-        let unreadable: Arc<Mutex<Vec<String>>> = Arc::default();
+        let unreadable: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>> =
+            Arc::default();
         let (rx, mut scan) = FilteredSource::new(inner, filter).scan(None, Arc::clone(&unreadable));
         let names = collect(rx).await;
         scan.finish().await.expect("scan completes");
@@ -2203,7 +2233,7 @@ mod checksumming_source_tests {
         fn scan(
             &self,
             _filter: Option<FileFilter>,
-            _unreadable: Arc<Mutex<Vec<String>>>,
+            _unreadable: Arc<Mutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
             let headers = self.headers.lock().unwrap().take().unwrap_or_default();
             let (tx, rx) = channel(64);

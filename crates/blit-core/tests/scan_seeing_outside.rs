@@ -28,7 +28,7 @@ impl TransferSource for OneFile {
     fn scan(
         &self,
         _filter: Option<FileFilter>,
-        _unreadable: Arc<Mutex<Vec<String>>>,
+        _unreadable: Arc<Mutex<Vec<blit_core::remote::transfer::source::Unreadable>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         self.walk(None)
     }
@@ -36,7 +36,7 @@ impl TransferSource for OneFile {
     fn scan_seeing(
         &self,
         _filter: Option<FileFilter>,
-        _unreadable: Arc<Mutex<Vec<String>>>,
+        _unreadable: Arc<Mutex<Vec<blit_core::remote::transfer::source::Unreadable>>>,
         _preserve_windows_metadata: bool,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         let sightings = Arc::new(Sightings::default());

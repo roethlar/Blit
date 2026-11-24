@@ -641,7 +641,7 @@ impl TransferSource for DestSubtreeExcludedSource {
     fn scan(
         &self,
         filter: Option<FileFilter>,
-        unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        unreadable_paths: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         self.scan_with_metadata_policy(filter, unreadable_paths, true, false)
     }
@@ -649,7 +649,7 @@ impl TransferSource for DestSubtreeExcludedSource {
     fn scan_without_windows_metadata(
         &self,
         filter: Option<FileFilter>,
-        unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        unreadable_paths: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         self.scan_with_metadata_policy(filter, unreadable_paths, false, false)
     }
@@ -684,7 +684,7 @@ impl TransferSource for DestSubtreeExcludedSource {
     fn scan_seeing(
         &self,
         filter: Option<FileFilter>,
-        unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        unreadable_paths: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         preserve_windows_metadata: bool,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
         self.scan_with_metadata_policy(filter, unreadable_paths, preserve_windows_metadata, true)
@@ -695,7 +695,7 @@ impl DestSubtreeExcludedSource {
     fn scan_with_metadata_policy(
         &self,
         filter: Option<FileFilter>,
-        unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        unreadable_paths: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         preserve_windows_metadata: bool,
         seeing: bool,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
@@ -817,7 +817,8 @@ pub async fn run_local_session(
 
     // One merged unreadable list: scan-side (source instruments) and
     // apply-side (availability checks) — the move gate reads it whole.
-    let unreadable: Arc<StdMutex<Vec<String>>> = Arc::default();
+    let unreadable: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>> =
+        Arc::default();
 
     // Source chain: fs source → user filter (the universal
     // FilteredSource chokepoint, same as push/pull) → dest-subtree
@@ -1009,10 +1010,13 @@ pub async fn run_local_session(
 
     let scanned_files = stats.scanned_files.load(Ordering::Relaxed) as usize;
     let scanned_bytes = stats.scanned_bytes.load(Ordering::Relaxed);
+    // For people: each as `path (reason)`; nothing reads them back.
     let unreadable_paths = unreadable
         .lock()
         .map_err(|err| eyre!("unreadable-path accumulator poisoned: {err}"))?
-        .clone();
+        .iter()
+        .map(ToString::to_string)
+        .collect();
 
     // Outcome classification mirrors the old fast-path gate (strategy
     // gate: mirror / checksum / non-SizeMtime compare all
@@ -1226,7 +1230,7 @@ mod tests {
         fn scan(
             &self,
             filter: Option<FileFilter>,
-            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+            unreadable_paths: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
             let (mut inner_rx, mut scan) = self.inner.scan(filter, unreadable_paths);
             let (tx, rx) = mpsc::channel(64);
@@ -1281,7 +1285,7 @@ mod tests {
         fn scan(
             &self,
             filter: Option<FileFilter>,
-            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+            unreadable_paths: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
             self.inner.scan(filter, unreadable_paths)
         }
@@ -1331,7 +1335,8 @@ mod tests {
             in_stream_bytes: true,
             ..Default::default()
         };
-        let unreadable: Arc<StdMutex<Vec<String>>> = Arc::default();
+        let unreadable: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>> =
+            Arc::default();
         let fs_source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root.clone()));
         let sink: Arc<dyn TransferSink> = Arc::new(FsTransferSink::new(
             src_root.clone(),
@@ -1458,7 +1463,8 @@ mod tests {
             mirror_kind: MirrorMode::All as i32,
             ..Default::default()
         };
-        let unreadable: Arc<StdMutex<Vec<String>>> = Arc::default();
+        let unreadable: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>> =
+            Arc::default();
         let fs_source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root.clone()));
         // The same wrapper scans AND prepares, as the production local
         // route uses one source for both.
@@ -1586,7 +1592,8 @@ mod tests {
             mirror_kind: MirrorMode::All as i32,
             ..Default::default()
         };
-        let unreadable: Arc<StdMutex<Vec<String>>> = Arc::default();
+        let unreadable: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>> =
+            Arc::default();
         let fs_source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root.clone()));
         // The same wrapper scans AND prepares, as the production local
         // route uses one source for both.
@@ -1715,7 +1722,7 @@ mod tests {
         fn scan(
             &self,
             filter: Option<FileFilter>,
-            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+            unreadable_paths: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>>,
         ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
             self.inner.scan(filter, unreadable_paths)
         }
@@ -1765,7 +1772,8 @@ mod tests {
             mirror_kind: MirrorMode::All as i32,
             ..Default::default()
         };
-        let unreadable: Arc<StdMutex<Vec<String>>> = Arc::default();
+        let unreadable: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>> =
+            Arc::default();
         let sink: Arc<dyn TransferSink> = Arc::new(FsTransferSink::new(
             src_root.to_path_buf(),
             dst_root.to_path_buf(),
@@ -2299,7 +2307,8 @@ mod tests {
         // at the LocalApply seam where a custom sink can be injected.
         let dst_slow = tmp.path().join("dst-slow");
         std::fs::create_dir_all(&dst_slow).expect("mkdir dst-slow");
-        let unreadable: Arc<StdMutex<Vec<String>>> = Arc::default();
+        let unreadable: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>> =
+            Arc::default();
         let real: Arc<dyn TransferSink> = Arc::new(FsTransferSink::new(
             src_root.clone(),
             dst_slow.clone(),
@@ -3069,7 +3078,7 @@ mod tests {
             fn scan(
                 &self,
                 filter: Option<FileFilter>,
-                unreadable_paths: Arc<StdMutex<Vec<String>>>,
+                unreadable_paths: Arc<StdMutex<Vec<crate::remote::transfer::source::Unreadable>>>,
             ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
                 let (mut inner_rx, mut scan) = self.inner.scan(filter, unreadable_paths);
                 let (tx, rx) = mpsc::channel(8);
