@@ -282,7 +282,18 @@ pub fn open_regular(path: &Path) -> std::io::Result<File> {
 /// file whose check then fails is removed, not left behind; one that stood
 /// there is left as it was. Made and then refused, an empty file stood at
 /// the name, reported nowhere.
+///
+/// cr-ecm34-1 (Unix): where the name is a link, what is made or opened is
+/// the file its links lead to — found first, so a file made through a
+/// dangling link is known to be made, and its name is the one removed. And
+/// what it made is removed only while that name still holds it: one put
+/// there since is somebody's. Every step that can fail, to the cut, is
+/// settled so.
 pub fn create_regular(dst: &Path) -> std::io::Result<File> {
+    #[cfg(unix)]
+    let resolved = links_resolved(dst)?;
+    #[cfg(unix)]
+    let dst = resolved.as_path();
     let options = |make: bool| {
         let mut open = std::fs::OpenOptions::new();
         open.write(true);
@@ -318,6 +329,12 @@ pub fn create_regular(dst: &Path) -> std::io::Result<File> {
         }
         Err(error) => return Err(error),
     };
+    // cr-ecm34-1: which file was made, taken before anything else is
+    // asked of it; the look below may be what fails.
+    #[cfg(unix)]
+    let mine = made
+        .then(|| file.metadata().ok().map(|found| identity_of(&found)))
+        .flatten();
     let checked = create_look_fault(dst)
         .and_then(|()| file.metadata())
         .and_then(|found| {
@@ -329,11 +346,16 @@ pub fn create_regular(dst: &Path) -> std::io::Result<File> {
                     dst.display()
                 )))
             }
-        });
+        })
+        .and_then(|()| file.set_len(0));
     if let Err(error) = checked {
         if made {
             drop(file);
-            if let Err(unremoved) = std::fs::remove_file(dst) {
+            #[cfg(unix)]
+            let removed = remove_if_mine(dst, mine);
+            #[cfg(not(unix))]
+            let removed = std::fs::remove_file(dst);
+            if let Err(unremoved) = removed {
                 return Err(std::io::Error::other(
                     crate::remote::transfer::sink::LeftInPlace(format!(
                         "{}: {error}; the empty file made at {} could not be removed: {unremoved}",
@@ -345,8 +367,89 @@ pub fn create_regular(dst: &Path) -> std::io::Result<File> {
         }
         return Err(error);
     }
-    file.set_len(0)?;
     Ok(file)
+}
+
+/// cr-ecm34-1: `dst` with the links standing at its name followed to the
+/// name they lead to — as an open would follow them, but known, so what is
+/// made there is known to be made. A name that is no link is itself.
+#[cfg(unix)]
+fn links_resolved(dst: &Path) -> std::io::Result<std::path::PathBuf> {
+    let mut at = dst.to_path_buf();
+    // As the system's own bound on a chain of links (ELOOP).
+    for _ in 0..40 {
+        match std::fs::symlink_metadata(&at) {
+            Ok(found) if found.file_type().is_symlink() => {
+                let leads_to = std::fs::read_link(&at)?;
+                at = match at.parent() {
+                    Some(parent) if leads_to.is_relative() => parent.join(leads_to),
+                    _ => leads_to,
+                };
+            }
+            _ => return Ok(at),
+        }
+    }
+    Err(std::io::Error::from_raw_os_error(libc::ELOOP))
+}
+
+#[cfg(unix)]
+fn identity_of(found: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt as _;
+    (found.dev(), found.ino())
+}
+
+/// cr-ecm34-1: remove the file made at `dst` only while the name holds it —
+/// `mine`, the file made. One put there since is somebody's, and the name
+/// no longer holds this one: nothing of it is there to remove. Made and not
+/// known which file it is, it is not removed: what is there cannot be told
+/// to be its own.
+#[cfg(unix)]
+fn remove_if_mine(dst: &Path, mine: Option<(u64, u64)>) -> std::io::Result<()> {
+    let Some(mine) = mine else {
+        return Err(std::io::Error::other(
+            "which file was made could not be told, so what is at the name is not removed",
+        ));
+    };
+    before_a_made_file_is_removed(dst);
+    let there = match std::fs::symlink_metadata(dst) {
+        Ok(found) => identity_of(&found),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if there != mine {
+        return Ok(());
+    }
+    match std::fs::remove_file(dst) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
+/// Test seam (cr-ecm34-1): runs after a made file was refused and before
+/// the name is looked at to remove it. Production never sets it.
+#[cfg(all(unix, test))]
+pub(crate) static BEFORE_A_MADE_FILE_IS_REMOVED: std::sync::Mutex<
+    Vec<(std::path::PathBuf, fn(&Path))>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn before_a_made_file_is_removed(_dst: &Path) {
+    #[cfg(test)]
+    {
+        let hooks: Vec<fn(&Path)> = BEFORE_A_MADE_FILE_IS_REMOVED
+            .lock()
+            .map(|hooks| {
+                hooks
+                    .iter()
+                    .filter(|(at, _)| at == _dst)
+                    .map(|(_, hook)| *hook)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for hook in hooks {
+            hook(_dst);
+        }
+    }
 }
 
 /// Test seam (cr-ecm32-2): the look at a file opened to be written refused
@@ -685,6 +788,59 @@ mod mode_tests {
             .retain(|path| path != &at);
         assert!(made.is_err(), "its look refused");
         assert!(!at.exists(), "nothing left at the name");
+    }
+
+    /// cr-ecm34-1: through a dangling link at the name, what is made is the
+    /// file the link leads to — known to be made, and removed when its look
+    /// refuses it; the link stays. Opened by the link's name, the file was
+    /// made through it unrecorded, and left there, empty, reported nowhere.
+    #[test]
+    fn a_file_made_through_a_dangling_link_and_refused_is_not_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.bin");
+        let link = dir.path().join("link.bin");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        CREATE_LOOK_FAULTS
+            .lock()
+            .unwrap()
+            .extend([link.clone(), target.clone()]);
+        let made = create_regular(&link);
+        CREATE_LOOK_FAULTS
+            .lock()
+            .unwrap()
+            .retain(|path| path != &link && path != &target);
+        assert!(made.is_err(), "its look refused");
+        assert!(!target.exists(), "nothing made through the link is left");
+        assert!(link.is_symlink(), "the link is left as it was");
+    }
+
+    /// cr-ecm34-1: a file made and refused is removed only while the name
+    /// holds it. One put there since — before the name was looked at to
+    /// remove it — is somebody's, and is kept.
+    #[test]
+    fn a_file_put_where_a_refused_one_was_made_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join("absent.bin");
+        CREATE_LOOK_FAULTS.lock().unwrap().push(at.clone());
+        BEFORE_A_MADE_FILE_IS_REMOVED
+            .lock()
+            .unwrap()
+            .push((at.clone(), |at| {
+                let theirs = at.with_extension("theirs");
+                std::fs::write(&theirs, b"theirs").unwrap();
+                std::fs::rename(&theirs, at).unwrap();
+            }));
+        let made = create_regular(&at);
+        CREATE_LOOK_FAULTS
+            .lock()
+            .unwrap()
+            .retain(|path| path != &at);
+        BEFORE_A_MADE_FILE_IS_REMOVED
+            .lock()
+            .unwrap()
+            .retain(|(path, _)| path != &at);
+        assert!(made.is_err(), "its look refused");
+        assert_eq!(std::fs::read(&at).unwrap(), b"theirs", "somebody's, kept");
     }
 
     #[test]
