@@ -1630,13 +1630,15 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                 // the partial unstamped and reports the file (the sink
                 // moves the resume grant to Failed).
                 if let Some(reason) = read_status(socket).await.map_err(tag)? {
-                    if let Some(p) = progress {
-                        p.report_file_failed(path.clone(), reason.clone()).await;
-                    }
                     let outcome = sink
                         .fail_resume_record(&path, &reason)
                         .await
                         .with_context(|| format!("failing resume record {path}"))?;
+                    // cr-ecm34-4: reported as the sink settled it — what
+                    // the destination left goes with it.
+                    if let Some(p) = progress {
+                        p.report_file_outcome(&path, &outcome).await;
+                    }
                     total.merge(&outcome);
                     continue;
                 }

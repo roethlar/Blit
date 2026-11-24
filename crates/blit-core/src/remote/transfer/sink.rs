@@ -1641,9 +1641,19 @@ impl TransferSink for FsTransferSink {
     /// completion does; the partial stays unstamped, one byte longer than
     /// its source. It was kept to the session's end: a descriptor for
     /// every file the source failed.
+    ///
+    /// cr-ecm34-4: a failure the destination held for the record already —
+    /// its partial left in place, say — keeps what it knows: the source's
+    /// reason first, the destination's account after it, and its flag.
     async fn fail_resume_record(&self, relative_path: &str, reason: &str) -> Result<SinkOutcome> {
+        let held = self.take_resume_block_failure(relative_path);
         self.forget_resume(relative_path);
-        Ok(SinkOutcome::failed(relative_path, reason))
+        Ok(match held {
+            Some((held, left)) => {
+                SinkOutcome::failed_leaving(relative_path, format!("{reason}; {held}"), left)
+            }
+            None => SinkOutcome::failed(relative_path, reason),
+        })
     }
 
     /// cr-ecm22-5, cr-ecm24-8, cr-ecm25-6: everything noted for a record
@@ -2287,10 +2297,17 @@ impl RecordWriter for FsRecordWriter<'_> {
             use tokio::io::AsyncWriteExt as _;
             let _ = file.flush().await;
         }
-        let settled = if matches!(self.mode, FsRecordMode::Real { .. }) {
-            self.remove_partial()
-        } else {
-            Settled::default()
+        let settled = match &self.mode {
+            FsRecordMode::Real { .. } => self.remove_partial(),
+            // cr-ecm34-4: a discarding writer met its destination's failure
+            // already; what that failure left at the destination stays
+            // known — its account, and its flag (D-2026-11-24-1).
+            FsRecordMode::Discard(error) if leaves_in_place(error) => Settled {
+                note: Some(format!("{error:#}")),
+                removed: false,
+                left: true,
+            },
+            _ => Settled::default(),
         };
         self.withdraw_reported();
         self.guard_armed = false;
@@ -9690,6 +9707,62 @@ mod cr_win_1_tests {
                 .unwrap();
             assert!(outcome.file_failed(name), "{name}: {outcome:?}");
         }
+    }
+
+    /// cr-ecm34-4: a source that fails a record keeps the account of what
+    /// the destination left — for a discarding writer whose destination
+    /// failure left its copy, and for a resume whose held failure did: the
+    /// source's reason first, the destination's after it, and the flag.
+    #[tokio::test]
+    async fn a_sources_abort_keeps_what_the_destination_left() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let left = || {
+            eyre::eyre!("cannot make it").wrap_err(LeftInPlace(format!(
+                "{INCOMPLETE_LEFT_IN_PLACE}: it could not be removed"
+            )))
+        };
+        let writer = FsRecordWriter::new(
+            &sink,
+            make_file_header("d.bin", 4),
+            dst.join("d.bin"),
+            FsRecordMode::Discard(left()),
+        );
+        let outcome = Box::new(writer).abort("source: read error").await.unwrap();
+        assert!(outcome.failures[0].left_in_place, "{outcome:?}");
+        assert!(outcome.left_in_place_holds("d.bin"));
+        assert!(outcome.failures[0]
+            .reason
+            .starts_with("source: read error; "));
+        // A discarding writer whose failure left nothing says nothing left.
+        let writer = FsRecordWriter::new(
+            &sink,
+            make_file_header("n.bin", 4),
+            dst.join("n.bin"),
+            FsRecordMode::Discard(eyre::eyre!("cannot make it")),
+        );
+        let outcome = Box::new(writer).abort("source: read error").await.unwrap();
+        assert!(!outcome.failures[0].left_in_place, "{outcome:?}");
+
+        sink.hold_resume_block_failure("r.bin", &left());
+        let outcome = sink
+            .fail_resume_record("r.bin", "source: read error")
+            .await
+            .unwrap();
+        assert!(outcome.failures[0].left_in_place, "{outcome:?}");
+        assert!(outcome.left_in_place_holds("r.bin"));
+        assert!(outcome.failures[0]
+            .reason
+            .starts_with("source: read error; "));
     }
 
     /// cr-ecm22-5: a record the source closes failed lets its partial go —
