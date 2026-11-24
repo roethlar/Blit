@@ -6,9 +6,9 @@
 - a list entry that names no file.
 
 With a single-file source and a `--files-from` list holding only `.`, the first pass rejected the entry. The two retries asked for `.` by its bytes, copied the source the list never selected, and exited 0. Off Linux, where no raw name is taken, a text name was dropped from the retry.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r40` (Codex openreview, 2026-11-24) reviewed `86d69ee3..d7f5f5e9` — the `combined-r39` fixes and log-named-text — with `guard_confirmed: true`: "The held directory, explicit links from diagnostics to filenames, and preservation of named failures withheld from a retry are worth keeping. I would require the following corrections." "Two filenames had the same displayed spelling. One disappeared before the first retry, and the other became writable before the second. The base copied the available file. The head retried only the missing name and saved one identity for two failures. Track whether the identity is known on each failure. The current set keyed by display text applies one file's identity decision to its sibling." The remaining work is cr-ecm39-1
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm38-1`)
+**Commit**: `b1f6b6d5`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r39` over `6ee7ed5e..86d69ee3` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r39.codex.md`. It completes cr-ecm37-2 (`0e0b6d3c`).
 
 ## Evidence

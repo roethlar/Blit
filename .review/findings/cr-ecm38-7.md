@@ -1,9 +1,9 @@
 # cr-ecm38-7: a list its log completed was not checked against the record's count
 
 **Severity**: MEDIUM — a retry asks for a file that does not exist. cr-ecm37-6 refuses a record whose own entries name more files than it counts. A record whose list was cut is completed from the run's log, and that log is checked only for naming too few. An earlier blit's log could name a long file twice: once by its name, once by a shortened rendering of it. A cut record counting one failure then yielded two retry names.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r40` (Codex openreview, 2026-11-24) reviewed `86d69ee3..d7f5f5e9` — the `combined-r39` fixes and log-named-text — with `guard_confirmed: true`: "The held directory, explicit links from diagnostics to filenames, and preservation of named failures withheld from a retry are worth keeping. I would require the following corrections." "I gave `jobs retry` a truncated record and a log marked incomplete. A stale failure made the number of names match the recorded count. The retry exited 0, omitted an actual failed file, and overwrote a third file that had already landed. Require complete log evidence before adding identities to a short record. Matching counts alone cannot establish which files failed." The remaining work is cr-ecm39-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm38-7`)
+**Commit**: `949f1c89`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r39` over `6ee7ed5e..86d69ee3` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r39.codex.md`. It completes cr-ecm37-6 (`1bc7aaa9`).
 
 ## Evidence

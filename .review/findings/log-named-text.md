@@ -7,9 +7,9 @@ Two places gave a failure that the account names by its text alone the bytes the
 - the run log's end pass, through `active.raw_names`.
 
 Those bytes belong to another file, a sibling of that spelling the run sent. In `combined-r38`'s case, a vanished `dup` + U+FFFD was still saved as `dup` + byte `FF` after cr-ecm37-2 and cr-ecm38-1. `jobs retry` would ask for the sibling, which had landed, and exit 0.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r40` (Codex openreview, 2026-11-24) reviewed `86d69ee3..d7f5f5e9` — the `combined-r39` fixes and log-named-text — with `guard_confirmed: true`: "The held directory, explicit links from diagnostics to filenames, and preservation of named failures withheld from a retry are worth keeping. I would require the following corrections." "The live log recorded a raw-named file as copied, then attributed its text-named sibling's write failure to that same raw file. The closing summary added the correct failure, leaving both in the log. Carry the exact identity on live progress events. The run-wide lookup by display text can return an earlier pass's filename." The remaining work is cr-ecm39-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix log-named-text`)
+**Commit**: `f62df807`
 **Reviewer**: none yet — found outside a review; for the next openreview.
 
 ## Evidence

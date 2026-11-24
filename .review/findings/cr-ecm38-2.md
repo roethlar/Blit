@@ -6,9 +6,9 @@
 - **The resume open.** A resume's partial was found the same way.
 
 With the destination renamed and another directory made at its name, each of these reached the replacement.
-**Status**: Fixed on Linux; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r40` (Codex openreview, 2026-11-24) reviewed `86d69ee3..d7f5f5e9` — the `combined-r39` fixes and log-named-text — with `guard_confirmed: true`: "The held directory, explicit links from diagnostics to filenames, and preservation of named failures withheld from a retry are worth keeping. I would require the following corrections." "The base copied through a second absolute alias for the same destination directory. The head exited 2 for both ordinary copy and resume. I also observed the fallback create a regular file for a path ending in `/`, and fail to fill an internal dangling link after the held root was renamed. Verify aliases by directory identity, preserve directory-only path syntax, and inspect dangling links relative to the held directory." "With one worker, a 64-descriptor limit, and a file 72 directories deep, the base completed the resume. The head failed with `Too many open files`. Use the kernel walk for ordinary paths and bound the descriptors retained by the fallback. It currently holds one per ancestor." The remaining work is cr-ecm39-5 and -6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm38-2`)
+**Commit**: `fbb002d5`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r39` over `6ee7ed5e..86d69ee3` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r39.codex.md`. It completes cr-ecm37-1 (`6e49eb4a`) and cr-ecm37-4 (`4ea67c34`).
 
 ## Evidence

@@ -3,9 +3,9 @@
 **Severity**: MEDIUM — an eligible retry is withheld, and a known failure is reported only as a count. Brought in by cr-ecm37-3 and cr-ecm37-5. The reviewer found two faults under `--ignore-existing`.
 - **Counted unsaid.** The destination's leftover account counted a "not known" failure as said only when its report entry's path was whole. A long name's entry is shortened, even though cr-ecm37-5 links it to its exact name. So the account was marked inexact, and under `--ignore-existing` a separate, eligible failure was withheld from the retry.
 - **Lost names.** With a short name, the sibling was retried, but the failure withheld from the pass became part of an anonymous "not retried" count, without its name or reason.
-**Status**: Fixed; awaiting review
+**Status**: Verified — `combined-r40` (Codex openreview, 2026-11-24) reviewed `86d69ee3..d7f5f5e9` — the `combined-r39` fixes and log-named-text — with `guard_confirmed: true`: "The held directory, explicit links from diagnostics to filenames, and preservation of named failures withheld from a retry are worth keeping. I would require the following corrections."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm38-5`)
+**Commit**: `f96cfc5d`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r39` over `6ee7ed5e..86d69ee3` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r39.codex.md`. It completes cr-ecm37-3 (`1d5be9a8`) and cr-ecm37-5 (`a57e4bd0`) in part.
 
 ## Evidence
