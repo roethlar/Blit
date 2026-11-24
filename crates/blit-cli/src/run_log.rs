@@ -680,8 +680,15 @@ fn finish_record(
         // Each failed file once, by its identity — review cr-jl3afix1-1: by
         // its own bytes when it has them, else the bytes the log knows for its
         // text — from the one join the log uses too (cr-ecm35-3).
-        record.failures = totals
-            .failed_files()
+        let failed = totals.failed_files();
+        // cr-ecm38-3: a file whose failure may or may not have left its copy
+        // — the destination could not tell — leaves the saved account of
+        // leftovers incomplete: a retry with --ignore-existing then declines
+        // rather than keep that copy as a file someone put there. Saved as
+        // whole, `jobs retry` left a nine-byte partial for an eight-byte
+        // source in place.
+        let not_known = failed.iter().any(|file| file.left_in_place.is_none());
+        record.failures = failed
             .into_iter()
             .map(|file| Failure {
                 raw: file
@@ -696,7 +703,7 @@ fn finish_record(
         record.failures_truncated =
             totals.failed_paths_truncated || (record.failures.len() as u64) < totals.files_failed;
         record.left_in_place = totals.left_in_place;
-        record.left_in_place_truncated = totals.left_in_place_truncated;
+        record.left_in_place_truncated = totals.left_in_place_truncated || not_known;
         record.left_in_place_raw = totals
             .left_in_place_raw
             .iter()
@@ -1128,6 +1135,62 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// cr-ecm38-3: a failure whose disposition is not known leaves the saved
+    /// account of leftovers incomplete, so `jobs retry --ignore-existing`
+    /// declines; one known either way leaves it whole.
+    #[test]
+    fn a_failure_not_known_to_have_left_its_copy_leaves_the_account_incomplete() {
+        for unknown in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = RunStore::new(dir.path());
+            let run_id = job_log::new_run_id().unwrap();
+            let spec = JobSpec::new(
+                "m1",
+                "copy",
+                "/".into(),
+                SpecEndpoint::Local { path: "/a/".into() },
+                SpecEndpoint::Local { path: "/b/".into() },
+                SpecOptions::default(),
+                None,
+            );
+            let record = RunRecord::starting(&run_id, &spec);
+            let live = store.begin(&spec, &record).unwrap();
+            let recorded = Recorded {
+                store: store.clone(),
+                spec,
+                record,
+                keep: 50,
+                _live: live,
+            };
+            let totals = RunTotals {
+                files_failed: 1,
+                failed_paths: vec!["u.bin".into()],
+                failures: vec![blit_core::remote::transfer::sink::FileFailure {
+                    relative_path: "u.bin".into(),
+                    reason: "unseen".into(),
+                    left_unknown: unknown,
+                    ..Default::default()
+                }],
+                ..RunTotals::default()
+            };
+            finish_record(
+                recorded,
+                None,
+                Outcome::Failed,
+                None,
+                Some(totals),
+                &std::collections::HashMap::new(),
+                false,
+                None,
+            );
+            let record = store.load(&run_id).unwrap().1;
+            assert_eq!(
+                record.left_in_place_truncated, unknown,
+                "not known: {unknown}"
+            );
+        }
     }
 
     /// Review cr-jl3a-3: the names a run's record keeps exactly are the
