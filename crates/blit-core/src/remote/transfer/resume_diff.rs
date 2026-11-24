@@ -20,6 +20,22 @@ use crate::generated::FileHeader;
 use super::faulted_path::FaultedPath;
 use super::source::{OpenedSourceFile, TransferSource};
 
+/// D-2026-11-24-1: the reason a resume's source skips its file for — the
+/// file's own failure, made where it is known (size drift, metadata) —
+/// carried as a type, so [`ResumeBlockDiff::skip_reason`] finds it by its
+/// type and never by its words: another message in the chain — a path, a
+/// system error — may begin as such a reason does.
+#[derive(Debug)]
+pub struct SourceReason(pub String);
+
+impl std::fmt::Display for SourceReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SourceReason {}
+
 /// One step of the resume block diff.
 #[derive(Debug)]
 pub enum ResumeDiffEvent<'a> {
@@ -85,15 +101,17 @@ impl ResumeBlockDiff {
         let now = match reader.len().await {
             Ok(now) => now,
             Err(e) => {
-                return Err(eyre::eyre!("source: cannot read metadata: {e}")
-                    .wrap_err(FaultedPath(header.relative_path.clone())))
+                return Err(eyre::Report::new(SourceReason(format!(
+                    "source: cannot read metadata: {e}"
+                )))
+                .wrap_err(FaultedPath(header.relative_path.clone())))
             }
         };
         if now != header.size {
-            return Err(eyre::eyre!(
+            return Err(eyre::Report::new(SourceReason(format!(
                 "source: changed size during transfer (manifest {} bytes, now {now})",
                 header.size
-            )
+            )))
             .wrap_err(FaultedPath(header.relative_path.clone())));
         }
         Ok(Self {
@@ -110,17 +128,17 @@ impl ResumeBlockDiff {
         })
     }
 
-    /// The `source:` skip reason for an `open` failure: the innermost
-    /// `source:`-prefixed message when the failure is the file's own
-    /// (size drift, metadata), else the open error itself.
+    /// The `source:` skip reason for an `open` failure: the file's own
+    /// [`SourceReason`] (size drift, metadata) when the failure is one,
+    /// found by its type; else the open error itself.
     pub fn skip_reason(err: &eyre::Report) -> String {
-        for cause in err.chain() {
-            let text = cause.to_string();
-            if text.starts_with("source:") {
-                return text;
-            }
+        match err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<SourceReason>())
+        {
+            Some(reason) => reason.0.clone(),
+            None => format!("source: cannot open: {err:#}"),
         }
-        format!("source: cannot open: {err:#}")
     }
 
     /// Arm keepalive ticks: a [`ResumeDiffEvent::KeepAlive`] is emitted
@@ -204,6 +222,29 @@ impl ResumeBlockDiff {
 mod tests {
     use super::*;
     use crate::remote::transfer::source::FsTransferSource;
+
+    /// D-2026-11-24-1: the skip reason is the diff's own typed reason,
+    /// found by type — never the first message that begins "source:". An
+    /// open refusal whose words begin so (a source root named `source:dir`
+    /// puts it at the head of "… is not a regular file") is an open
+    /// failure, reported as one.
+    #[test]
+    fn a_skip_reason_is_found_by_its_type_not_its_words() {
+        let refusal =
+            eyre::eyre!("source:dir/f is not a regular file").wrap_err(FaultedPath("f".into()));
+        assert_eq!(
+            ResumeBlockDiff::skip_reason(&refusal),
+            "source: cannot open: while transferring 'f': source:dir/f is not a regular file"
+        );
+        let drift = eyre::Report::new(SourceReason(
+            "source: changed size during transfer (manifest 4 bytes, now 9)".into(),
+        ))
+        .wrap_err(FaultedPath("f".into()));
+        assert_eq!(
+            ResumeBlockDiff::skip_reason(&drift),
+            "source: changed size during transfer (manifest 4 bytes, now 9)"
+        );
+    }
 
     /// review otp-7b-1 F1: an all-matching scan armed with keepalive
     /// yields one KeepAlive per skipped block at a zero interval (the
