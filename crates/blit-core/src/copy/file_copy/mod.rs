@@ -1681,18 +1681,22 @@ mod mode_tests {
     #[test]
     fn a_chain_of_forty_links_to_nothing_has_its_file_made() {
         let longest = super::resume::MAX_FOLLOWED_LINKS;
-        let dir = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        // ci-macos-links: the chain the only links on the way — a temporary
+        // directory on macOS lies under `/var`, itself a link (to
+        // `/private/var`), and the system counts that one too: 33.
+        let dir = std::fs::canonicalize(tmp.path()).unwrap();
         for n in 1..=longest {
             let next = if n == longest {
                 "target.bin".to_string()
             } else {
                 format!("l{}", n + 1)
             };
-            std::os::unix::fs::symlink(next, dir.path().join(format!("l{n}"))).unwrap();
+            std::os::unix::fs::symlink(next, dir.join(format!("l{n}"))).unwrap();
         }
-        let made = create_regular(&dir.path().join("l1"));
+        let made = create_regular(&dir.join("l1"));
         assert!(made.is_ok(), "{made:?}");
-        assert!(dir.path().join("target.bin").is_file());
+        assert!(dir.join("target.bin").is_file());
     }
 
     /// cr-ecm35-1: a taken name is opened without making anything: a file
