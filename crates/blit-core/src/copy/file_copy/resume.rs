@@ -552,6 +552,12 @@ pub(crate) struct Resolved {
     name: std::ffi::CString,
 }
 
+/// cr-ecm36-8: how many links a path's resolution follows before the system
+/// refuses it (`ELOOP`): Linux's 40; elsewhere — macOS and the BSDs,
+/// `MAXSYMLINKS` — 32.
+#[cfg(unix)]
+pub(crate) const MAX_FOLLOWED_LINKS: usize = if cfg!(target_os = "linux") { 40 } else { 32 };
+
 /// [`Resolved`]: the place `dst` names, `within` the destination's root
 /// (canonical) when one is given.
 #[cfg(unix)]
@@ -569,9 +575,10 @@ pub(crate) fn resolve_destination(dst: &Path, within: Option<&Path>) -> Result<R
     let mut target = dst.to_path_buf();
     let mut links = 0;
     while std::fs::symlink_metadata(&target).is_ok_and(|there| there.file_type().is_symlink()) {
-        // As many as opening the name would follow (Linux's own limit).
+        // As many as opening the name would follow — the system's own limit
+        // (cr-ecm36-8).
         links += 1;
-        if links > 40 {
+        if links > MAX_FOLLOWED_LINKS {
             eyre::bail!("{} is a chain of too many links", dst.display());
         }
         let named = std::fs::read_link(&target)

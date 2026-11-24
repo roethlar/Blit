@@ -1162,14 +1162,15 @@ mod mode_tests {
         assert!(!outside.join("g.bin").exists(), "nothing made outside");
     }
 
-    /// cr-ecm35-1: a chain of 40 links to nothing — as many as the system
-    /// follows — has its file made at the end. The opener's own resolution
-    /// refused it.
+    /// cr-ecm35-1: a chain of links to nothing as long as the system follows
+    /// — 40 on Linux, 32 on macOS (cr-ecm36-8) — has its file made at the
+    /// end. The opener's own resolution refused it.
     #[test]
     fn a_chain_of_forty_links_to_nothing_has_its_file_made() {
+        let longest = super::resume::MAX_FOLLOWED_LINKS;
         let dir = tempfile::tempdir().unwrap();
-        for n in 1..=40 {
-            let next = if n == 40 {
+        for n in 1..=longest {
+            let next = if n == longest {
                 "target.bin".to_string()
             } else {
                 format!("l{}", n + 1)
