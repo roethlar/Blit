@@ -9249,7 +9249,11 @@ mod cr_win_1_tests {
         for (name, failed) in [("failed.bin", true), ("done.bin", false)] {
             let at = dst.join(name);
             std::fs::write(&at, b"0123456789").unwrap();
-            sink.note_raw_name(name, name.as_bytes());
+            // ci-macos-block-hold: a raw name only where the destination
+            // stores one — macOS refuses any, and its record was refused.
+            if crate::raw_name::destination_can_store_raw_names() {
+                sink.note_raw_name(name, name.as_bytes());
+            }
             sink.note_resume_baseline(
                 name,
                 ResumeBaseline::Hashed(crate::moved::Version::of(&std::fs::metadata(&at).unwrap())),
