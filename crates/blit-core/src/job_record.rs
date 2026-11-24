@@ -1029,6 +1029,8 @@ impl LogRead {
             ended.bytes_copied = summary.bytes_copied;
         }
         ended.failures = self.failures.clone();
+        // cr-ecm36-7: a list the log's file events made names files only.
+        ended.failures_are_files = true;
         ended.failures_truncated = truncated;
         (ended.left_in_place, ended.left_in_place_raw) = self.left_in_place_lists();
         ended.left_in_place_exact = true;
@@ -1095,6 +1097,7 @@ pub fn settle(
             ended.bytes_copied = job.bytes;
             ended.files_failed = job.files_failed;
             ended.failures = read.failures.clone();
+            ended.failures_are_files = true;
             ended.failures_truncated = job.files_failed > 0;
             (ended.left_in_place, ended.left_in_place_raw) = read.left_in_place_lists();
             ended.left_in_place_exact = true;
@@ -1622,6 +1625,12 @@ mod tests {
         ));
         assert_eq!(unsaid.left_unknown, [("c.txt".to_string(), None)]);
         assert!(unsaid.ended_record(&record, false).left_in_place_truncated);
+        // cr-ecm36-7: a record rebuilt from the log's file events names files
+        // only — even one from before the marker, whose own list may have held
+        // the synthetic count.
+        let mut older = RunRecord::starting(RUN, &spec());
+        older.failures_are_files = false;
+        assert!(said.ended_record(&older, false).failures_are_files);
         // cr-ecm35-5: the unknown is that file's: a later copy of it settles
         // it, and the list is whole again. It kept the whole list incomplete
         // after the file had landed.
