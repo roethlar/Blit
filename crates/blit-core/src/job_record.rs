@@ -958,12 +958,16 @@ impl LogRead {
                 left_in_place,
             } => {
                 let identity = (path.clone(), raw.clone());
+                // cr-ecm36-6: an unknown is settled by what the destination
+                // shows — a copy, a removal, a leftover confirmed — never by
+                // a later failure saying it left nothing: that attempt may
+                // never have touched the destination.
                 match left_in_place {
                     None if !self.left_unknown.contains(&identity) => {
                         self.left_unknown.push(identity)
                     }
-                    None => {}
-                    Some(_) => self.left_unknown.retain(|unknown| unknown != &identity),
+                    Some(true) => self.left_unknown.retain(|unknown| unknown != &identity),
+                    None | Some(false) => {}
                 }
                 if left_in_place == Some(true)
                     && !self
@@ -997,6 +1001,14 @@ impl LogRead {
             EventBody::FileSent { path, raw } => {
                 self.failures
                     .retain(|failed| !(failed.path == path && failed.raw == raw));
+            }
+            // cr-ecm36-6: a file removed from the destination leaves nothing
+            // of the run's there.
+            EventBody::FileDeleted { path, raw } => {
+                self.left_in_place
+                    .retain(|left| !(left.0 == path && left.1 == raw));
+                self.left_unknown
+                    .retain(|unknown| !(unknown.0 == path && unknown.1 == raw));
             }
             EventBody::Summary(summary) => self.summary = Some(summary),
             EventBody::RunEnd { outcome, detail } => {
@@ -1645,6 +1657,29 @@ mod tests {
         ));
         assert!(landed.left_unknown.is_empty());
         assert!(!landed.ended_record(&record, false).left_in_place_truncated);
+        // cr-ecm36-6: a later failure of it saying it left nothing — a source
+        // that could not be opened — settles nothing at the destination: the
+        // unknown stands. A removal of it does settle it.
+        let mut retried = unsaid.clone();
+        retried.read_line(event(
+            6,
+            EventBody::FileFailed {
+                path: "c.txt".into(),
+                reason: "source: cannot open".into(),
+                raw: None,
+                left_in_place: Some(false),
+            },
+        ));
+        assert_eq!(retried.left_unknown, [("c.txt".to_string(), None)]);
+        assert!(retried.ended_record(&record, false).left_in_place_truncated);
+        retried.read_line(event(
+            7,
+            EventBody::FileDeleted {
+                path: "c.txt".into(),
+                raw: None,
+            },
+        ));
+        assert!(retried.left_unknown.is_empty());
         let mut own = read.clone();
         own.read_line(event(
             5,

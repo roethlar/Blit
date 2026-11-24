@@ -514,9 +514,10 @@ fn failed_identities(
                                 unknown.remove(&identity);
                                 left.insert(identity);
                             }
-                            Some(false) => {
-                                unknown.remove(&identity);
-                            }
+                            // cr-ecm36-6: settled by what the destination
+                            // shows, never by a failure saying nothing was
+                            // left.
+                            Some(false) => {}
                             None => {
                                 unknown.insert(identity);
                             }
@@ -534,6 +535,13 @@ fn failed_identities(
                     }
                     job_log::EventBody::FileSent { path, raw } => {
                         still_failed.remove(&(path, raw));
+                    }
+                    // A file removed from the destination leaves nothing of
+                    // the run's there.
+                    job_log::EventBody::FileDeleted { path, raw } => {
+                        let identity = (path, raw);
+                        left.remove(&identity);
+                        unknown.remove(&identity);
                     }
                     job_log::EventBody::RunEnd { .. } => ended = true,
                     job_log::EventBody::LogIncomplete { .. } => whole = false,
@@ -2226,6 +2234,72 @@ mod retry_name_tests {
     /// Review cr-jl4fix4-1: an old record with a whole failure list still
     /// has this machine's log read for an ambiguous raw-named failure, and
     /// a finished log that names the identity makes the file the run's own.
+    /// cr-ecm36-6: a whole log whose file's disposition is unknown, then failed
+    /// again saying it left nothing — an attempt that never reached the
+    /// destination — does not settle it: an older record's ambiguous leftover
+    /// is still refused. Settled by that later word, a retry kept the
+    /// earlier partial as a file.
+    #[test]
+    fn an_unknown_is_not_settled_by_a_failure_saying_nothing_left() {
+        use blit_core::job_log::{EventBody, Outcome, Role, RunInfo};
+        use blit_core::run_log::LogPlace;
+        let dir = tempfile::tempdir().unwrap();
+        let run_id = "8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d";
+        let text = "dup\u{FFFD}".to_string();
+        let raw = Some("dup\\xff".to_string());
+        let place = LogPlace {
+            dir: dir.path().join("jobs").join("logs"),
+            participant: "m1".into(),
+            keep: 50,
+            finished: None,
+        };
+        let writer = place
+            .start(run_id, 1, Role::Initiator, RunInfo::default())
+            .expect("a log");
+        writer.record(EventBody::FileFailed {
+            path: text.clone(),
+            reason: "write failed".into(),
+            raw: raw.clone(),
+            left_in_place: None,
+        });
+        writer.record(EventBody::FileFailed {
+            path: text.clone(),
+            reason: "source: cannot open".into(),
+            raw: raw.clone(),
+            left_in_place: Some(false),
+        });
+        assert!(writer.finish(Outcome::Failed, None).complete);
+        let mut record = RunRecord::starting(
+            run_id,
+            &JobSpec::new(
+                "m1",
+                "copy",
+                "/".into(),
+                blit_core::job_record::SpecEndpoint::Local { path: "/a/".into() },
+                blit_core::job_record::SpecEndpoint::Local { path: "/b/".into() },
+                Default::default(),
+                None,
+            ),
+        );
+        record.files_failed = 1;
+        record.failures = vec![blit_core::job_record::Failure {
+            path: text.clone(),
+            reason: "write failed".into(),
+            raw: raw.clone(),
+        }];
+        record.left_in_place = vec![text.clone()];
+        record.left_in_place_exact = false;
+        let (failed, logged) = failed_identities(dir.path(), &record).unwrap();
+        assert!(
+            logged.read && logged.complete,
+            "the log was read, and is whole"
+        );
+        assert!(
+            own_leftovers(&record, &failed, &logged).is_err(),
+            "the earlier unknown stands"
+        );
+    }
+
     /// cr-ecm35-6: a record from before cr-ecm34-7 whose sole entry is
     /// named as the old synthetic count was is not retried as a file of
     /// that name without the run's whole log — it was retried, an unrelated
