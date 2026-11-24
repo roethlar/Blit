@@ -1495,6 +1495,54 @@ mod mode_tests {
         assert!(!root.join("p.bin").exists());
     }
 
+    /// cr-ecm39-6 (Linux): a path 72 directories deep. Returns the dir, the
+    /// held root and the path of a file at the bottom.
+    #[cfg(target_os = "linux")]
+    fn a_deep_path() -> (tempfile::TempDir, Within, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("dst")).unwrap();
+        let root = std::fs::canonicalize(dir.path().join("dst")).unwrap();
+        let mut deep = root.clone();
+        for _ in 0..72 {
+            deep.push("d");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        let within = Within::hold(&root);
+        (dir, within, deep.join("f.bin"))
+    }
+
+    /// cr-ecm39-6 (Linux): where the walk from the held root serves — no
+    /// `openat2` here — it holds one directory at a time, however deep the
+    /// path. Holding every directory on the way, a path 72 deep ran out of
+    /// descriptors under a limit of 64.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_deep_walk_holds_one_directory_at_a_time() {
+        let (_dir, within, file) = a_deep_path();
+        super::resume::WALK_HELD.with(|(now, most)| most.set(now.get()));
+        super::NO_OPENAT2.with(|refused| refused.set(true));
+        let resolved = super::resume::resolve_beneath(&within, &file, true).expect("held");
+        super::NO_OPENAT2.with(|refused| refused.set(false));
+        resolved.unwrap();
+        let most = super::resume::WALK_HELD.with(|(_, most)| most.get());
+        assert!(most <= 2, "held {most} at once");
+    }
+
+    /// cr-ecm39-6 (Linux): an ordinary path is found by the kernel's own walk
+    /// beneath the root, the held-root walk not taken at all.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_ordinary_path_is_walked_by_the_kernel() {
+        let (_dir, within, file) = a_deep_path();
+        super::resume::WALK_HELD.with(|(now, most)| most.set(now.get()));
+        let before = super::resume::WALK_HELD.with(|(now, _)| now.get());
+        super::resume::resolve_beneath(&within, &file, true)
+            .expect("held")
+            .unwrap();
+        let most = super::resume::WALK_HELD.with(|(_, most)| most.get());
+        assert_eq!(most, before, "the walk was not taken");
+    }
+
     /// cr-ecm37-4 (Linux): an absolute link that leads within the
     /// destination is followed, as it always was — to a file, and as a
     /// directory on the way — and one that leads out is still refused.

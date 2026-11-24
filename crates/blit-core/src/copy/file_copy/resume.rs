@@ -695,7 +695,6 @@ pub(crate) fn resolve_beneath(
     let held = within.held.as_ref()?;
     let place = within.place(dst)?;
     Some((|| {
-        let mut walk = Walk::new(within, held.as_raw_fd(), dst);
         let mut names = Walk::names(&place);
         let Some(mut last) = names.pop_back() else {
             return Err(std::io::Error::other(format!(
@@ -703,6 +702,34 @@ pub(crate) fn resolve_beneath(
                 dst.display()
             )));
         };
+        // cr-ecm39-6: an ordinary path's directory is found by the kernel's
+        // own walk beneath the root, in one call; the walk below serves what
+        // that cannot — a link at the name to follow, an absolute link on
+        // the way, no `openat2`. Taken for every resume, the walk ran out of
+        // descriptors on a deep path.
+        let direct = if names.is_empty() {
+            open_directory_at(held.as_raw_fd(), c".")
+        } else {
+            let parent: std::path::PathBuf = names.iter().collect();
+            super::openat2_beneath(
+                held.as_raw_fd(),
+                &parent,
+                libc::O_PATH | libc::O_DIRECTORY,
+                0,
+            )
+        };
+        if let Ok(directory) = direct {
+            let name = name_of(&last)?;
+            let a_link = match stat_at(directory.as_raw_fd(), &name) {
+                Ok(found) => found.st_mode & libc::S_IFMT == libc::S_IFLNK,
+                Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(error),
+            };
+            if !follow || !a_link {
+                return Ok(Resolved { directory, name });
+            }
+        }
+        let mut walk = Walk::new(within, held.as_raw_fd(), dst);
         walk.enter(names, false)?;
         loop {
             let name = name_of(&last)?;
@@ -747,14 +774,60 @@ pub(crate) fn make_dirs_beneath(
     Walk::new(within, held.as_raw_fd(), shown).enter(Walk::names(place), true)
 }
 
-/// A walk from a held root, the directories entered held in turn.
+/// A walk from a held root: where it stands, as the names of the directories
+/// entered beneath the root, and the one directory it stands in, held — one
+/// descriptor, however deep (cr-ecm39-6): a `..` is walked back by finding
+/// the parent again from the root. Holding every directory on the way, a
+/// path 72 directories deep ran out of descriptors.
 #[cfg(target_os = "linux")]
 struct Walk<'a> {
     within: &'a super::Within,
     root: std::os::unix::io::RawFd,
-    entered: Vec<std::os::unix::io::OwnedFd>,
+    here: Option<HeldDir>,
+    names: Vec<std::ffi::OsString>,
     links: usize,
     shown: &'a Path,
+}
+
+/// A directory a walk holds (counted, under test).
+#[cfg(target_os = "linux")]
+struct HeldDir(Option<std::os::unix::io::OwnedFd>);
+
+#[cfg(target_os = "linux")]
+impl HeldDir {
+    fn new(fd: std::os::unix::io::OwnedFd) -> Self {
+        #[cfg(test)]
+        WALK_HELD.with(|(now, most)| {
+            now.set(now.get() + 1);
+            most.set(most.get().max(now.get()));
+        });
+        Self(Some(fd))
+    }
+
+    fn raw(&self) -> std::os::unix::io::RawFd {
+        use std::os::unix::io::AsRawFd as _;
+        self.0.as_ref().map_or(-1, |fd| fd.as_raw_fd())
+    }
+
+    fn into_fd(mut self) -> std::os::unix::io::OwnedFd {
+        self.0.take().expect("a held directory holds one")
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for HeldDir {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        WALK_HELD.with(|(now, _)| now.set(now.get().saturating_sub(1)));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    /// Test seam (cr-ecm39-6): the directories this thread's walks hold now,
+    /// and the most held at once.
+    pub(crate) static WALK_HELD: (std::cell::Cell<usize>, std::cell::Cell<usize>) =
+        const { (std::cell::Cell::new(0), std::cell::Cell::new(0)) };
 }
 
 #[cfg(target_os = "linux")]
@@ -763,15 +836,15 @@ impl<'a> Walk<'a> {
         Self {
             within,
             root,
-            entered: Vec::new(),
+            here: None,
+            names: Vec::new(),
             links: 0,
             shown,
         }
     }
 
     fn here(&self) -> std::os::unix::io::RawFd {
-        use std::os::unix::io::AsRawFd as _;
-        self.entered.last().map_or(self.root, |fd| fd.as_raw_fd())
+        self.here.as_ref().map_or(self.root, HeldDir::raw)
     }
 
     fn leads_out(&self) -> std::io::Error {
@@ -781,7 +854,7 @@ impl<'a> Walk<'a> {
         ))
     }
 
-    /// A relative path's names, `..` and `.` kept as names.
+    /// A relative path's names, `..` kept as a name.
     fn names(path: &Path) -> std::collections::VecDeque<std::ffi::OsString> {
         path.components()
             .filter_map(|component| match component {
@@ -800,6 +873,33 @@ impl<'a> Walk<'a> {
         Ok(())
     }
 
+    /// Back up to the directory above, found again from the root: by the
+    /// kernel's walk beneath it, or a name at a time — one held at once.
+    fn up(&mut self) -> std::io::Result<()> {
+        if self.names.pop().is_none() {
+            return Err(self.leads_out());
+        }
+        self.here = None;
+        if self.names.is_empty() {
+            return Ok(());
+        }
+        let place: std::path::PathBuf = self.names.iter().collect();
+        if let Ok(found) =
+            super::openat2_beneath(self.root, &place, libc::O_PATH | libc::O_DIRECTORY, 0)
+        {
+            self.here = Some(HeldDir::new(found));
+            return Ok(());
+        }
+        let mut found: Option<HeldDir> = None;
+        for name in &self.names {
+            let at = found.as_ref().map_or(self.root, HeldDir::raw);
+            let next = open_directory_at(at, &name_of(name)?)?;
+            found = Some(HeldDir::new(next));
+        }
+        self.here = found;
+        Ok(())
+    }
+
     /// What a link's `target` puts in its place: an absolute one is walked
     /// from the root, when it names a place beneath it.
     fn splice(
@@ -808,7 +908,8 @@ impl<'a> Walk<'a> {
     ) -> std::io::Result<std::collections::VecDeque<std::ffi::OsString>> {
         if target.is_absolute() {
             let place = self.within.place(target).ok_or_else(|| self.leads_out())?;
-            self.entered.clear();
+            self.here = None;
+            self.names.clear();
             Ok(Self::names(&place))
         } else {
             Ok(Self::names(target))
@@ -832,9 +933,7 @@ impl<'a> Walk<'a> {
     ) -> std::io::Result<()> {
         while let Some(name) = names.pop_front() {
             if name == ".." {
-                if self.entered.pop().is_none() {
-                    return Err(self.leads_out());
-                }
+                self.up()?;
                 continue;
             }
             if name.is_empty() || name == "." {
@@ -867,7 +966,8 @@ impl<'a> Walk<'a> {
                 }
                 libc::S_IFDIR => {
                     let entered = open_directory_at(self.here(), &c_name)?;
-                    self.entered.push(entered);
+                    self.here = Some(HeldDir::new(entered));
+                    self.names.push(name);
                 }
                 _ => return Err(std::io::Error::from_raw_os_error(libc::ENOTDIR)),
             }
@@ -877,8 +977,8 @@ impl<'a> Walk<'a> {
 
     /// The directory reached, held.
     fn into_directory(mut self) -> std::io::Result<std::os::unix::io::OwnedFd> {
-        match self.entered.pop() {
-            Some(directory) => Ok(directory),
+        match self.here.take() {
+            Some(directory) => Ok(directory.into_fd()),
             None => open_directory_at(self.root, c"."),
         }
     }
