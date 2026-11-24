@@ -595,6 +595,14 @@ where
             (set, truncated)
         };
         if set.is_empty() {
+            // cr-ecm35-7: no pass can start — no failed file could be named
+            // for it (a name over the wire's budget, say) — so none of them
+            // is retried, and the report says so by its count. Left, the
+            // run counted the failures and said nothing of the retry it
+            // could not make.
+            if passes_run == 0 {
+                current.unretried = current.files_failed;
+            }
             break;
         }
         let total = retries;
@@ -1270,6 +1278,27 @@ mod tests {
         assert_eq!(report.failures[0].reason, marked);
         report.mark_retried();
         assert_eq!(report.failures[0].reason, marked, "marked once");
+    }
+
+    /// cr-ecm35-7: a retry that cannot start — its one failed file named
+    /// nowhere the retry can read — runs no pass, and counts that file as
+    /// not retried. It was counted failed, and not retried by nothing.
+    #[tokio::test]
+    async fn a_retry_that_cannot_start_counts_its_failures_as_not_retried() {
+        let mut main = PassFailures {
+            files_failed: 1,
+            failed_paths_truncated: true,
+            ..PassFailures::default()
+        };
+        main.unretried = 0;
+        let out = run_retry_passes(&args(1), main, |_| async {
+            unreachable!("no pass can start without a name")
+        })
+        .await
+        .expect("loop");
+        assert_eq!(out.passes_run, 0);
+        assert_eq!(out.final_failures.files_failed, 1);
+        assert_eq!(out.final_failures.unretried, 1, "{:?}", out.final_failures);
     }
 
     #[tokio::test]
