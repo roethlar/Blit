@@ -150,7 +150,29 @@ fn settle_failed_copy(
     let Ok(mine) = written.metadata().map(|found| identity(&found)) else {
         return error;
     };
+    let mark = |why: String| {
+        let left = match written.set_len(size.saturating_add(1)) {
+            Ok(()) => format!(
+                "{}: {why}, so it was left one byte longer than the source",
+                crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
+            ),
+            Err(unmarked) => format!(
+                "{}: {why}, and it could not be marked unfinished ({unmarked})",
+                crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
+            ),
+        };
+        crate::remote::transfer::sink::LeftInPlace(left)
+    };
     if fs::symlink_metadata(dst).map(|found| identity(&found)).ok() != Some(mine) {
+        // cr-ecm36-2: a link at the name that leads to the file written — as
+        // the sink's cleanup has it (cr-ecm17-2) — is not this copy's to
+        // remove: the file it wrote through it is marked and said to be left.
+        // Judged by the link, it was left at its source's size, unmarked.
+        if fs::metadata(dst).map(|found| identity(&found)).ok() == Some(mine) {
+            return error.wrap_err(mark(
+                "its name is a link to it, which is not this copy's to remove".to_string(),
+            ));
+        }
         return error;
     }
     let unremoved = match fs::remove_file(dst) {
@@ -158,17 +180,7 @@ fn settle_failed_copy(
         Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => return error,
         Err(unremoved) => unremoved,
     };
-    let left = match written.set_len(size.saturating_add(1)) {
-        Ok(()) => format!(
-            "{}: it could not be removed ({unremoved}), so it was left one byte longer than the source",
-            crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
-        ),
-        Err(unmarked) => format!(
-            "{}: it could not be removed ({unremoved}) or marked unfinished ({unmarked})",
-            crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
-        ),
-    };
-    error.wrap_err(crate::remote::transfer::sink::LeftInPlace(left))
+    error.wrap_err(mark(format!("it could not be removed ({unremoved})")))
 }
 
 /// Test seam (cr-ecm34-3): the fast paths refused for a source, and a hook
@@ -238,6 +250,48 @@ mod tests {
             let mode = std::fs::metadata(&dst).unwrap().permissions().mode() & 0o7777;
             assert_eq!(mode, 0o600, "{name}");
         }
+    }
+
+    /// cr-ecm36-2: a copy through a link at the destination that fails has
+    /// the file it wrote through the link marked unfinished, and says it
+    /// was left. Judged by the link, the file was left at its source's
+    /// size, unmarked.
+    #[test]
+    fn a_failed_copy_through_a_link_marks_what_it_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("shrinks.bin");
+        let target = dir.path().join("target.bin");
+        let dst = dir.path().join("link.bin");
+        std::fs::write(&src, b"8 bytes!").unwrap();
+        std::fs::write(&target, b"old").unwrap();
+        std::os::unix::fs::symlink(&target, &dst).unwrap();
+        MMAP_FAST_PATHS_REFUSED
+            .lock()
+            .unwrap()
+            .push((src.clone(), |at| {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(at)
+                    .unwrap()
+                    .set_len(3)
+                    .unwrap();
+            }));
+        let copied = mmap_copy_file(&src, &dst);
+        MMAP_FAST_PATHS_REFUSED
+            .lock()
+            .unwrap()
+            .retain(|(at, _)| at != &src);
+        let error = copied.expect_err("the source shrank");
+        assert!(
+            crate::remote::transfer::sink::leaves_in_place(&error),
+            "{error:#}"
+        );
+        assert!(dst.is_symlink(), "the link is left as it is");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().len(),
+            9,
+            "marked unfinished"
+        );
     }
 
     /// cr-ecm35-2: a source that shrinks while it is copied fails the copy,
