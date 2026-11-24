@@ -242,6 +242,13 @@ pub struct RunRecord {
     /// ended before it had read its arguments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_nested: Option<bool>,
+    /// cr-ecm35-6: every entry of `failures` is a failed file — so in every
+    /// record written since cr-ecm34-7. One from before may hold the
+    /// synthetic entry, named `(not retried)`, that counted the failures no
+    /// retry pass was given: read now, an entry by that name in such a
+    /// record is a file only when the run's log says it is one.
+    #[serde(default)]
+    pub failures_are_files: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,6 +331,7 @@ impl RunRecord {
             left_in_place_exact: false,
             source_removed: false,
             destination_nested: None,
+            failures_are_files: true,
         }
     }
 }

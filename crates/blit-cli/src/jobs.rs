@@ -438,10 +438,18 @@ fn failed_identities(
 ) -> Result<(HashSet<(String, Option<String>)>, LoggedLeftovers)> {
     // cr-ecm34-7: every recorded failure is a file, whatever its name; the
     // failures no retry pass was given are not in the list, and the count
-    // says the list is short.
+    // says the list is short. cr-ecm35-6: in a record that does not say so
+    // — one from before — an entry named as the old synthetic count was is
+    // not taken for a file: the run's log, which names files only, settles
+    // it, and without a whole log nothing is retried.
+    let legacy_entry = |failure: &blit_core::job_record::Failure| {
+        !record.failures_are_files && failure.raw.is_none() && failure.path == LEGACY_UNRETRIED_PATH
+    };
+    let legacy = record.failures.iter().any(legacy_entry);
     let mut known: HashSet<(String, Option<String>)> = record
         .failures
         .iter()
+        .filter(|failure| !legacy_entry(failure))
         .map(|failure| (failure.path.clone(), failure.raw.clone()))
         .collect();
     let short = |known: &HashSet<(String, Option<String>)>| {
@@ -459,7 +467,7 @@ fn failed_identities(
                     .iter()
                     .any(|left| left == &failure.path)
         });
-    if short(&known) || ambiguous_legacy {
+    if short(&known) || ambiguous_legacy || legacy {
         // Review cr-jl4-3: the run's terminal state, read from its log in
         // order — a file that failed, and was not landed by a later pass —
         // not every failure the run ever met.
@@ -528,6 +536,17 @@ fn failed_identities(
             logged.left.extend(left);
             known.extend(still_failed);
         }
+        if legacy && !(logged.read && logged.complete) {
+            eyre::bail!(
+                "job {} was recorded by an earlier blit, whose record may count the files no \
+                 retry was given as one entry named {LEGACY_UNRETRIED_PATH}; without this \
+                 machine's whole log of the run that entry cannot be told from a file of that \
+                 name, so nothing is retried; run the whole job again instead (`blit jobs save \
+                 {} <name>`, then `blit jobs run <name>`)",
+                record.run_id,
+                record.run_id
+            );
+        }
         if (known.len() as u64) < record.files_failed {
             eyre::bail!(
                 "job {} names only {} of the {} files it failed, so a retry would leave the \
@@ -542,6 +561,11 @@ fn failed_identities(
     }
     Ok((known, logged))
 }
+
+/// The name the synthetic entry for failures no retry pass was given bore
+/// in a record from before cr-ecm34-7 (cr-ecm35-6): only a candidate, in
+/// such a record, for its log to settle.
+const LEGACY_UNRETRIED_PATH: &str = "(not retried)";
 
 /// A retry's names (reviews cr-jl4-2, cr-jl4fix1-2): each failed file by
 /// its text, or — a name that is not UTF-8, whose text names no file — by
@@ -2180,6 +2204,79 @@ mod retry_name_tests {
     /// Review cr-jl4fix4-1: an old record with a whole failure list still
     /// has this machine's log read for an ambiguous raw-named failure, and
     /// a finished log that names the identity makes the file the run's own.
+    /// cr-ecm35-6: a record from before cr-ecm34-7 whose sole entry is
+    /// named as the old synthetic count was is not retried as a file of
+    /// that name without the run's whole log — it was retried, an unrelated
+    /// file copied and the run's own failure left out; and a whole log that
+    /// names such a file as failed settles it as one.
+    #[test]
+    fn an_old_records_count_entry_is_a_file_only_by_its_log() {
+        use blit_core::job_log::{EventBody, Outcome, Role, RunInfo};
+        use blit_core::run_log::LogPlace;
+        let dir = tempfile::tempdir().unwrap();
+        let spec = JobSpec::new(
+            "m1",
+            "copy",
+            "/".into(),
+            blit_core::job_record::SpecEndpoint::Local { path: "/a/".into() },
+            blit_core::job_record::SpecEndpoint::Local { path: "/b/".into() },
+            Default::default(),
+            None,
+        );
+        let old = |run_id: &str| {
+            let mut record = RunRecord::starting(run_id, &spec);
+            record.failures_are_files = false;
+            record.files_failed = 1;
+            record.failures = vec![blit_core::job_record::Failure {
+                path: "(not retried)".into(),
+                reason: "1 file(s) were not retried".into(),
+                raw: None,
+            }];
+            record
+        };
+        let error = match failed_identities(dir.path(), &old("7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a")) {
+            Ok((failed, _)) => panic!("retried as {failed:?}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("earlier blit"), "{error}");
+
+        let run_id = "7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b";
+        let place = LogPlace {
+            dir: dir.path().join("jobs").join("logs"),
+            participant: "m1".into(),
+            keep: 50,
+            finished: None,
+        };
+        let writer = place
+            .start(run_id, 1, Role::Initiator, RunInfo::default())
+            .expect("a log");
+        writer.record(EventBody::FileFailed {
+            path: "(not retried)".into(),
+            reason: "denied".into(),
+            raw: None,
+            left_in_place: Some(false),
+        });
+        assert!(writer.finish(Outcome::Failed, None).complete);
+        let (failed, _) = failed_identities(dir.path(), &old(run_id)).expect("settled by its log");
+        assert_eq!(failed, [("(not retried)".to_string(), None)].into());
+
+        // A whole log that names the run's real failure, and no file by the
+        // entry's name: the entry was the count, and the file is retried.
+        let counted = "7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c";
+        let writer = place
+            .start(counted, 1, Role::Initiator, RunInfo::default())
+            .expect("a log");
+        writer.record(EventBody::FileFailed {
+            path: "real.txt".into(),
+            reason: "denied".into(),
+            raw: None,
+            left_in_place: Some(false),
+        });
+        assert!(writer.finish(Outcome::Failed, None).complete);
+        let (failed, _) = failed_identities(dir.path(), &old(counted)).expect("settled by its log");
+        assert_eq!(failed, [("real.txt".to_string(), None)].into());
+    }
+
     /// cr-ecm34-7: a file whose name is the old synthesized entry's,
     /// `(not retried)`, is a failed file like any other: the record that
     /// names it and counts it is whole, and its retry asks for it — no log
