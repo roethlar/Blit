@@ -21,6 +21,7 @@ pub use file_copy::{
     open_resume_partial_held, resume_copy_file, resume_copy_from, resume_copy_into,
     resume_copy_through, ResumeCopyOutcome,
 };
+pub use file_copy::{create_dirs_within, Within};
 pub use file_copy::{create_regular, create_regular_within, open_regular, open_to_read};
 #[cfg(unix)]
 pub use file_copy::{fresh_partial, fresh_partial_ready, make_partial_private};

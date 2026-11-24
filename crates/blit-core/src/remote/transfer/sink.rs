@@ -1211,6 +1211,9 @@ pub struct FsTransferSink {
     /// a `dst_root/link → /outside` symlink would write outside
     /// the destination root.
     canonical_dst_root: Option<PathBuf>,
+    /// cr-ecm37-1: the destination's root as this transfer holds it, from
+    /// its start: every file opened and directory made beneath it.
+    within: Option<Arc<crate::copy::Within>>,
     config: FsSinkConfig,
     /// Contract v7 (D-F): raw name bytes noted by the session for text
     /// paths whose resume records carry only the text
@@ -1299,10 +1302,21 @@ impl FsTransferSink {
         // exists) this captures the canonical form needed for
         // symlink-escape rejection.
         let canonical_dst_root = crate::path_safety::canonical_dest_root(&dst_root).ok();
+        // cr-ecm37-1: held now, for the transfer's life, with the name the
+        // transfer gave it.
+        let within = crate::path_safety::canonical_ancestor_and_tail(&dst_root)
+            .ok()
+            .map(|(canonical, tail)| {
+                Arc::new(
+                    crate::copy::Within::hold(canonical)
+                        .named(dst_root.clone(), tail.iter().collect::<PathBuf>()),
+                )
+            });
         Self {
             src_root,
             dst_root,
             canonical_dst_root,
+            within,
             config,
             byte_progress: None,
             small_file_probe: None,
@@ -1453,9 +1467,15 @@ impl FsTransferSink {
         #[cfg(test)]
         self.parent_create_attempts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        tokio::fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("creating directory {}", parent.display()))
+        // cr-ecm37-1: beneath the root this transfer holds.
+        let within = self.within.clone();
+        let directory = parent.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            crate::copy::create_dirs_within(&directory, within.as_deref())
+        })
+        .await
+        .map_err(|joined| eyre::eyre!("creating directory {}: {joined}", parent.display()))?
+        .with_context(|| format!("creating directory {}", parent.display()))
     }
 
     fn parent_readiness(&self, parent: &Path) -> Arc<tokio::sync::OnceCell<()>> {
@@ -1529,7 +1549,7 @@ impl FsTransferSink {
         // file all the same and gave it to nobody.
         let create = || {
             let dst = dst.to_path_buf();
-            let within = self.canonical_dst_root.clone();
+            let within = self.within.clone();
             async move {
                 tokio::task::spawn_blocking(move || -> std::io::Result<Made> {
                     let file = create_to_write(&dst, new_only, within.as_deref())?;
@@ -2040,7 +2060,7 @@ impl TransferSink for FsTransferSink {
             PreparedPayload::File(_) | PreparedPayload::TarShard { .. } => {
                 let src_root = self.src_root.clone();
                 let dst_root = self.dst_root.clone();
-                let canonical_dst_root = self.canonical_dst_root.clone();
+                let within = self.within.clone();
                 let config = self.config.clone();
                 let tar_probe = self
                     .small_file_probe
@@ -2056,7 +2076,7 @@ impl TransferSink for FsTransferSink {
                     PreparedPayload::File(header) => write_file_payload(
                         &src_root,
                         &dst_root,
-                        canonical_dst_root.as_deref(),
+                        within.as_deref(),
                         &header,
                         &config,
                     ),
@@ -2083,7 +2103,7 @@ impl TransferSink for FsTransferSink {
                         let mut outcome = write_tar_shard_payload(
                             &src_root,
                             &dst_root,
-                            canonical_dst_root.as_deref(),
+                            within.as_deref(),
                             &headers,
                             &data,
                             &config,
@@ -2531,7 +2551,7 @@ impl RecordWriter for FsRecordWriter<'_> {
 fn write_file_payload(
     src_root: &Path,
     dst_root: &Path,
-    canonical_dst_root: Option<&Path>,
+    within: Option<&crate::copy::Within>,
     header: &FileHeader,
     config: &FsSinkConfig,
 ) -> Result<SinkOutcome> {
@@ -2557,7 +2577,7 @@ fn write_file_payload(
     // Route through the same canonical-containment chokepoint that
     // write_file_stream uses.
     let raw = header.raw_relative_path.as_deref();
-    let dst = match canonical_dst_root {
+    let dst = match within.map(crate::copy::Within::path) {
         Some(canonical) => crate::path_safety::safe_join_contained_named(
             canonical,
             dst_root,
@@ -2581,7 +2601,7 @@ fn write_file_payload(
     // Past the containment check every remaining failure — this file's
     // own parent mkdir, the source read, the copy, its named streams and
     // its attributes — belongs to exactly this file.
-    match copy_resolved_file_payload(&src, &dst, header, config, canonical_dst_root) {
+    match copy_resolved_file_payload(&src, &dst, header, config, within) {
         Ok(outcome) => Ok(outcome),
         Err(failed) if is_unrepresentable_name_failure(&failed.error) => Ok(SinkOutcome::failed(
             &header.relative_path,
@@ -2748,7 +2768,7 @@ pub const THE_NAME_IS_TAKEN: &str = "something stands at the destination that wa
 fn create_to_write(
     dst: &Path,
     new_only: bool,
-    within: Option<&Path>,
+    within: Option<&crate::copy::Within>,
 ) -> std::io::Result<std::fs::File> {
     if new_only {
         #[cfg(unix)]
@@ -3946,7 +3966,7 @@ fn copy_resolved_file_payload(
     dst: &Path,
     header: &FileHeader,
     config: &FsSinkConfig,
-    within: Option<&Path>,
+    within: Option<&crate::copy::Within>,
 ) -> std::result::Result<SinkOutcome, FailedWrite> {
     use eyre::eyre;
     // R58-F4: dry-run must be side-effect-free. Bail before the
@@ -3972,7 +3992,7 @@ fn copy_resolved_file_payload(
     run_after_source_open_hook(src);
 
     if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent)
+        crate::copy::create_dirs_within(parent, within)
             .with_context(|| format!("creating directory {}", parent.display()))?;
     }
 
@@ -4049,7 +4069,7 @@ fn copy_and_stamp_opened(
     header: &FileHeader,
     config: &FsSinkConfig,
     partial: &mut PartialTarget<'_>,
-    within: Option<&Path>,
+    within: Option<&crate::copy::Within>,
 ) -> Result<SinkOutcome> {
     use eyre::eyre;
     let mut did_copy = false;
@@ -4115,7 +4135,7 @@ fn copy_and_stamp_opened(
             dst,
             Some(crate::wire_metadata::permissions_mode(src_meta)),
             header.size,
-            within,
+            within.map(crate::copy::Within::path),
         )
         .with_context(|| format!("resume copy {}", header.relative_path))?;
         partial.arm_held(cleanup, OnFailure::KeepUnfinished { created });
@@ -4351,7 +4371,7 @@ fn restamp_local_tar_mtimes(src_root: &Path, files: &mut [super::tar_safety::Ext
 fn write_tar_shard_payload(
     src_root: &Path,
     dst_root: &Path,
-    canonical_dst_root: Option<&Path>,
+    within: Option<&crate::copy::Within>,
     headers: &[FileHeader],
     data: &[u8],
     config: &FsSinkConfig,
@@ -4393,7 +4413,7 @@ fn write_tar_shard_payload(
     // entry path like `link/victim` write through the symlink.
     // Verify each extracted entry's destination against the
     // canonical root before writing.
-    if let Some(canonical) = canonical_dst_root {
+    if let Some(canonical) = within.map(crate::copy::Within::path) {
         for f in &extracted {
             crate::path_safety::verify_contained(canonical, &f.dest_path).with_context(|| {
                 format!("tar shard entry {:?} escapes destination root", f.dest_path)
@@ -4436,8 +4456,7 @@ fn write_tar_shard_payload(
         let results: Vec<(String, ClassifiedMember<()>)> = extracted
             .into_par_iter()
             .map(|f: ExtractedFile| {
-                let written =
-                    write_shard_member(&f, new_only, canonical_dst_root).map(|bytes| (bytes, ()));
+                let written = write_shard_member(&f, new_only, within).map(|bytes| (bytes, ()));
                 let member = classify_shard_member(dst_root, &f.rel, written);
                 (f.rel, member)
             })
@@ -4463,7 +4482,7 @@ fn write_tar_shard_payload(
                 let total_started = std::time::Instant::now();
                 let mkdir_started = std::time::Instant::now();
                 if let Some(parent) = f.dest_path.parent() {
-                    std::fs::create_dir_all(parent)
+                    crate::copy::create_dirs_within(parent, within)
                         .with_context(|| format!("create dir {}", parent.display()))?;
                 }
                 let mkdir = mkdir_started.elapsed();
@@ -4471,7 +4490,7 @@ fn write_tar_shard_payload(
                 prepare_to_write(&f.dest_path, f.windows_metadata.as_ref(), new_only)?;
 
                 let open_started = std::time::Instant::now();
-                let mut file = create_to_write(&f.dest_path, new_only, canonical_dst_root)
+                let mut file = create_to_write(&f.dest_path, new_only, within)
                     .map_err(|error| creation_failed(&f.dest_path, error, new_only))?;
                 // cr-ecm19-2: which file it made, in any run.
                 let own = file.metadata().ok().as_ref().and_then(file_identity);
@@ -4544,10 +4563,10 @@ fn write_tar_shard_payload(
 fn write_shard_member(
     file: &super::tar_safety::ExtractedFile,
     new_only: bool,
-    within: Option<&Path>,
+    within: Option<&crate::copy::Within>,
 ) -> std::result::Result<u64, FailedWrite> {
     if let Some(parent) = file.dest_path.parent() {
-        std::fs::create_dir_all(parent)
+        crate::copy::create_dirs_within(parent, within)
             .with_context(|| format!("create dir {}", parent.display()))?;
     }
     prepare_to_write(&file.dest_path, file.windows_metadata.as_ref(), new_only)?;
@@ -9655,8 +9674,38 @@ mod cr_win_1_tests {
             size: 3,
             windows_metadata: None,
         };
-        assert!(write_shard_member(&member, false, Some(&root)).is_err());
+        assert!(
+            write_shard_member(&member, false, Some(&crate::copy::Within::hold(&root))).is_err()
+        );
         assert!(!outside.join("member.bin").exists(), "nothing made outside");
+    }
+
+    /// cr-ecm37-1 (Linux): a tar member whose directory on the way leads out
+    /// of the destination has nothing made outside — no file, and none of
+    /// the directories it would need. By the name, they were made there.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_member_under_a_directory_that_leads_out_makes_nothing_outside() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink("../outside", dst.join("sub")).unwrap();
+        let root = std::fs::canonicalize(&dst).unwrap();
+        let member = crate::remote::transfer::tar_safety::ExtractedFile {
+            rel: "sub/x/member.bin".to_string(),
+            dest_path: dst.join("sub").join("x").join("member.bin"),
+            raw: None,
+            contents: b"new".to_vec(),
+            mtime: None,
+            permissions: None,
+            size: 3,
+            windows_metadata: None,
+        };
+        let within = crate::copy::Within::hold(&root).named(dst.clone(), PathBuf::new());
+        assert!(write_shard_member(&member, false, Some(&within)).is_err());
+        assert!(!outside.join("x").exists(), "nothing made outside");
     }
 
     /// cr-ecm33-1: an ordinary local copy through a link standing at its
