@@ -176,11 +176,12 @@ impl RunTotals {
                 continue;
             }
             named_texts.insert(failure.relative_path.clone());
-            // A failure the report kept says it itself (contract 30).
+            // A failure the report kept says it itself (contract 30) — and
+            // cr-ecm37-3: one whose disposition the destination could not
+            // tell is not known.
+            let left_here = failure.left_in_place || left(&failure.relative_path, raw.as_deref());
             files.push(FailedFile {
-                left_in_place: Some(
-                    failure.left_in_place || left(&failure.relative_path, raw.as_deref()),
-                ),
+                left_in_place: (left_here || !failure.left_unknown).then_some(left_here),
                 path: failure.relative_path.clone(),
                 raw,
                 reason: Some(failure.reason.clone()),
@@ -568,7 +569,7 @@ impl RunLog {
                         path: path.clone(),
                         reason: reason.clone(),
                         raw: raw(path),
-                        left_in_place: Some(*left_in_place),
+                        left_in_place: *left_in_place,
                     };
                     active.failed.insert((path.clone(), raw(path)));
                     vec![body]
@@ -1031,6 +1032,7 @@ mod tests {
                 raw_relative_path: Some(b"dup\xff.bin".to_vec()),
                 left_in_place: false,
                 path_shortened: false,
+                left_unknown: false,
             }],
             ..RunTotals::default()
         };
@@ -1148,6 +1150,24 @@ mod tests {
         assert_eq!(whole.failed_files()[1].left_in_place, Some(false));
     }
 
+    /// cr-ecm37-3: a failure the report kept as not known to have left its
+    /// copy is not known in the account either — never "nothing left".
+    #[test]
+    fn a_kept_unknown_is_not_known() {
+        let totals = RunTotals {
+            files_failed: 1,
+            failed_paths: vec!["u.bin".into()],
+            failures: vec![FileFailure {
+                relative_path: "u.bin".into(),
+                reason: "unseen".into(),
+                left_unknown: true,
+                ..FileFailure::default()
+            }],
+            ..RunTotals::default()
+        };
+        assert_eq!(totals.failed_files()[0].left_in_place, None);
+    }
+
     /// cr-ecm37-7: the join is linear in the leftover lists as well as in the
     /// failures. A hundred thousand failed files that all left a copy, half
     /// named by text and half by bytes, are joined well inside the bound:
@@ -1243,6 +1263,7 @@ mod tests {
                 raw_relative_path: Some(b"dup\xff".to_vec()),
                 left_in_place: false,
                 path_shortened: false,
+                left_unknown: false,
             }],
             ..RunTotals::default()
         };
@@ -1374,6 +1395,7 @@ mod tests {
                     raw_relative_path: None,
                     left_in_place: false,
                     path_shortened: false,
+                    left_unknown: false,
                 },
                 FileFailure {
                     relative_path: text.clone(),
@@ -1381,6 +1403,7 @@ mod tests {
                     raw_relative_path: Some(b"dup\xff.bin".to_vec()),
                     left_in_place: false,
                     path_shortened: false,
+                    left_unknown: false,
                 },
             ],
             ..RunTotals::default()

@@ -1012,6 +1012,7 @@ mod tests {
                 raw_relative_path: None,
                 left_in_place: false,
                 path_shortened: false,
+                left_unknown: false,
             }],
             ..RunTotals::default()
         };
@@ -1070,6 +1071,7 @@ mod tests {
                     raw_relative_path: None,
                     left_in_place: false,
                     path_shortened: false,
+                    left_unknown: false,
                 },
                 blit_core::remote::transfer::sink::FileFailure {
                     relative_path: shown.clone(),
@@ -1077,6 +1079,7 @@ mod tests {
                     raw_relative_path: Some(b"bad\xfe.txt".to_vec()),
                     left_in_place: false,
                     path_shortened: false,
+                    left_unknown: false,
                 },
             ],
             // Review cr-jl4-1: which failures left their own copy is kept.

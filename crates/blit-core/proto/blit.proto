@@ -1582,6 +1582,10 @@ message FileFailure {
   // report — a rendering for people, not a name: the exact name is in the
   // failed-path set, and nothing that names files takes this one for it.
   bool path_shortened = 5;
+  // Contract 32 (cr-ecm37-3): whether the failure left this run's copy is
+  // not known — the destination could not be looked at as the file closed.
+  // `left_in_place` is false then. Never read from `reason`.
+  bool left_unknown = 6;
 }
 
 // DESTINATION → SOURCE at close: the end that wrote bytes and

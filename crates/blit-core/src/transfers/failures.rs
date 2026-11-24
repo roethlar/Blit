@@ -87,6 +87,7 @@ mod tests {
             raw_relative_path: None,
             left_in_place: false,
             path_shortened: false,
+            left_unknown: false,
         }
     }
 
@@ -152,6 +153,7 @@ mod tests {
             raw_relative_path: Vec::new(),
             left_in_place: false,
             path_shortened: false,
+            left_unknown: false,
         }];
         let read_back = failures_from_wire(&wire);
         assert_eq!(read_back.len(), 1);

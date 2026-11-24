@@ -1102,6 +1102,7 @@ async fn skip_for_an_ungranted_path_is_a_violation() {
         raw_relative_path: Vec::new(),
         left_in_place: false,
         path_shortened: false,
+        left_unknown: false,
     })))
     .await
     .unwrap();
@@ -1158,6 +1159,7 @@ async fn skip_for_a_granted_need_then_source_done_completes_with_the_failure_rep
         raw_relative_path: Vec::new(),
         left_in_place: false,
         path_shortened: false,
+        left_unknown: false,
     })))
     .await
     .unwrap();

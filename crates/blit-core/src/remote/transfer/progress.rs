@@ -81,8 +81,9 @@ pub enum ProgressEvent {
         path: String,
         reason: String,
         /// D-2026-11-24-1: the failure left this run's incomplete copy in
-        /// place — never read from `reason`.
-        left_in_place: bool,
+        /// place — never read from `reason`. `None` (cr-ecm37-3): that is
+        /// not known; the destination could not be looked at.
+        left_in_place: Option<bool>,
     },
     /// DESTINATION side (JOB_LOGS jl-1b): the mirror-delete pass removed
     /// the entry at the wire `path`; a directory's path ends in `/`. `raw`
@@ -595,6 +596,20 @@ mod progress_totals_tests {
         ));
     }
 
+    /// cr-ecm37-3: a file whose failure may or may not have left its copy is
+    /// reported so on the per-file lane — not known, never "nothing left".
+    #[tokio::test]
+    async fn an_unknown_leftover_is_reported_not_known() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress = RemoteTransferProgress::new(tx);
+        let outcome = crate::remote::transfer::sink::SinkOutcome::failed_unknown("u.bin", "unseen");
+        progress.report_file_outcome("u.bin", &outcome).await;
+        match rx.try_recv() {
+            Ok(ProgressEvent::FileFailed { left_in_place, .. }) => assert_eq!(left_in_place, None),
+            other => panic!("{other:?}"),
+        }
+    }
+
     /// Review cr-jl1b-2: the facts a job log keeps ride a bounded lane, so
     /// while its reader lags the producer waits — nothing piles up in memory
     /// and nothing is dropped — and every event still reaches the UI lane.
@@ -636,7 +651,7 @@ mod progress_totals_tests {
                 r#"FileComplete { path: "f0" }"#,
                 r#"FileComplete { path: "f1" }"#,
                 r#"FileComplete { path: "f2" }"#,
-                r#"FileFailed { path: "g", reason: "denied", left_in_place: false }"#,
+                r#"FileFailed { path: "g", reason: "denied", left_in_place: Some(false) }"#,
                 r#"Deleted { path: "old", raw: None }"#,
             ]
         );
@@ -1185,8 +1200,11 @@ impl RemoteTransferProgress {
                 .iter()
                 .find(|failure| failure.relative_path == path);
             let reason = kept.map_or(REASON_NOT_KEPT, |failure| failure.reason.as_str());
-            let left = kept.is_some_and(|failure| failure.left_in_place)
-                || outcome.left_in_place_holds(path);
+            // cr-ecm37-3: and not known, where the destination could not tell.
+            let left = (!outcome.left_unknown_holds(path)).then(|| {
+                kept.is_some_and(|failure| failure.left_in_place)
+                    || outcome.left_in_place_holds(path)
+            });
             self.report_file_failed_leaving(path.to_string(), reason.to_string(), left)
                 .await;
         } else {
@@ -1197,7 +1215,8 @@ impl RemoteTransferProgress {
     /// Report a file that did not land on the DESTINATION — see
     /// [`ProgressEvent::FileFailed`].
     pub async fn report_file_failed(&self, path: String, reason: String) {
-        self.report_file_failed_leaving(path, reason, false).await;
+        self.report_file_failed_leaving(path, reason, Some(false))
+            .await;
     }
 
     /// [`report_file_failed`](Self::report_file_failed), saying whether the
@@ -1206,7 +1225,7 @@ impl RemoteTransferProgress {
         &self,
         path: String,
         reason: String,
-        left_in_place: bool,
+        left_in_place: Option<bool>,
     ) {
         if self.audit.is_some() {
             self.audit(ProgressEvent::FileFailed {

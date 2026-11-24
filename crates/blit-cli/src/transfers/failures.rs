@@ -174,6 +174,7 @@ mod tests {
             raw_relative_path: None,
             left_in_place: false,
             path_shortened: false,
+            left_unknown: false,
         }
     }
 

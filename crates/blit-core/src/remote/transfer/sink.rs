@@ -196,6 +196,10 @@ pub struct FileFailure {
     /// set. Read back from a peer's report; never set where a failure is
     /// made.
     pub path_shortened: bool,
+    /// cr-ecm37-3: whether the failure left this run's copy is not known —
+    /// the destination could not be looked at. `left_in_place` is false
+    /// then.
+    pub left_unknown: bool,
 }
 
 impl FileFailure {
@@ -226,6 +230,7 @@ impl FileFailure {
                 .filter(|raw| raw.len() <= MAX_FAILURE_PATH_BYTES)
                 .unwrap_or_default(),
             left_in_place: self.left_in_place,
+            left_unknown: self.left_unknown,
         }
     }
 
@@ -240,6 +245,8 @@ impl FileFailure {
             // cr-ecm34-5: as the wire carries it (contract 30).
             left_in_place: wire.left_in_place,
             path_shortened: wire.path_shortened,
+            // cr-ecm37-3: as the wire carries it (contract 32).
+            left_unknown: wire.left_unknown,
         }
     }
 }
@@ -311,6 +318,12 @@ pub struct SinkOutcome {
     /// still there; once a retry removed it, a file that appears at the
     /// path later is protected by `--ignore-existing` like any other.
     removed_incomplete: std::collections::HashSet<String>,
+    /// cr-ecm37-3: the failed paths whose failure may or may not have left
+    /// this run's copy — the destination could not be looked at — and how
+    /// many failures said so, for the account to tell whether its report
+    /// carried them all.
+    left_unknown: std::collections::HashSet<String>,
+    left_unknown_total: u64,
 }
 
 impl SinkOutcome {
@@ -328,6 +341,8 @@ impl SinkOutcome {
             left_in_place_raw: std::collections::HashSet::new(),
             failed_identities: std::collections::HashSet::new(),
             removed_incomplete: std::collections::HashSet::new(),
+            left_unknown: std::collections::HashSet::new(),
+            left_unknown_total: 0,
         }
     }
 
@@ -348,6 +363,12 @@ impl SinkOutcome {
         self.left_in_place.contains(relative_path)
     }
 
+    /// cr-ecm37-3: whether `relative_path`'s failure may or may not have
+    /// left this run's copy — the destination could not be looked at.
+    pub fn left_unknown_holds(&self, relative_path: &str) -> bool {
+        self.left_unknown.contains(relative_path)
+    }
+
     /// One file that could not be written. Nothing is counted as landed
     /// for it — a failed file is never a written file, whatever partial
     /// bytes reached the destination.
@@ -364,6 +385,15 @@ impl SinkOutcome {
     ) -> Self {
         let mut outcome = Self::default();
         outcome.record_failure_leaving(relative_path, None, reason, left_in_place);
+        outcome
+    }
+
+    /// cr-ecm37-3: [`failed`](Self::failed), saying that whether the failure
+    /// left this run's copy is not known — the destination could not be
+    /// looked at.
+    pub fn failed_unknown(relative_path: impl Into<String>, reason: impl Into<String>) -> Self {
+        let mut outcome = Self::default();
+        outcome.record_failure_as(relative_path.into(), None, reason.into(), None);
         outcome
     }
 
@@ -395,8 +425,29 @@ impl SinkOutcome {
         reason: impl Into<String>,
         left_in_place: bool,
     ) {
-        let relative_path = relative_path.into();
-        let reason = reason.into();
+        self.record_failure_as(
+            relative_path.into(),
+            raw_relative_path,
+            reason.into(),
+            Some(left_in_place),
+        );
+    }
+
+    /// Record one per-file failure with its disposition: `Some(true)` it left
+    /// this run's copy, `Some(false)` it left nothing, `None` (cr-ecm37-3)
+    /// that is not known.
+    fn record_failure_as(
+        &mut self,
+        relative_path: String,
+        raw_relative_path: Option<Vec<u8>>,
+        reason: String,
+        left: Option<bool>,
+    ) {
+        let left_in_place = left == Some(true);
+        if left.is_none() {
+            self.left_unknown.insert(relative_path.clone());
+            self.left_unknown_total = self.left_unknown_total.saturating_add(1);
+        }
         // Every contained failure is logged here, exactly once — the one
         // point every recorded failure passes through. A contained file
         // that logs nothing is indistinguishable from a transferred one,
@@ -429,6 +480,7 @@ impl SinkOutcome {
                 reason,
                 raw_relative_path,
                 left_in_place,
+                left_unknown: left.is_none(),
                 path_shortened: false,
             });
         }
@@ -502,6 +554,10 @@ impl SinkOutcome {
             .extend(other.left_in_place_raw.iter().cloned());
         self.removed_incomplete
             .extend(other.removed_incomplete.iter().cloned());
+        self.left_unknown.extend(other.left_unknown.iter().cloned());
+        self.left_unknown_total = self
+            .left_unknown_total
+            .saturating_add(other.left_unknown_total);
     }
 
     /// cr-rework-1: the failed paths whose failure left this run's own
@@ -528,6 +584,25 @@ impl SinkOutcome {
             out.push(entry.clone());
         }
         (out, false)
+    }
+
+    /// The leftover account in wire form: the leftovers by text and by
+    /// bytes, and whether the account is inexact — either list cut short,
+    /// or (cr-ecm37-3) a failure whose disposition is not known that
+    /// `reported`, the wire report, does not carry with its flag: past the
+    /// report's cap, or with its path shortened, no entry names it.
+    pub fn wire_left_account(
+        &self,
+        reported: &[crate::generated::FileFailure],
+    ) -> (Vec<String>, Vec<Vec<u8>>, bool) {
+        let (text, text_truncated) = self.wire_left_in_place();
+        let (raw, raw_truncated) = self.wire_left_in_place_raw();
+        let said = reported
+            .iter()
+            .filter(|failure| failure.left_unknown && !failure.path_shortened)
+            .count() as u64;
+        let unsaid = self.left_unknown_total > said;
+        (text, raw, text_truncated || raw_truncated || unsaid)
     }
 
     /// JOB_LOGS review cr-jl4fix2-1: name each failure recorded by its text
@@ -1701,9 +1776,16 @@ impl TransferSink for FsTransferSink {
             .expect("resume-files lock poisoned")
             .get(relative_path)
             .map(|partial| (partial.made, partial.identity));
-        let stands = match partial {
+        //
+        // cr-ecm37-3: a destination that cannot be looked at — its
+        // directory's search permission taken, say — tells nothing: what
+        // stands, and so what was left, is not known (`Err`, with why), and
+        // the failure says so. Taken for gone, a partial that stood was
+        // reported nothing left, and an `--ignore-existing` retry would keep
+        // it as a file the user had put there.
+        let stands: std::result::Result<bool, String> = match partial {
             Some((_, Some(identity))) => {
-                resolve_resume_destination(
+                let looked = match resolve_resume_destination(
                     &self.containment,
                     &self.dst_root,
                     self.canonical_dst_root.as_deref(),
@@ -1712,19 +1794,32 @@ impl TransferSink for FsTransferSink {
                     "block-fail",
                 )
                 .await
-                .ok()
-                .and_then(|dst| std::fs::metadata(dst).ok())
-                .as_ref()
-                .and_then(file_identity)
-                    == Some(identity)
+                {
+                    Ok(dst) => std::fs::metadata(dst).map_err(eyre::Report::from),
+                    Err(unresolved) => Err(unresolved),
+                };
+                match looked {
+                    Ok(found) => Ok(file_identity(&found) == Some(identity)),
+                    // Gone, by the error's kind: nothing of it stands.
+                    Err(unseen)
+                        if unseen
+                            .chain()
+                            .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+                            .any(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+                    {
+                        Ok(false)
+                    }
+                    Err(unseen) => Err(format!("{unseen:#}")),
+                }
             }
-            _ => false,
+            _ => Ok(false),
         };
         self.forget_resume(relative_path);
         let held_left = held.as_ref().is_some_and(|(_, left)| *left);
         let left = match partial {
-            Some((made, _)) => stands && (made || held_left),
-            None => held_left,
+            Some((made, _)) if made || held_left => stands,
+            Some(_) => Ok(false),
+            None => Ok(held_left),
         };
         let kept = || {
             format!(
@@ -1732,19 +1827,32 @@ impl TransferSink for FsTransferSink {
                  resume"
             )
         };
-        Ok(match held {
-            Some((held, _)) if left && !held_left => SinkOutcome::failed_leaving(
+        Ok(match (held, left) {
+            (held, Err(unseen)) => {
+                let account = match held {
+                    Some((held, _)) => format!("{reason}; {held}"),
+                    None => reason.to_string(),
+                };
+                SinkOutcome::failed_unknown(
+                    relative_path,
+                    format!(
+                        "{account}; whether this run's incomplete copy is left in place is not \
+                         known: the destination could not be looked at ({unseen})"
+                    ),
+                )
+            }
+            (Some((held, _)), Ok(left)) if left && !held_left => SinkOutcome::failed_leaving(
                 relative_path,
                 format!("{reason}; {held}; {}", kept()),
                 true,
             ),
-            Some((held, _)) => {
+            (Some((held, _)), Ok(left)) => {
                 SinkOutcome::failed_leaving(relative_path, format!("{reason}; {held}"), left)
             }
-            None if left => {
+            (None, Ok(true)) => {
                 SinkOutcome::failed_leaving(relative_path, format!("{reason}; {}", kept()), true)
             }
-            None => SinkOutcome::failed(relative_path, reason),
+            (None, Ok(false)) => SinkOutcome::failed(relative_path, reason),
         })
     }
 
@@ -7275,6 +7383,7 @@ mod tests {
                 raw_relative_path: None,
                 left_in_place: false,
                 path_shortened: false,
+                left_unknown: false,
             })
             .collect();
         unbounded.files_failed_total = unbounded.failures.len() as u64;
@@ -7528,6 +7637,7 @@ mod tests {
             raw_relative_path: None,
             left_in_place: false,
             path_shortened: false,
+            left_unknown: false,
         };
         assert_eq!(FileFailure::from_wire(&failure.to_wire()), failure);
     }
@@ -10088,6 +10198,27 @@ mod cr_win_1_tests {
             .starts_with("source: read error; "));
     }
 
+    /// cr-ecm37-3: a failure whose disposition is not known is said by its
+    /// report entry; past the report's cap, where no entry carries it, the
+    /// leftover account is inexact.
+    #[test]
+    fn an_unknown_past_the_report_makes_the_left_account_inexact() {
+        let mut said = SinkOutcome::default();
+        said.merge_failures(&SinkOutcome::failed_unknown("u.bin", "unseen"));
+        let reported = said.wire_failures();
+        assert!(reported[0].left_unknown);
+        assert!(!said.wire_left_account(&reported).2);
+
+        let mut past = SinkOutcome::default();
+        for n in 0..MAX_REPORTED_FILE_FAILURES {
+            past.record_failure(format!("f{n}"), "denied");
+        }
+        past.merge_failures(&SinkOutcome::failed_unknown("u.bin", "unseen"));
+        let reported = past.wire_failures();
+        assert!(reported.iter().all(|failure| !failure.left_unknown));
+        assert!(past.wire_left_account(&reported).2);
+    }
+
     /// cr-ecm36-3: a failure whose path the report shortens says so on the
     /// wire, and reads back saying so.
     #[test]
@@ -10204,6 +10335,48 @@ mod cr_win_1_tests {
             .unwrap();
         assert!(!outcome.failures[0].left_in_place, "{outcome:?}");
         assert!(!outcome.left_in_place_holds("gone.bin"));
+    }
+
+    /// cr-ecm37-3: a resume record that closes where the destination cannot
+    /// be looked at — the search permission of its file's directory taken —
+    /// says that what it left is not known, and its outcome holds it so.
+    /// Taken for gone, it was reported nothing left while its partial stood.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_resume_record_closing_unseen_says_not_known() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // SAFETY: `geteuid` has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: a directory's permissions do not bind the superuser");
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(dst.join("sub")).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        sink.note_resume_baseline("sub/hidden.bin", ResumeBaseline::Whole);
+        sink.hold_resume_partial("sub/hidden.bin", 8).await.unwrap();
+        std::fs::set_permissions(dst.join("sub"), std::fs::Permissions::from_mode(0o600)).unwrap();
+        let outcome = sink
+            .fail_resume_record("sub/hidden.bin", "source: read error")
+            .await;
+        std::fs::set_permissions(dst.join("sub"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let outcome = outcome.unwrap();
+        assert!(outcome.failures[0].left_unknown, "{outcome:?}");
+        assert!(!outcome.failures[0].left_in_place);
+        assert!(outcome.left_unknown_holds("sub/hidden.bin"));
+        assert_eq!(
+            std::fs::metadata(dst.join("sub/hidden.bin")).unwrap().len(),
+            9,
+            "the partial stands"
+        );
     }
 
     /// cr-ecm22-5: a record the source closes failed lets its partial go —

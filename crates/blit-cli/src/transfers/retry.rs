@@ -250,6 +250,54 @@ impl PassFailures {
         }
     }
 
+    /// cr-ecm37-3: the failed files whose failure may or may not have left
+    /// this run's copy — the destination could not be looked at — by the
+    /// report's flag. One whose path the report shortened names no file;
+    /// the destination marks the account inexact for it.
+    fn left_unknown(&self) -> RetrySet {
+        let mut set = RetrySet::default();
+        for failure in self
+            .failures
+            .iter()
+            .filter(|failure| failure.left_unknown && !failure.path_shortened)
+        {
+            match &failure.raw_relative_path {
+                Some(raw) => {
+                    set.raw.insert(raw.clone());
+                }
+                None => {
+                    set.text.insert(PathBuf::from(&failure.relative_path));
+                }
+            }
+        }
+        set
+    }
+
+    /// The set the next pass is given, the leftovers among it, and whether
+    /// it is short of the failures (see the retry loop). Under
+    /// `--ignore-existing`, a failure whose leftover cannot be classified is
+    /// not given: every one past a cut leftover list, and (cr-ecm37-3) each
+    /// one the destination could not tell — retried with the flag its
+    /// partial would be kept as a file the user put there, retried as a
+    /// leftover a file put there since would be overwritten. They stay
+    /// reported as not retried.
+    fn pass_set(&self, ignore_existing: bool) -> (RetrySet, RetrySet, bool) {
+        let (set, truncated) = self.retry_set();
+        if !ignore_existing {
+            return (set, RetrySet::default(), truncated);
+        }
+        let left = self.left_in_place().intersection(&set);
+        if self.left_in_place_truncated {
+            return (left.clone(), left, true);
+        }
+        let unknown = self.left_unknown().intersection(&set);
+        if unknown.is_empty() {
+            (set, left, truncated)
+        } else {
+            (set.difference(&unknown), left, true)
+        }
+    }
+
     /// Fold a second session of the same pass into this report.
     fn merge(&mut self, other: PassFailures) {
         self.files_failed = self.files_failed.saturating_add(other.files_failed);
@@ -572,7 +620,6 @@ where
         if current.files_failed == 0 {
             break;
         }
-        let (set, truncated) = current.retry_set();
         // cr-win-1: a retry pass compares exactly as the main pass did —
         // a failed write never leaves a target that looks finished (the
         // sink removes it or holds it one byte off the source's size), so
@@ -589,16 +636,7 @@ where
         // skipped and its failure cleared, retried without it a file the
         // user asked to keep is overwritten — so none of them is retried:
         // they stay reported as not retried.
-        let left: RetrySet = if args.ignore_existing {
-            current.left_in_place().intersection(&set)
-        } else {
-            RetrySet::default()
-        };
-        let (set, truncated) = if args.ignore_existing && current.left_in_place_truncated {
-            (left.clone(), true)
-        } else {
-            (set, truncated)
-        };
+        let (set, left, truncated) = current.pass_set(args.ignore_existing);
         if set.is_empty() {
             // cr-ecm35-7: no pass can start — no failed file could be named
             // for it (a name over the wire's budget, say) — so none of them
@@ -719,6 +757,34 @@ async fn wait_before_pass(args: &TransferArgs, _pass: u32) {
 mod tests {
     use super::*;
 
+    /// cr-ecm37-3: under --ignore-existing a failure that may or may not
+    /// have left this run's copy is not retried — kept, the copy would stand
+    /// as a file the user put there; overwritten, a file put there since
+    /// would be lost — and the pass says it was not given all. Without the
+    /// flag it is retried like any other.
+    #[test]
+    fn an_unknown_leftover_is_not_retried_under_ignore_existing() {
+        let failure = |path: &str, unknown: bool| FileFailure {
+            relative_path: path.into(),
+            reason: "r".into(),
+            left_unknown: unknown,
+            ..FileFailure::default()
+        };
+        let report = PassFailures {
+            files_failed: 2,
+            failures: vec![failure("u.bin", true), failure("k.bin", false)],
+            failed_paths: vec!["u.bin".into(), "k.bin".into()],
+            failed_paths_raw: vec![Vec::new(), Vec::new()],
+            ..PassFailures::default()
+        };
+        let (set, _, truncated) = report.pass_set(true);
+        assert_eq!(set.text, [PathBuf::from("k.bin")].into());
+        assert!(truncated);
+        let (set, _, truncated) = report.pass_set(false);
+        assert_eq!(set.len(), 2);
+        assert!(!truncated);
+    }
+
     /// cr-ecm12-2: whether a pass is one of plain `--ignore-existing` —
     /// `false` for the pass of this run's own incomplete copies, which
     /// says what they are (`retry_left`) so that a file standing at one
@@ -737,6 +803,7 @@ mod tests {
             raw_relative_path: None,
             left_in_place: false,
             path_shortened: false,
+            left_unknown: false,
         }
     }
 
@@ -1497,6 +1564,7 @@ mod cr_fix2_2_tests {
                 raw_relative_path: None,
                 left_in_place: false,
                 path_shortened: false,
+                left_unknown: false,
             }],
             failed_paths: vec!["a".to_string()],
             failed_paths_truncated: false,
