@@ -11318,9 +11318,14 @@ mod own_incomplete_copy_tests {
         ] {
             std::fs::write(root.join(name), b"1234").unwrap();
         }
-        std::fs::write(root.join(raw_name), b"1234").unwrap();
+        // ci-macos-eilseq: a name that is not text only where the filesystem
+        // takes one — APFS refuses it (`Illegal byte sequence`).
+        let raw = crate::raw_name::destination_can_store_raw_names();
+        if raw {
+            std::fs::write(root.join(raw_name), b"1234").unwrap();
+        }
         let (sightings, listed) = walked(&root).await;
-        assert_eq!(listed.len(), 9);
+        assert_eq!(listed.len(), if raw { 9 } else { 8 });
 
         // Since the walk read them — and more than a tick of any system's
         // clock later, so that the time a file was last changed moves
@@ -11349,13 +11354,19 @@ mod own_incomplete_copy_tests {
         std::fs::rename(root.join("another"), root.join("replaced")).unwrap();
 
         let account = sightings.account(&root, &listed);
-        assert_eq!(account.len(), 9, "each file on the manifest, as seen");
+        assert_eq!(
+            account.len(),
+            if raw { 9 } else { 8 },
+            "each file on the manifest, as seen"
+        );
         let account = held_of(account);
         assert!(account.is_of(&root));
         assert!(account.holds(b"same", &now(&root.join("same"))));
         assert!(account.holds(b"sub/deep", &now(&root.join("sub/deep"))));
-        assert!(account.holds(b"bad\xff.bin", &now(&root.join(raw_name))));
-        assert!(!account.holds("bad\u{fffd}.bin".as_bytes(), &now(&root.join(raw_name))));
+        if raw {
+            assert!(account.holds(b"bad\xff.bin", &now(&root.join(raw_name))));
+            assert!(!account.holds("bad\u{fffd}.bin".as_bytes(), &now(&root.join(raw_name))));
+        }
         for changed in [
             "rewritten",
             "grown",
