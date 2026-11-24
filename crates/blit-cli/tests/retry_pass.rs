@@ -224,6 +224,39 @@ fn a_single_file_freed_during_the_wait_lands_on_the_retry_pass() {
     }
 }
 
+/// cr-ecm38-1: a list entry that names no file of a single-file source —
+/// `.` — fails the first pass and every retry: a retry asks for the entry as
+/// the list gave it, never for the source by its bytes. Recorded by its
+/// bytes, the retry copied the source the list never selected and exited 0.
+#[test]
+fn a_list_entry_naming_no_file_is_never_retried_into_the_source() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let src = temp.path().join("Report.txt");
+    fs::write(&src, b"not selected").expect("write the source");
+    let out = temp.path().join("out");
+    fs::create_dir_all(&out).expect("the destination");
+    let list = temp.path().join("list.txt");
+    fs::write(&list, ".\n").expect("write the list");
+    let output = cli_command()
+        .args(["copy", "--yes", "--retries", "2", "--retry-wait", "0"])
+        .arg("--files-from")
+        .arg(&list)
+        .arg(&src)
+        .arg(format!("{}/", out.display()))
+        .output()
+        .expect("run blit");
+    let (stdout, stderr) = (stdout_of(&output), stderr_of(&output));
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "the entry names no file\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !out.join("Report.txt").exists(),
+        "the source the list never selected is not copied\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
 /// cr-ecm11-1: the same within one command. The file that failed is
 /// replaced, during the wait, by a directory holding another file of its
 /// name: the retry pass asks for the source itself, finds no file there,
