@@ -507,8 +507,12 @@ impl RunLog {
             if let Some(earlier) = earlier {
                 let _ = earlier.await;
             }
+            // cr-ecm39-4: the names this lane's pass heard, its own — one
+            // entry for each text, as its manifest grants — so a file is
+            // named by the bytes of its own pass, never another's.
+            let mut names: HashMap<String, String> = HashMap::new();
             while let Some(event) = receiver.recv().await {
-                log.observe_from(&event, end).await;
+                log.observe_from(&event, end, Some(&mut names)).await;
             }
         }));
         Some(sender)
@@ -518,12 +522,27 @@ impl RunLog {
     /// sending end, sent — failed or deleted, and the phase changes. The
     /// event is from the end the log's role names.
     pub async fn observe(&self, event: &ProgressEvent) {
-        self.observe_from(event, None).await;
+        self.observe_from(event, None, None).await;
     }
 
     /// [`observe`](Self::observe) for an event from `end` of the transfer
     /// (`None`: the end the log's role names).
-    async fn observe_from(&self, event: &ProgressEvent, end: Option<End>) {
+    ///
+    /// cr-ecm39-4: `names`, the names heard on the lane `event` came by — one
+    /// pass's — name its files; without a lane, the log's own (one
+    /// session's). Named by every pass's, a text-named file's failure was
+    /// logged as an earlier pass's byte-named sibling of its spelling.
+    async fn observe_from(
+        &self,
+        event: &ProgressEvent,
+        end: Option<End>,
+        mut names: Option<&mut HashMap<String, String>>,
+    ) {
+        if let (ProgressEvent::RawName { path, raw }, Some(names)) = (event, names.as_deref_mut()) {
+            names
+                .entry(path.clone())
+                .or_insert_with(|| crate::raw_name::escape_raw(raw));
+        }
         let (sender, bodies) = {
             let mut state = self.state();
             let (planned_files, planned_bytes) = state
@@ -534,7 +553,10 @@ impl RunLog {
             let Some(active) = state.active.as_mut() else {
                 return;
             };
-            let raw = |path: &str| active.raw_names.get(path).cloned();
+            let raw = |path: &str| match names.as_deref() {
+                Some(names) => names.get(path).cloned(),
+                None => active.raw_names.get(path).cloned(),
+            };
             let bodies = match event {
                 // A run that writes nothing copies nothing.
                 ProgressEvent::FileComplete { .. } if disposition != Disposition::Written => {
@@ -1356,6 +1378,65 @@ mod tests {
                 .collect();
             assert_eq!(left, [logged_left], "raw {raw_left}, text {text_left}");
         }
+    }
+
+    /// cr-ecm39-4: each pass's live events are named by the bytes heard on
+    /// that pass's own lane. A byte-named file copied by one pass, and its
+    /// text-named sibling of the same spelling failing on the next, are
+    /// logged each as itself. Named by every pass's, the sibling's failure
+    /// was logged as the byte-named file.
+    #[tokio::test]
+    async fn each_pass_names_its_own_files() {
+        use crate::job_log::{open_log, LogLine};
+        let dir = tempfile::tempdir().unwrap();
+        let log = RunLog::new(
+            Some(LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: DEFAULT_KEEP,
+                finished: None,
+            }),
+            "0123456789abcdef0123456789abcdef",
+        );
+        log.start(Role::Initiator, RunInfo::default(), None);
+        let text = "dup\u{FFFD}".to_string();
+        let first = crate::remote::transfer::RemoteTransferProgress::audit_only(
+            log.audit_lane_at(End::Receiving).expect("a lane"),
+        );
+        first
+            .report_raw_name(text.clone(), b"dup\xff".to_vec())
+            .await;
+        first.report_file_complete(text.clone()).await;
+        drop(first);
+        let second = crate::remote::transfer::RemoteTransferProgress::audit_only(
+            log.audit_lane_at(End::Receiving).expect("a lane"),
+        );
+        second
+            .report_file_failed(text.clone(), "denied".into())
+            .await;
+        drop(second);
+        let report = log
+            .close(Outcome::Failed, None, None)
+            .await
+            .expect("a report");
+        let named: Vec<(&'static str, Option<String>)> = open_log(&report.path.expect("a log"))
+            .unwrap()
+            .filter_map(|line| match line.unwrap() {
+                LogLine::Event(event) => match event.body {
+                    EventBody::FileCopied { raw, .. } => Some(("copied", raw)),
+                    EventBody::FileFailed { raw, .. } => Some(("failed", raw)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("copied", Some(crate::raw_name::escape_raw(b"dup\xff"))),
+                ("failed", None),
+            ]
+        );
     }
 
     /// log-named-text: a failure the account names by its text alone is a
