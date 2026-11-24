@@ -1,9 +1,9 @@
 # cr-ecm35-6: an older run record's synthetic `(not retried)` entry was retried as a file
 
 **Severity**: HIGH — a retry can copy an unrelated file and leave the run's own failure out, then exit 0. cr-ecm34-7 made every recorded failure a file. A record written before it may still hold the synthetic entry that counted the failures no retry pass was given, named `(not retried)`. Read now, that entry was taken for a file of that name.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r37` (Codex openreview, 2026-11-24) reviewed `d2494965..2c55cb3a` — the `combined-r36` fixes — with `guard_confirmed: true`: "Exclusive creation, applying permissions through the open handle, and sharing failure accounting between the log and saved record are sound choices. The unretried count also works through the CLI. With one requested name over the wire budget, it reported one failure and one file not retried." "A complete daemon log naming a real file called `(not retried)` rebuilt the record with `failures_are_files = false`. A client without a local log then refuses a retry its daemon already identified. Set the flag when file events supply the replacement list." The remaining work is cr-ecm36-7
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm35-6`)
+**Commit**: `8735e2fa`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r36` over `dc14afc4..d2494965` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r36.codex.md`. It completes cr-ecm34-7 (`727df1e0`) in part; the gap is the one its record named.
 
 ## Evidence

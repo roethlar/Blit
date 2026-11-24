@@ -3,9 +3,9 @@
 **Severity**: HIGH — a recovered `--ignore-existing` retry can skip its own partial, or be refused for good. Two errors in opposite directions:
 - **Logged as known.** A failure past the reason cap, missing from a left-in-place list cut short, was logged as known to have left nothing (`Some(false)`). A retry recovered from that log could keep its own partial as a file.
 - **Unknown for the whole list.** One unknown event — a log from before the field — kept the record's whole list marked incomplete, even after that very file had landed.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r37` (Codex openreview, 2026-11-24) reviewed `d2494965..2c55cb3a` — the `combined-r36` fixes — with `guard_confirmed: true`: "Exclusive creation, applying permissions through the open handle, and sharing failure accounting between the log and saved record are sound choices. The unretried count also works through the CLI. With one requested name over the wire budget, it reported one failure and one file not retried." "Replaying an unknown disposition followed by a source-open failure carrying `Some(false)` produced an empty leftover list marked complete. That later attempt never touched the destination. A recovered `--ignore-existing` retry can consequently skip an earlier partial. Clear uncertainty on evidence of a copy, removal or confirmed leftover." The remaining work is cr-ecm36-6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm35-5`)
+**Commit**: `51608679`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r36` over `dc14afc4..d2494965` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r36.codex.md`. It completes cr-ecm34-5 (`183408ae`) and cr-ecm34-6 (`4db619b2`).
 
 ## Evidence

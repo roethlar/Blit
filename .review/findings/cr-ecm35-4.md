@@ -1,9 +1,9 @@
 # cr-ecm35-4: a resume abort forgot that the receiver made the partial it held
 
 **Severity**: MEDIUM — a run reports nothing left where it left a partial. A wire resume whose receiver made a fresh partial (the comparison's whole-file baseline) and wrote a block met a source that closed the record failed. The partial stayed, unstamped and one byte longer than its eight-byte source, but the outcome said `left_in_place = false`. cr-ecm34-4 kept a held failure's account across the source's abort, but the hold itself did not say whether it had made the file.
-**Status**: Fixed on Unix; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r37` (Codex openreview, 2026-11-24) reviewed `d2494965..2c55cb3a` — the `combined-r36` fixes — with `guard_confirmed: true`: "Exclusive creation, applying permissions through the open handle, and sharing failure accounting between the log and saved record are sound choices. The unretried count also works through the CLI. With one requested name over the wire budget, it reported one failure and one file not retried." "With an injected block I/O error followed by a source abort, a nine-byte partial remained and the receiver reported `left_in_place = false`. Removing the partial before an otherwise identical abort produced `true` for an absent file. Use the held file's identity and the destination's state at close alongside the earlier error." The remaining work is cr-ecm36-5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm35-4`)
+**Commit**: `6da696f5`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r36` over `dc14afc4..d2494965` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r36.codex.md`. It completes cr-ecm34-4 (`13675159`).
 
 ## Evidence

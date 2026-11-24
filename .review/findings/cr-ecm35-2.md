@@ -3,9 +3,9 @@
 **Severity**: HIGH — a copy can look finished when it is not, and a private file can be copied readable by others. Brought in by cr-ecm34-3's fallback, and partly older:
 - `mmap_copy_file` never gave its destination the source's mode. A `0600` source copied over a `0644` destination stayed `0644`.
 - A copy that failed after the destination was cut to the source's size left it there. A source that shrank from eight bytes to three left eight bytes, ending in five zeroes.
-**Status**: Fixed on Linux; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r37` (Codex openreview, 2026-11-24) reviewed `d2494965..2c55cb3a` — the `combined-r36` fixes — with `guard_confirmed: true`: "Exclusive creation, applying permissions through the open handle, and sharing failure accounting between the log and saved record are sound choices. The unretried count also works through the CLI. With one requested name over the wire budget, it reported one failure and one file not retried." "When the destination is a symlink to the file being written, cleanup compares the link's inode with the target's inode and returns the original error. A read failure can leave a partially written target at the advertised source length with no `LeftInPlace` marker. The sink already handles this case through its retained descriptor." The remaining work is cr-ecm36-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm35-2`)
+**Commit**: `795a9662`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r36` over `dc14afc4..d2494965` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r36.codex.md`. It completes cr-ecm34-3 (`71363fa9`).
 
 ## Evidence

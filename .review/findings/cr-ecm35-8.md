@@ -1,9 +1,9 @@
 # cr-ecm35-8: the scoped scan's diagnostics were found by a prefix of their text
 
 **Severity**: MEDIUM — a breach of D-2026-11-24-1 that misreports a reason. A retry pass's scoped scan reports every requested path it did not enumerate. When the scan had recorded an error for that path, the reason is that error. The scan kept its errors as messages, `"{path} ({reason})"`, and the report found a path's error by the prefix `"{path} ("`. So `a (backup)`'s entry answered for `a`, and its tail became the reason: "backup) (not found".
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r37` (Codex openreview, 2026-11-24) reviewed `d2494965..2c55cb3a` — the `combined-r36` fixes — with `guard_confirmed: true`: "Exclusive creation, applying permissions through the open handle, and sharing failure accounting between the log and saved record are sound choices. The unretried count also works through the CLI. With one requested name over the wire budget, it reported one failure and one file not retried." "With 70 Unix filenames sharing one display spelling, one copied and 69 failed. The saved record named only 65, so `jobs retry` refused. The retry scan also assigned one unreadable entry's reason to two distinct raw names. Use exact identities in both producers and in the summary join. Its growing-vector search took 0.17, 0.68 and 2.72 seconds for 8,000, 16,000 and 32,000 unique names in the test build." The remaining work is cr-ecm36-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm35-8`)
+**Commit**: `efc08c79`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r36` over `dc14afc4..d2494965` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r36.codex.md`.
 
 ## Evidence

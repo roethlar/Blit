@@ -4,9 +4,9 @@
 - A dangling link passed the destination's containment check, which judged its lexical parent. The opener then made the file where the link led, outside the destination.
 - A file that vanished between the opener's two opens was made by the second, recorded as one that stood there.
 - The resolver refused a chain of 40 links, which Linux opens.
-**Status**: Fixed on Unix; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r37` (Codex openreview, 2026-11-24) reviewed `d2494965..2c55cb3a` — the `combined-r36` fixes — with `guard_confirmed: true`: "Exclusive creation, applying permissions through the open handle, and sharing failure accounting between the log and saved record are sound choices. The unretried count also works through the CLI. With one requested name over the wire budget, it reported one failure and one file not retried." "The streamed and tar receivers still call the rootless opener. By inspection, a dangling destination link can therefore cause creation outside the destination. Even the scoped opener uses the original pathname for its two ordinary opens. Pass the root through every receiver and open relative to the validated, held directory." "The new test requires a 40-link chain to succeed on every Unix. Apple XNU limits pathname resolution to 32 links, so I expect the macOS test to fail with `ELOOP`. Keep the Linux boundary check and test macOS against its native behavior." The remaining work is cr-ecm36-1 and -8
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm35-1`)
+**Commit**: `be844676`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r36` over `dc14afc4..d2494965` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r36.codex.md`. It completes cr-ecm34-1 (`20779849`).
 
 ## Evidence

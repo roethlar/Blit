@@ -1,9 +1,9 @@
 # cr-ecm35-7: a retry that could not start counted nothing as not retried
 
 **Severity**: MEDIUM — the report understates what was left undone. With `--retries` on, a run whose failed files could not be named for a retry runs no retry pass. The case: its one failure's name was over the wire's budget. It reported the failures (`files_failed = 1`) but `files_not_retried = 0`, as though nothing had been held back.
-**Status**: Fixed; awaiting review
+**Status**: Verified — `combined-r37` (Codex openreview, 2026-11-24) reviewed `d2494965..2c55cb3a` — the `combined-r36` fixes — with `guard_confirmed: true`: "Exclusive creation, applying permissions through the open handle, and sharing failure accounting between the log and saved record are sound choices. The unretried count also works through the CLI. With one requested name over the wire budget, it reported one failure and one file not retried."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm35-7`)
+**Commit**: `95d5ccb6`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r36` over `dc14afc4..d2494965` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r36.codex.md`. It completes cr-ecm34-7 (`727df1e0`) in part.
 
 ## Evidence
