@@ -1,9 +1,9 @@
 # cr-ecm34-3: the copy fallbacks resolved names again
 
 **Severity**: HIGH — a copy can read or write another file than the one it opened and checked. `mmap_copy_file` opened its source and destination as regular files (cr-ecm33-6) and then, when its Linux fast paths fell short, finished with `std::fs::copy(src, dst)`. That resolves both names again, so a changed name selected another file, and a FIFO there could stall the copy. On macOS the path copier reopens the source and opens its destination for `fcopyfile` waiting: that half is cr-ecm33-4's.
-**Status**: Fixed on Linux; macOS half blocked (cr-ecm33-4); awaiting review
+**Status**: Reviewed, found incomplete — `combined-r36` (Codex openreview, 2026-11-24) reviewed `dc14afc4..d2494965` — the `combined-r35` fixes and prose-live-phase — with `guard_confirmed: true`: "The retained Linux copy handle, contract-v30 disposition flag, explicit display phase and separate unretried count are sound choices. The following gaps still affect what gets written, reported or retried." "A `0600` source finished as `0644` on an existing destination. In a second probe, an eight-byte source shrank to three bytes. The copy returned an error and left an eight-byte destination ending in five zeroes. Apply permissions through the handle and remove or mark the partial on failure." The remaining work is cr-ecm35-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm34-3`)
+**Commit**: `71363fa9`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r35` over `0f912b06..dc14afc4` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r35.codex.md`. It completes cr-ecm33-6 (`0c98acb3`) in part.
 
 ## Evidence

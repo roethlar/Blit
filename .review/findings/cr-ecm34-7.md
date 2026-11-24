@@ -1,9 +1,9 @@
 # cr-ecm34-7: the unretried count rode a failure named `(not retried)`
 
 **Severity**: MEDIUM — a display string used as an identity (D-2026-11-24-1). When more files failed than the report could name, the retry loop carried the ones no pass was given as a synthesized failure entry whose path was `(not retried)`. `blit jobs retry` discarded any failure of that name as the placeholder, so a real file named `(not retried)` was discarded with it.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r36` (Codex openreview, 2026-11-24) reviewed `dc14afc4..d2494965` — the `combined-r35` fixes and prose-live-phase — with `guard_confirmed: true`: "The retained Linux copy handle, contract-v30 disposition flag, explicit display phase and separate unretried count are sound choices. The following gaps still affect what gets written, reported or retried." "Given a legacy-format fixture whose sole entry was the synthetic `(not retried)`, `jobs retry` copied an unrelated real file with that name, omitted the original failure and exited **0**. Mark the new record format and require corroborating log evidence before retrying an ambiguous legacy entry." "With one requested name over the wire budget and one retry enabled, the CLI returned exit 2 with `files_failed = 1` and `files_not_retried = 0`. Account for the unnamed remainder before the empty-set exit." The remaining work is cr-ecm35-6 and -7
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm34-7`)
+**Commit**: `727df1e0`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r35` over `0f912b06..dc14afc4` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r35.codex.md`.
 
 ## Evidence

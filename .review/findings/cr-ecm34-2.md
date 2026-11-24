@@ -1,9 +1,9 @@
 # cr-ecm34-2: an exclusive local copy's cleanup held no writable handle
 
 **Severity**: HIGH — a retry can skip an incomplete file. A local copy that keeps what exists (`--ignore-existing`) makes its destination exclusively. Its cleanup knew which file it made, but the handle stayed with the copy only. With a read-only source, a directory barred once the file was made, and a failure in the metadata tail, the cleanup could neither remove the file nor open it again to mark it. It left it at its source's size, which a size-only comparison skips. cr-ecm33-2 gave the ordinary copy's cleanup its handle; this branch was left out.
-**Status**: Fixed on Linux; awaiting review
+**Status**: Verified — `combined-r36` (Codex openreview, 2026-11-24) reviewed `dc14afc4..d2494965` — the `combined-r35` fixes and prose-live-phase — with `guard_confirmed: true`: "The retained Linux copy handle, contract-v30 disposition flag, explicit display phase and separate unretried count are sound choices. The following gaps still affect what gets written, reported or retried."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm34-2`)
+**Commit**: `de291f55`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r35` over `0f912b06..dc14afc4` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r35.codex.md`. It completes cr-ecm33-2 (`aa23acb1`).
 
 ## Evidence

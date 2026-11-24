@@ -3,9 +3,9 @@
 **Severity**: HIGH — a destination file can be lost, or left behind unreported. Two errors, from cr-ecm33-5's first half:
 - When the check of a file `copy::create_regular` had just made failed, it dropped the handle and removed the name, so a file put there since was removed in its place.
 - Through a dangling link at the name, the exclusive create failed on the link. The fallback open then made the file the link leads to, recorded as not made, and a refused check left it there, empty, reported nowhere.
-**Status**: Fixed on Unix; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r36` (Codex openreview, 2026-11-24) reviewed `dc14afc4..d2494965` — the `combined-r35` fixes and prose-live-phase — with `guard_confirmed: true`: "The retained Linux copy handle, contract-v30 disposition flag, explicit display phase and separate unretried count are sound choices. The following gaps still affect what gets written, reported or retried." "By inspection, a dangling link can pass containment against its lexical parent and then resolve to a missing file outside the destination. If an existing file disappears between the two opens, the fallback can also create a file recorded as pre-existing. Reuse the held-directory resolver, make exclusive creation the only creating open, and retain the handle through cleanup. The new resolver also rejected a 40-link chain that Linux opened successfully." The remaining work is cr-ecm35-1
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm34-1`)
+**Commit**: `20779849`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r35` over `0f912b06..dc14afc4` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r35.codex.md`. It completes cr-ecm33-5 (`b3d952e1`) in part.
 
 ## Evidence

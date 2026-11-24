@@ -1,9 +1,9 @@
 # prose-live-phase: the live row's phase was read back from its own words
 
 **Severity**: LOW — a breach of D-2026-11-24-1 with no visible effect. The local transfer's live row colours its leading word by the phase it is showing. That phase was chosen by reading the row's own text back (`head.starts_with("copying")`, `"retrying"`, `"deleting"`, `"comparing"`), after the same function had built the text.
-**Status**: Fixed; awaiting review
+**Status**: Verified — `combined-r36` (Codex openreview, 2026-11-24) reviewed `dc14afc4..d2494965` — the `combined-r35` fixes and prose-live-phase — with `guard_confirmed: true`: "The retained Linux copy handle, contract-v30 disposition flag, explicit display phase and separate unretried count are sound choices. The following gaps still affect what gets written, reported or retried."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix prose-live-phase`)
+**Commit**: `f0d55c50`
 **Reviewer**: none yet. Found by the working agent on 2026-11-24, scanning for decisions read from prose under D-2026-11-24-1.
 
 ## Evidence

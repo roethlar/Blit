@@ -3,9 +3,9 @@
 **Severity**: HIGH — a saved retry can address a different file. Two losses:
 - `FileFailure`'s wire form had no left-in-place flag, so a round trip turned `true` into `false`.
 - The run's totals (`RunTotals`) dropped the summary's `failed_paths_raw`. A failure past the summary's 64-reason cap, in a log that heard no name live, was logged with neither its raw name nor its leftover flag.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r36` (Codex openreview, 2026-11-24) reviewed `dc14afc4..d2494965` — the `combined-r35` fixes and prose-live-phase — with `guard_confirmed: true`: "The retained Linux copy handle, contract-v30 disposition flag, explicit display phase and separate unretried count are sound choices. The following gaps still affect what gets written, reported or retried." "With 65 failures and no live name event, the saved record claimed a complete list while losing the 65th filename's raw bytes. In a separate probe, `dup\xff` and `dup\xfe` produced only one log entry when the reason cap fell between them. Join reasons to exact identities and use that result for both writers." "A summary-only failure missing from a truncated leftover list was logged as `Some(false)`, which can make a recovered `--ignore-existing` retry skip its own partial. Conversely, an old unknown event kept the entire list marked incomplete even after that file landed. Preserve unknown for the affected identity and clear it when a later copy settles that identity." The remaining work is cr-ecm35-3 and -5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm34-5`)
+**Commit**: `183408ae`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r35` over `0f912b06..dc14afc4` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r35.codex.md`. It completes cr-ecm33-5 (`33808972`) in part.
 
 ## Evidence

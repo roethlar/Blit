@@ -1,9 +1,9 @@
 # cr-ecm34-6: a log without the left-in-place field was read as leaving nothing
 
 **Severity**: MEDIUM — the known gap cr-ecm33-5 left. The job log's `FileFailed.left_in_place` was omitted when false, and a log written before the field has none. A missing field therefore read as a known "nothing left", and a complete old log settled an ambiguous raw-named failure that way. An `--ignore-existing` retry can then skip its own incomplete copy as a file to keep.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r36` (Codex openreview, 2026-11-24) reviewed `dc14afc4..d2494965` — the `combined-r35` fixes and prose-live-phase — with `guard_confirmed: true`: "The retained Linux copy handle, contract-v30 disposition flag, explicit display phase and separate unretried count are sound choices. The following gaps still affect what gets written, reported or retried." "A summary-only failure missing from a truncated leftover list was logged as `Some(false)`, which can make a recovered `--ignore-existing` retry skip its own partial. Conversely, an old unknown event kept the entire list marked incomplete even after that file landed. Preserve unknown for the affected identity and clear it when a later copy settles that identity." The remaining work is cr-ecm35-5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm34-6`)
+**Commit**: `4db619b2`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r35` over `0f912b06..dc14afc4` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r35.codex.md`. It completes cr-ecm33-5 (`33808972`) in part.
 
 ## Evidence

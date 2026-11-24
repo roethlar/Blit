@@ -11,3 +11,6 @@
 
 ## Restated by `combined-r35`
 `combined-r35` (Codex openreview, 2026-11-24) reviewed `0f912b06..dc14afc4` — the `combined-r34` fixes and the three prose fixes — with `guard_confirmed: true` restated it (the receiver discarding `Unjustified`): "Two previously recorded Windows gaps also apply. High: the receiver discards an `Unjustified` resume baseline and can proceed against a changed destination. Low: a metadata read error whose path contains `Windows metadata changed` is reported as size drift. The former needs a validated Windows handle and the latter a typed error." Still blocked: no Windows host answers.
+
+## Restated by `combined-r36`
+`combined-r36` (Codex openreview, 2026-11-24) reviewed `dc14afc4..d2494965` — the `combined-r35` fixes and prose-live-phase — with `guard_confirmed: true` restated it (the receiver discarding `Unjustified`): "The macOS pathname fallback and Windows handling of an `Unjustified` resume baseline remain open." Still blocked.
