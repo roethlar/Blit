@@ -2108,7 +2108,7 @@ mod rm_tests {
             fs::write(root.join(format!("many/f{at:03}")), b"").unwrap();
         }
         let asked = std::cell::Cell::new(0);
-        let error = remove_as_rm_reporting(
+        let removed = remove_as_rm_reporting(
             &root.join("many"),
             false,
             Some(&root),
@@ -2118,30 +2118,33 @@ mod rm_tests {
                 asked.get() >= 20
             }),
             never_told,
-        )
-        .unwrap_err();
-        assert!(matches!(error, DeletionError::Cancelled { .. }), "{error}");
-        let left = fs::read_dir(root.join("many")).unwrap().count();
-        // Where every entry is asked about, eighteen went. Elsewhere the
-        // tree is the standard library's to remove, whole or not at all.
+        );
+        // Where every entry is asked about, eighteen went. ci-windows-rm-
+        // call-off: elsewhere the tree is the standard library's to remove,
+        // whole or not at all, and the question is put before it only — the
+        // twentieth never comes, and the tree goes whole. Expected there to
+        // stop untouched, the guard read a removal it could not call off.
         if cfg!(unix) {
+            let error = removed.unwrap_err();
+            assert!(matches!(error, DeletionError::Cancelled { .. }), "{error}");
+            let left = fs::read_dir(root.join("many")).unwrap().count();
             assert_eq!(left, 82, "it stopped between two entries");
+            // And one that is never called off is removed.
+            let removed = remove_as_rm_reporting(
+                &root.join("many"),
+                false,
+                Some(&root),
+                options,
+                Some(&|| false),
+                never_told,
+            )
+            .expect("removed");
+            assert_eq!(removed, left as u64 + 1);
+            assert!(!root.join("many").exists());
         } else {
-            assert_eq!(left, 100);
+            assert_eq!(removed.ok(), Some(101), "removed whole");
+            assert!(!root.join("many").exists());
         }
-
-        // And one that is never called off is removed.
-        let removed = remove_as_rm_reporting(
-            &root.join("many"),
-            false,
-            Some(&root),
-            options,
-            Some(&|| false),
-            never_told,
-        )
-        .expect("removed");
-        assert_eq!(removed, left as u64 + 1);
-        assert!(!root.join("many").exists());
     }
 
     /// The versions an account would hold `names` below `tree` as: each
