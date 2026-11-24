@@ -1546,6 +1546,28 @@ fn sole_name_of(root: &Path, exact: bool) -> Option<String> {
 /// map of texts — where `dup` and the byte `FF` and `dup` and U+FFFD are
 /// one key: with the first gone from the source, the second answered for
 /// it, and the retry reported nothing missing.
+/// cr-ssc6-1, cr-ecm37-2: a scoped (retry) scan's failures, each recorded by
+/// the requested name's own identity — its bytes, whatever they are: a name
+/// that is text by its text's. None of them is on the manifest, whose texts
+/// name the rest of the failures afterwards (`named_raw`). Recorded by its
+/// text alone, a requested `dup` + U+FFFD that had vanished was named from
+/// the manifest by the bytes of `dup` + byte `FF`, a file of that spelling
+/// the retry had sent: the failure became that file's, the next retry found
+/// nothing to do, and the file that was missing stayed missing. A path the
+/// report shortened is no name, and is recorded as it came.
+fn record_scan_failures(
+    contained: &mut crate::remote::transfer::sink::SinkOutcome,
+    failures: &[crate::generated::FileFailure],
+) {
+    for failure in failures {
+        let failure = crate::remote::transfer::sink::FileFailure::from_wire(failure);
+        let own = failure.raw_relative_path.clone().or_else(|| {
+            (!failure.path_shortened).then(|| failure.relative_path.clone().into_bytes())
+        });
+        contained.record_named_failure(failure.relative_path, own, failure.reason);
+    }
+}
+
 fn requested_but_unscanned(
     scope: Option<&HashSet<PathBuf>>,
     unnamed: &[String],
@@ -4980,14 +5002,7 @@ async fn destination_session_inner(
                 // path it could not put on the manifest; each is this
                 // session's contained failure, recorded before the diff so
                 // the summary, the exit status and the move gate all see it.
-                for failure in &complete.scan_failures {
-                    let failure = crate::remote::transfer::sink::FileFailure::from_wire(failure);
-                    contained_failures.record_named_failure(
-                        failure.relative_path,
-                        failure.raw_relative_path,
-                        failure.reason,
-                    );
-                }
+                record_scan_failures(&mut contained_failures, &complete.scan_failures);
                 if complete.scan_failures_dropped > 0 {
                     contained_failures.record_unnamed_failures(complete.scan_failures_dropped);
                 }
@@ -7666,6 +7681,29 @@ mod tests {
             ..FileHeader::default()
         };
         assert_eq!(own_name(&entry), by_the_character.as_bytes());
+    }
+
+    /// cr-ecm37-2: a retry scan's failure keeps the requested name's own
+    /// identity when the rest are named from the manifest: a vanished
+    /// `dup` + U+FFFD is not given the bytes of `dup` + byte `FF`, a file of
+    /// that spelling the retry sent.
+    #[test]
+    fn a_scan_failure_keeps_its_own_identity() {
+        let mut contained = crate::remote::transfer::sink::SinkOutcome::default();
+        let missing = crate::generated::FileFailure {
+            relative_path: "dup\u{FFFD}".into(),
+            reason: "source: missing at retry".into(),
+            ..Default::default()
+        };
+        record_scan_failures(&mut contained, &[missing]);
+        let named =
+            contained.named_raw(|text| (text == "dup\u{FFFD}").then(|| b"dup\xff".to_vec()));
+        let own = "dup\u{FFFD}".as_bytes().to_vec();
+        let (paths, raw, truncated) = named.wire_failed_identities();
+        assert_eq!(paths, ["dup\u{FFFD}"]);
+        assert_eq!(raw, std::slice::from_ref(&own), "by its own bytes");
+        assert!(!truncated);
+        assert_eq!(named.failures[0].raw_relative_path, Some(own));
     }
 
     /// cr-ecm36-4: two requested names of one text are two files: the scan's
