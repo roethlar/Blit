@@ -3589,6 +3589,16 @@ impl<'a> PartialTarget<'a> {
         self.held = Some(opened);
     }
 
+    /// cr-ecm34-2: armed for the file an exclusive copy made, as
+    /// [`arm_made`](Self::arm_made) — the name must be that very file — and
+    /// holding it, the handle the copy writes through, so that what it
+    /// cannot remove it marks unfinished through that handle.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn arm_made_held(&mut self, made: std::fs::File) {
+        self.arm_made(&made);
+        self.held = Some(made);
+    }
+
     /// What the cleanup holds, for the write to go through.
     #[cfg(all(unix, not(target_os = "macos")))]
     fn held_file(&self) -> Option<&std::fs::File> {
@@ -3803,18 +3813,39 @@ fn copy_and_stamp_opened(
     // and the mode go through that handle, and the name is not opened
     // again: it was made, let go, and opened by name to be written, which
     // truncated whatever another hand had put there in between.
-    let made = if config.ignore_existing {
+    let made_here = config.ignore_existing;
+    let made = if made_here {
         let made = create_to_write(dst, true).map_err(|error| creation_failed(dst, error, true))?;
-        partial.arm_made(&made);
+        // cr-ecm34-2 (Linux): and the cleanup HOLDS it — the handle the
+        // copy writes through, still writable — as an ordinary copy's does
+        // (cr-ecm33-2), its check that the name is that very file kept: what
+        // it cannot remove it marks unfinished through that handle. Held
+        // here only, a file given its read-only source's mode could not be
+        // opened again to be marked, and was left at its source's size.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let made = {
+            partial.arm_made_held(made);
+            None
+        };
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        let made = {
+            partial.arm_made(&made);
+            Some(made)
+        };
         run_after_claim_hook(dst);
-        Some(made)
+        made
     } else {
         None
     };
-    if let Some(made) = &made {
+    if made_here {
         // A file just made holds nothing to resume: one copy, whole.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let written = partial.held_file();
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        let written = made.as_ref();
+        let written = written.ok_or_else(|| eyre!("the made destination is not held"))?;
         let sizer = BufferSizer::default();
-        crate::copy::copy_opened_into(src_file, made, header.size, &sizer)?;
+        crate::copy::copy_opened_into(src_file, written, header.size, &sizer)?;
         run_after_copy_fault_hook(dst).map_err(|e| eyre!("source: read error: {e}"))?;
         did_copy = true;
     } else if config.resume {
@@ -3919,7 +3950,7 @@ fn copy_and_stamp_opened(
     // pre-copy preparation above. Clear that bit once more before replacing
     // named streams; apply_attributes below restores the exact source mask.
     // (A file this write made was not copied that way, and is new.)
-    if did_copy && made.is_none() {
+    if did_copy && !made_here {
         crate::windows_metadata::prepare_destination(dst, header.windows_metadata.as_ref())?;
     }
 
@@ -9241,6 +9272,84 @@ mod cr_win_1_tests {
             outcome.failures[0].reason
         );
         assert!(outcome.failures[0].left_in_place, "said by its flag");
+        assert_eq!(
+            std::fs::metadata(dst.join("ro.bin")).unwrap().len(),
+            9,
+            "marked unfinished, not at its source's size"
+        );
+    }
+
+    /// cr-ecm34-2: the same for a copy that keeps what exists
+    /// (`--ignore-existing`): what it made, given its read-only source's
+    /// mode, in a directory barred once it was made, is marked unfinished
+    /// through the handle it wrote through — one byte longer than its source
+    /// — and said to be left. Held by the copy only, the file could not be
+    /// opened again to be marked, and was left at its source's size, which a
+    /// retry comparing sizes skips.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[tokio::test]
+    async fn an_exclusive_copy_marks_what_it_cannot_remove_through_its_handle() {
+        use std::os::unix::fs::PermissionsExt as _;
+        struct Reopened(PathBuf);
+        impl Drop for Reopened {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+                if let Ok(mut prefixes) = METADATA_TAIL_FAULT_PREFIXES.lock() {
+                    prefixes.retain(|prefix| prefix != &self.0);
+                }
+                if let Ok(mut hooks) = AFTER_CLAIM_HOOKS.lock() {
+                    hooks.retain(|(prefix, _)| prefix != &self.0);
+                }
+            }
+        }
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("ro.bin"), b"8 bytes!").unwrap();
+        std::fs::set_permissions(src.join("ro.bin"), std::fs::Permissions::from_mode(0o444))
+            .unwrap();
+        let _reopened = Reopened(dst.clone());
+        // Probe: is this process barred by a directory's mode at all?
+        let probe_dir = tmp.path().join("probe");
+        std::fs::create_dir_all(&probe_dir).unwrap();
+        std::fs::set_permissions(&probe_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let barred = std::fs::write(probe_dir.join("probe"), b"").is_err();
+        std::fs::set_permissions(&probe_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !barred {
+            eprintln!("SKIPPED: this process is not barred by a directory's mode");
+            return;
+        }
+        let barred_dir = dst.clone();
+        AFTER_CLAIM_HOOKS.lock().unwrap().push((
+            dst.clone(),
+            Arc::new(move |_: &Path| {
+                let _ =
+                    std::fs::set_permissions(&barred_dir, std::fs::Permissions::from_mode(0o555));
+            }),
+        ));
+        METADATA_TAIL_FAULT_PREFIXES
+            .lock()
+            .unwrap()
+            .push(dst.clone());
+        let sink = FsTransferSink::new(
+            src.clone(),
+            dst.clone(),
+            FsSinkConfig {
+                ignore_existing: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        let outcome = sink
+            .write_payload(PreparedPayload::File(make_file_header("ro.bin", 8)))
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        assert!(
+            outcome.failures[0].left_in_place,
+            "said by its flag: {outcome:?}"
+        );
         assert_eq!(
             std::fs::metadata(dst.join("ro.bin")).unwrap().len(),
             9,
