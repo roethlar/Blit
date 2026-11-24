@@ -265,6 +265,11 @@ fn report_links<'a>(paths: &'a [String], raw: &'a [Vec<u8>]) -> impl Fn(&FileFai
             .or_insert(u32::try_from(at).map_or(0, |at| at.saturating_add(1)));
     }
     move |failure: &FileFailure| {
+        // cr-ecm38-6: a path already shortened is a rendering, no identity:
+        // it takes no link, even where another file bears it as its name.
+        if failure.path_shortened {
+            return 0;
+        }
         let bytes = failure.raw_relative_path.as_deref().unwrap_or_default();
         places
             .get(&(failure.relative_path.as_str(), bytes))
@@ -10349,6 +10354,27 @@ mod cr_win_1_tests {
         assert!(outcome.failures[0]
             .reason
             .starts_with("source: read error; "));
+    }
+
+    /// cr-ecm38-6: a rendering — a path already shortened — takes no link,
+    /// even where another file bears it as its name; that file's own entry
+    /// takes its link.
+    #[test]
+    fn a_rendering_takes_no_link() {
+        let rendering = FileFailure {
+            relative_path: "x".into(),
+            reason: "r".into(),
+            path_shortened: true,
+            ..FileFailure::default()
+        };
+        let named = FileFailure {
+            relative_path: "x".into(),
+            reason: "r".into(),
+            ..FileFailure::default()
+        };
+        let wired = failures_to_report(&[rendering, named], &["x".to_string()], &[]);
+        assert_eq!(wired[0].failed_path_at, 0, "no identity, no link");
+        assert_eq!(wired[1].failed_path_at, 1);
     }
 
     /// cr-ecm37-5: a failure whose path the wire shortens is linked to its

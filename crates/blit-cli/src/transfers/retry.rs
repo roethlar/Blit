@@ -544,12 +544,13 @@ impl RetryOutcome {
         // retry's block-wise resumes are not reported).
         summary.tcp_fallback_used |= self.in_stream_carrier_used;
         summary.files_failed = self.final_failures.files_failed;
-        summary.failures = self
-            .final_failures
-            .failures
-            .iter()
-            .map(FileFailure::to_wire)
-            .collect();
+        // cr-ecm38-6: linked, as every report is (cr-ecm37-5). Unlinked, a
+        // long name's reason was lost on reading the summary back.
+        summary.failures = blit_core::remote::transfer::sink::failures_to_report(
+            &self.final_failures.failures,
+            &self.final_failures.failed_paths,
+            &where_any(&self.final_failures.failed_paths_raw),
+        );
         summary.failed_paths = self.final_failures.failed_paths.clone();
         summary.failed_paths_truncated = self.final_failures.failed_paths_truncated;
         summary.failed_paths_raw = where_any(&self.final_failures.failed_paths_raw);
@@ -765,6 +766,40 @@ async fn wait_before_pass(args: &TransferArgs, _pass: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cr-ecm38-6: a delegated retry's report is linked to its exact names
+    /// like any other, so a long name read back is that name, with its
+    /// reason. Unlinked, the reason was lost on decoding.
+    #[test]
+    fn a_delegated_retry_links_its_report() {
+        let long = format!("{}/name.bin", "d".repeat(4500));
+        let out = RetryOutcome {
+            added_files: 0,
+            added_bytes: 0,
+            final_failures: PassFailures {
+                files_failed: 1,
+                failures: vec![FileFailure {
+                    relative_path: long.clone(),
+                    reason: "source: missing".into(),
+                    ..FileFailure::default()
+                }],
+                failed_paths: vec![long.clone()],
+                failed_paths_raw: vec![Vec::new()],
+                ..PassFailures::default()
+            },
+            passes_run: 1,
+            in_stream_carrier_used: false,
+            files_resumed: 0,
+            interrupted: false,
+        };
+        let mut delegated = blit_core::generated::DelegatedPullSummary::default();
+        out.fold_into_delegated(&mut delegated);
+        assert_eq!(delegated.failures[0].failed_path_at, 1);
+        let read =
+            blit_core::remote::transfer::delegated_summary::delegated_summary_failures(&delegated);
+        assert_eq!(read[0].relative_path, long);
+        assert_eq!(read[0].reason, "source: missing");
+    }
 
     /// cr-ecm37-5: a failed-path list cut for size still names exactly every
     /// file it carries, and the pass is given them all; given the report's
