@@ -720,37 +720,15 @@ impl RunLog {
             // once: one already named live, with those bytes, is not again.
             let mut failed = std::mem::take(&mut active.failed);
             // cr-ecm35-3: each failed file once, by its identity, from the
-            // one join the saved record uses too; one named without its bytes
-            // by the bytes heard live for its text, as before.
+            // one join the saved record uses too. log-named-text: by the
+            // identity the account gives it, and no other — a failure the
+            // account names by its text alone IS a text name (peers of one
+            // contract carry the bytes of every name that is not text), and
+            // the bytes heard live for its spelling are another file's.
             for file in totals.failed_files() {
-                let raw = file
-                    .raw
-                    .as_deref()
-                    .map(crate::raw_name::escape_raw)
-                    .or_else(|| active.raw_names.get(&file.path).cloned());
+                let raw = file.raw.as_deref().map(crate::raw_name::escape_raw);
                 if failed.insert((file.path.clone(), raw.clone())) {
-                    let heard = file
-                        .raw
-                        .is_none()
-                        .then(|| raw.as_deref().and_then(crate::raw_name::unescape_raw))
-                        .flatten();
-                    // A path past the cap named by the bytes heard live is
-                    // told by those bytes, as the lists keep them
-                    // (cr-jl4fix2-1) — and missing from a list cut short, it
-                    // is not known (cr-ecm35-5). A failure the report kept
-                    // says it itself.
-                    let left_in_place = match heard {
-                        Some(bytes) if file.reason.is_none() => {
-                            if totals.left_in_place_raw.contains(&bytes) {
-                                Some(true)
-                            } else if totals.left_in_place_truncated {
-                                None
-                            } else {
-                                Some(false)
-                            }
-                        }
-                        _ => file.left_in_place,
-                    };
+                    let left_in_place = file.left_in_place;
                     bodies.push(EventBody::FileFailed {
                         reason: file
                             .reason
@@ -1345,6 +1323,9 @@ mod tests {
             let totals = RunTotals {
                 files_failed: 1,
                 failed_paths: vec![text.clone()],
+                // log-named-text: by its own bytes, as a peer of one
+                // contract carries them.
+                failed_paths_raw: vec![b"dup\xfe.bin".to_vec()],
                 left_in_place: if text_left {
                     vec![text.clone()]
                 } else {
@@ -1373,6 +1354,60 @@ mod tests {
                 .collect();
             assert_eq!(left, [logged_left], "raw {raw_left}, text {text_left}");
         }
+    }
+
+    /// log-named-text: a failure the account names by its text alone is a
+    /// text name, logged as one — not by the bytes heard live for its
+    /// spelling, which are another file's (a sibling the run sent). Named by
+    /// them, a vanished `dup` + U+FFFD was logged as `dup` + byte `FF`, and a
+    /// retry from the log asked for the file that had landed.
+    #[tokio::test]
+    async fn a_text_failure_is_not_named_by_another_files_bytes() {
+        use crate::job_log::{open_log, LogLine};
+        let dir = tempfile::tempdir().unwrap();
+        let log = RunLog::new(
+            Some(LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: DEFAULT_KEEP,
+                finished: None,
+            }),
+            "0123456789abcdef0123456789abcdef",
+        );
+        log.start(Role::Initiator, RunInfo::default(), None);
+        let progress = crate::remote::transfer::RemoteTransferProgress::audit_only(
+            log.audit_lane_at(End::Receiving).expect("a lane"),
+        );
+        let text = "dup\u{FFFD}".to_string();
+        progress
+            .report_raw_name(text.clone(), b"dup\xff".to_vec())
+            .await;
+        drop(progress);
+        let totals = RunTotals {
+            files_failed: 1,
+            failed_paths: vec![text.clone()],
+            failures: vec![FileFailure {
+                relative_path: text.clone(),
+                reason: "source: missing at retry".into(),
+                ..FileFailure::default()
+            }],
+            ..RunTotals::default()
+        };
+        let report = log
+            .close(Outcome::Failed, None, Some(totals))
+            .await
+            .expect("a report");
+        let failed: Vec<(String, Option<String>)> = open_log(&report.path.expect("a log"))
+            .unwrap()
+            .filter_map(|line| match line.unwrap() {
+                LogLine::Event(event) => match event.body {
+                    EventBody::FileFailed { path, raw, .. } => Some((path, raw)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(failed, [(text, None)]);
     }
 
     /// Review cr-jl3afix2-1: a failure named live hides no other failure
@@ -1408,10 +1443,12 @@ mod tests {
             files_failed: 2,
             failed_paths: vec![text.clone()],
             failures: vec![
+                // log-named-text: each by its own bytes, as a peer of one
+                // contract carries them.
                 FileFailure {
                     relative_path: text.clone(),
                     reason: "denied".into(),
-                    raw_relative_path: None,
+                    raw_relative_path: Some(b"dup\xfe.bin".to_vec()),
                     left_in_place: false,
                     path_shortened: false,
                     left_unknown: false,

@@ -526,10 +526,6 @@ impl CommandRun {
             .destination_nested
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let raws = totals
-            .as_ref()
-            .map(|totals| failed_raw_names(&self.inner.log, totals))
-            .unwrap_or_default();
         let _ = tokio::task::spawn_blocking(move || {
             finish_record(
                 recorded,
@@ -537,24 +533,12 @@ impl CommandRun {
                 outcome,
                 detail,
                 totals,
-                &raws,
                 source_removed,
                 destination_nested,
             )
         })
         .await;
     }
-}
-
-/// Review cr-jl3a-3: each failed name that is not UTF-8, by its text, with
-/// its exact bytes escaped, as the run's closed log knows it.
-fn failed_raw_names(log: &RunLog, totals: &RunTotals) -> std::collections::HashMap<String, String> {
-    totals
-        .failed_paths
-        .iter()
-        .chain(totals.failures.iter().map(|failure| &failure.relative_path))
-        .filter_map(|path| Some((path.clone(), log.raw_name(path)?)))
-        .collect()
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -654,7 +638,6 @@ fn finish_record(
     outcome: Outcome,
     detail: Option<String>,
     totals: Option<RunTotals>,
-    raws: &std::collections::HashMap<String, String>,
     source_removed: bool,
     destination_nested: Option<bool>,
 ) {
@@ -691,11 +674,10 @@ fn finish_record(
         record.failures = failed
             .into_iter()
             .map(|file| Failure {
-                raw: file
-                    .raw
-                    .as_deref()
-                    .map(blit_core::raw_name::escape_raw)
-                    .or_else(|| raws.get(&file.path).cloned()),
+                // log-named-text: by the identity the account gives it, and
+                // no other — the bytes the log heard for its spelling are
+                // another file's.
+                raw: file.raw.as_deref().map(blit_core::raw_name::escape_raw),
                 path: file.path,
                 reason: file.reason.unwrap_or_default(),
             })
@@ -1027,7 +1009,6 @@ mod tests {
             Outcome::Failed,
             None,
             Some(totals),
-            &std::collections::HashMap::new(),
             false,
             None,
         );
@@ -1070,10 +1051,12 @@ mod tests {
             files_failed: 3,
             failed_paths: vec![shown.clone(), "plain.txt".into()],
             failures: vec![
+                // log-named-text: by its own bytes, as a peer of one
+                // contract carries them.
                 blit_core::remote::transfer::sink::FileFailure {
                     relative_path: shown.clone(),
                     reason: "denied".into(),
-                    raw_relative_path: None,
+                    raw_relative_path: Some(b"bad\xff.txt".to_vec()),
                     left_in_place: false,
                     path_shortened: false,
                     left_unknown: false,
@@ -1093,14 +1076,12 @@ mod tests {
             left_in_place_raw: vec![b"bad\xfe.txt".to_vec()],
             ..RunTotals::default()
         };
-        let raws = std::collections::HashMap::from([(shown.clone(), "bad\\xff.txt".to_string())]);
         finish_record(
             recorded,
             None,
             Outcome::Failed,
             None,
             Some(totals),
-            &raws,
             false,
             None,
         );
@@ -1181,7 +1162,6 @@ mod tests {
                 Outcome::Failed,
                 None,
                 Some(totals),
-                &std::collections::HashMap::new(),
                 false,
                 None,
             );
@@ -1191,42 +1171,6 @@ mod tests {
                 "not known: {unknown}"
             );
         }
-    }
-
-    /// Review cr-jl3a-3: the names a run's record keeps exactly are the
-    /// failed ones its log knows the bytes of.
-    #[tokio::test]
-    async fn a_failed_names_bytes_come_from_the_runs_log() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = RunLog::new(
-            Some(LogPlace {
-                dir: dir.path().to_path_buf(),
-                participant: "m1".into(),
-                keep: 50,
-                finished: None,
-            }),
-            "0123456789abcdef0123456789abcdef",
-        );
-        log.start(Role::Initiator, RunInfo::default(), None);
-        let progress =
-            RemoteTransferProgress::audit_only(log.audit_lane_at(End::Receiving).unwrap());
-        for name in ["bad\u{FFFD}.txt", "fine\u{FFFD}.txt"] {
-            progress
-                .report_raw_name(name.into(), name.replace('\u{FFFD}', "\x00").into_bytes())
-                .await;
-        }
-        drop(progress);
-        log.close(Outcome::Failed, None, None).await;
-        let totals = RunTotals {
-            failed_paths: vec!["bad\u{FFFD}.txt".into(), "plain.txt".into()],
-            ..RunTotals::default()
-        };
-        let raws = failed_raw_names(&log, &totals);
-        assert_eq!(
-            raws.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["bad\u{FFFD}.txt"],
-            "only failed names, only those the log knows"
-        );
     }
 
     /// Write the spec and record of a `copy src/ dst/` run with `args`

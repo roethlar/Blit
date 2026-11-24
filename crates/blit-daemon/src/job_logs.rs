@@ -613,7 +613,7 @@ mod tests {
     }
 
     /// Review cr-jl1a-1: a name that is not valid UTF-8 is logged with its
-    /// exact bytes — from the manifest's raw name, the summary's fill-in,
+    /// exact bytes — from the manifest's raw name, the summary's own bytes,
     /// and the mirror pass's own path — so two such names never read the
     /// same.
     #[tokio::test]
@@ -645,9 +645,12 @@ mod tests {
         ] {
             log.observe(&event).await;
         }
+        // log-named-text: the summary names the failure by its own bytes, as
+        // a peer of one contract does; the log takes them from there.
         let summary = TransferSummary {
             files_failed: 1,
             failed_paths: vec![lossy.clone()],
+            failed_paths_raw: vec![b"caf\xe9.txt".to_vec()],
             ..Default::default()
         };
         log.close(Outcome::Failed, None, Some(summary)).await;
