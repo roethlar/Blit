@@ -410,6 +410,23 @@ impl MadeAt {
     }
 }
 
+/// cr-ecm39-5: whether a link stands at `dst` — looked at in the directory
+/// the root held leads to (Linux), else by its name. By its name, a link
+/// within the root was looked for in whatever had since taken the root's
+/// name, not found, and the file it names never made.
+#[cfg(unix)]
+fn a_link_at(dst: &Path, within: Option<&Within>) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Some(within) = within {
+        if let Some(resolved) = resume::resolve_beneath(within, dst, false) {
+            return resolved.is_ok_and(|resolved| resolved.is_link());
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = within;
+    std::fs::symlink_metadata(dst).is_ok_and(|there| there.file_type().is_symlink())
+}
+
 /// The file at `dst` to be written, and where it was made if it was. See
 /// [`create_regular_within`].
 #[cfg(unix)]
@@ -441,8 +458,7 @@ fn acquire_to_write(
                 // Taken a moment ago, leading to nothing now: a link to
                 // nothing, whose file is made where it leads — or a file gone
                 // between the opens, and the name is tried again.
-                let a_link = std::fs::symlink_metadata(dst)
-                    .is_ok_and(|there| there.file_type().is_symlink());
+                let a_link = a_link_at(dst, within);
                 if !a_link {
                     continue;
                 }
@@ -580,6 +596,12 @@ fn open_beneath(dst: &Path, within: &Within, make: bool) -> Beneath {
     let Some(held) = within.held.as_ref() else {
         return Beneath::ByName;
     };
+    // cr-ecm39-5: a name written as a directory — a `/` after it — is no
+    // file, as the name itself says to the system: its place found from the
+    // root by its names alone, the `/` was lost and a regular file made.
+    if resume::typed_as_directory(dst) {
+        return Beneath::Opened(Err(std::io::Error::from_raw_os_error(libc::EISDIR)));
+    }
     let place = match within.place(dst) {
         Some(place) if !place.as_os_str().is_empty() => place,
         Some(_) => return Beneath::ByName,
@@ -1493,6 +1515,74 @@ mod mode_tests {
         assert_eq!(partial.metadata().unwrap().len(), 11);
         assert!(retired.join("p.bin").is_file(), "in the root held");
         assert!(!root.join("p.bin").exists());
+    }
+
+    /// cr-ecm39-5 (Linux): an absolute link within the destination that names
+    /// it by another path — an alias of the root — is followed, as the base
+    /// followed it: written through, and a directory made through it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_absolute_link_through_an_alias_of_the_root_is_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("real").join("dst")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("alias")).unwrap();
+        let root = std::fs::canonicalize(dir.path().join("real").join("dst")).unwrap();
+        let through = dir.path().join("alias").join("dst");
+        std::fs::write(root.join("target.bin"), b"old").unwrap();
+        std::os::unix::fs::symlink(through.join("target.bin"), root.join("link.bin")).unwrap();
+        std::os::unix::fs::symlink(through.join("sub"), root.join("into")).unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        let within = Within::hold(&root);
+        let mut written = open_to_write(&root.join("link.bin"), Some(&within), false).unwrap();
+        std::io::Write::write_all(&mut written, b"new").unwrap();
+        drop(written);
+        assert_eq!(std::fs::read(root.join("target.bin")).unwrap(), b"new");
+        create_dirs_within(&root.join("into").join("c"), Some(&within)).unwrap();
+        assert!(root.join("sub").join("c").is_dir());
+    }
+
+    /// cr-ecm39-5 (Linux): a name written as a directory is no file, with
+    /// `openat2` and without: nothing is made. Its place found by its names
+    /// alone, a regular file was made at it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_name_written_as_a_directory_is_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("dst")).unwrap();
+        let root = std::fs::canonicalize(dir.path().join("dst")).unwrap();
+        let within = Within::hold(&root);
+        for refused in [false, true] {
+            super::NO_OPENAT2.with(|seam| seam.set(refused));
+            let made = create_regular_within(&root.join("x/"), Some(&within));
+            super::NO_OPENAT2.with(|seam| seam.set(false));
+            assert!(made.is_err(), "no openat2: {refused}: {made:?}");
+            assert!(
+                !root.join("x").exists(),
+                "no openat2: {refused}: nothing made"
+            );
+        }
+    }
+
+    /// cr-ecm39-5 (Linux): a link within the root to nothing has its file made
+    /// where it leads in the root the transfer holds, though another
+    /// directory has taken the root's name. Looked for by its name, the link
+    /// was not found, and the file never made.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_dangling_link_is_filled_in_the_root_held() {
+        let (_dir, within, root, retired) = a_root_replaced_at_its_name(|root| {
+            std::os::unix::fs::symlink("missing.bin", root.join("link.bin")).unwrap();
+        });
+        create_regular_within(&root.join("link.bin"), Some(&within)).unwrap();
+        assert!(
+            retired.join("missing.bin").is_file(),
+            "made where the link leads"
+        );
+        assert!(
+            retired.join("link.bin").is_symlink(),
+            "the link is left as it was"
+        );
+        assert!(!root.join("missing.bin").exists());
     }
 
     /// cr-ecm39-6 (Linux): a path 72 directories deep. Returns the dir, the

@@ -907,13 +907,38 @@ impl<'a> Walk<'a> {
         target: &Path,
     ) -> std::io::Result<std::collections::VecDeque<std::ffi::OsString>> {
         if target.is_absolute() {
-            let place = self.within.place(target).ok_or_else(|| self.leads_out())?;
+            let place = match self.within.place(target) {
+                Some(place) => place,
+                None => self.alias_place(target).ok_or_else(|| self.leads_out())?,
+            };
             self.here = None;
             self.names.clear();
             Ok(Self::names(&place))
         } else {
             Ok(Self::names(target))
         }
+    }
+
+    /// cr-ecm39-5: where an absolute `target` lies beneath the root when it
+    /// names it by another path — an alias — told by the directory's
+    /// identity: the ancestor of `target` that IS the root. By its path
+    /// alone, a second absolute name for the destination led out, and the
+    /// copy the base had made through it failed.
+    fn alias_place(&self, target: &Path) -> Option<std::path::PathBuf> {
+        use std::os::unix::fs::MetadataExt as _;
+        // SAFETY: `stat` is plain integers, filled by the call.
+        let mut root: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: `self.root` is open for the call and `root` a properly
+        // sized `stat` that outlives it.
+        if unsafe { libc::fstat(self.root, &mut root) } < 0 {
+            return None;
+        }
+        target.ancestors().find_map(|ancestor| {
+            let found = std::fs::metadata(ancestor).ok()?;
+            (found.is_dir() && found.dev() == root.st_dev && found.ino() == root.st_ino)
+                .then(|| target.strip_prefix(ancestor).ok().map(Path::to_path_buf))
+                .flatten()
+        })
     }
 
     fn is_link(&self, name: &std::ffi::CStr) -> std::io::Result<bool> {
@@ -1092,6 +1117,14 @@ fn after_a_destination_is_resolved(_dst: &Path) {
 
 #[cfg(unix)]
 impl Resolved {
+    /// cr-ecm39-5: whether a link stands at the name, in the held directory.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn is_link(&self) -> bool {
+        use std::os::unix::io::AsRawFd as _;
+        stat_at(self.directory.as_raw_fd(), &self.name)
+            .is_ok_and(|found| found.st_mode & libc::S_IFMT == libc::S_IFLNK)
+    }
+
     /// The file at the name, opened with `flags` in the held directory and
     /// never through a link; one made is private (600).
     pub(crate) fn open(&self, flags: libc::c_int) -> std::io::Result<File> {
@@ -1485,7 +1518,7 @@ fn open_in_as(
 /// Whether `path` is written as a directory's: a `/` or `/.` after its last
 /// name, which the system then resolves as a directory.
 #[cfg(unix)]
-fn typed_as_directory(path: &Path) -> bool {
+pub(super) fn typed_as_directory(path: &Path) -> bool {
     let bytes = path.as_os_str().as_encoded_bytes();
     bytes.ends_with(b"/") || bytes.ends_with(b"/.")
 }
