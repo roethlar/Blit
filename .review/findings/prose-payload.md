@@ -25,3 +25,6 @@ An error from `read_payload` — "cannot open", say — whose path holds either 
 
 ## Known gaps
 - Unfixed until a Windows host is reachable (`.agents/machines.md`; at 2026-11-24, `10.1.10.77` timed out, and `.222` and `.173` had no route).
+
+## Restated by `combined-r35`
+`combined-r35` (Codex openreview, 2026-11-24) reviewed `0f912b06..dc14afc4` — the `combined-r34` fixes and the three prose fixes — with `guard_confirmed: true` restated it (the metadata reason chosen by its words): "Two previously recorded Windows gaps also apply. High: the receiver discards an `Unjustified` resume baseline and can proceed against a changed destination. Low: a metadata read error whose path contains `Windows metadata changed` is reported as size drift. The former needs a validated Windows handle and the latter a typed error." Still blocked: no Windows host answers.

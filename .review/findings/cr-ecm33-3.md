@@ -1,9 +1,9 @@
 # cr-ecm33-3: a wire resume whose destination's directory could not be established was still written
 
 **Severity**: HIGH — cr-ecm32-1 let a resume carry no place when the name's directory was missing at its hashing, taking that for a directory not yet made. Every resume hashed is of a file the diff saw, so a missing directory had gone since. If it came back as a link to another directory in the destination, an empty name there received the file. Off Unix the receiver discards even `Unjustified`; that half is cr-ecm32-4's, blocked.
-**Status**: Unix half fixed, awaiting review; Windows half blocked (cr-ecm32-4)
+**Status**: Verified — `combined-r35` (Codex openreview, 2026-11-24) reviewed `0f912b06..dc14afc4` — the `combined-r34` fixes and the three prose fixes — with `guard_confirmed: true`: "The ordinary Linux copy now succeeds through a valid destination symlink and retains its writable handle. A Unix resume refuses a write when it can no longer establish the destination directory. The typed endpoint and resume-error classifications also fit the goal. The remaining problems are at identifiable points where the implementation drops a handle, a file identity, or a known cleanup result." Its Windows half stays cr-ecm32-4's, blocked.
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm33-3`)
+**Commit**: `03bafda2`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r34` over `70efef8a..0f912b06` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r34.codex.md`. It completes cr-ecm32-1 (`f22af07f`).
 
 ## Evidence

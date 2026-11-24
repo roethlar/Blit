@@ -1,9 +1,9 @@
 # prose-retried: whether a failure was marked retried was read from its words
 
 **Severity**: LOW — a display defect, and a breach of D-2026-11-24-1. A failure that survived `--retries` is meant to read "… (retried)". The marking skipped any failure whose reason already ended in " (retried)". A file whose name ends so, named last in its reason, was therefore reported as never retried.
-**Status**: Fixed; awaiting review
+**Status**: Verified — `combined-r35` (Codex openreview, 2026-11-24) reviewed `0f912b06..dc14afc4` — the `combined-r34` fixes and the three prose fixes — with `guard_confirmed: true`: no change required of it; its guard was the reviewer's own red/green proof.
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix prose-retried`)
+**Commit**: `7d2635d1`
 **Reviewer**: none yet. Found by the working agent on 2026-11-24, applying the owner's rule D-2026-11-24-1 (no decision is read from prose), which names `RETRIED_SUFFIX`.
 
 ## Evidence

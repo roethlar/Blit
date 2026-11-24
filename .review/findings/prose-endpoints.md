@@ -1,9 +1,9 @@
 # prose-endpoints: a transfer endpoint was classified by its refusal's words
 
 **Severity**: LOW — a breach of D-2026-11-24-1 with a narrow misreading. `parse_transfer_endpoint` decided "local path" and "refused for backslashes" by searching the remote parser's error message for "appears to be a local path" and "forward slashes". Some of that parser's refusals quote the input, so an input holding those words was misclassified.
-**Status**: Fixed; awaiting review
+**Status**: Verified — `combined-r35` (Codex openreview, 2026-11-24) reviewed `0f912b06..dc14afc4` — the `combined-r34` fixes and the three prose fixes — with `guard_confirmed: true`: "The ordinary Linux copy now succeeds through a valid destination symlink and retains its writable handle. A Unix resume refuses a write when it can no longer establish the destination directory. The typed endpoint and resume-error classifications also fit the goal. The remaining problems are at identifiable points where the implementation drops a handle, a file identity, or a known cleanup result."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix prose-endpoints`)
+**Commit**: `a310829a`
 **Reviewer**: none yet. Found by the working agent on 2026-11-24, scanning for decisions read from prose under D-2026-11-24-1.
 
 ## Evidence

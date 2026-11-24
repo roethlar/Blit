@@ -1,9 +1,9 @@
 # cr-ecm33-7: the release note did not tell a wire resume from a local one
 
 **Severity**: MEDIUM — brought in by cr-ecm32-6. The `CHANGELOG.md` entry said that with `--resume` a destination that is no regular file is replaced by a fresh copy. That holds for a local resume only. Over the wire, a FIFO at the destination gets an ordinary whole-file record: the file fails, and the FIFO is left.
-**Status**: Fixed; awaiting review
+**Status**: Verified — `combined-r35` (Codex openreview, 2026-11-24) reviewed `0f912b06..dc14afc4` — the `combined-r34` fixes and the three prose fixes — with `guard_confirmed: true`: no change required of it.
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm33-7`)
+**Commit**: `59f966e2`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r34` over `70efef8a..0f912b06` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r34.codex.md`. It completes cr-ecm32-6 (`4e223b0a`).
 
 ## Evidence

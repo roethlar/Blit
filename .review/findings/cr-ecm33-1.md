@@ -1,9 +1,9 @@
 # cr-ecm33-1: an ordinary local copy through a destination link was refused at completion
 
 **Severity**: HIGH — brought in by cr-ecm32-2. On Linux the local copy armed its cleanup for the file it opened, which follows a link standing at the destination. Its completion then asked whether the name itself was that file. A link there was not, so a correct copy through an unchanged, in-destination link was refused, and the run exited 2. The refusal used `--ignore-existing`'s words ("something stands at the destination that was not there when this run looked"), with that option off.
-**Status**: Fixed on Linux, awaiting review
+**Status**: Verified — `combined-r35` (Codex openreview, 2026-11-24) reviewed `0f912b06..dc14afc4` — the `combined-r34` fixes and the three prose fixes — with `guard_confirmed: true`: "The ordinary Linux copy now succeeds through a valid destination symlink and retains its writable handle. A Unix resume refuses a write when it can no longer establish the destination directory. The typed endpoint and resume-error classifications also fit the goal. The remaining problems are at identifiable points where the implementation drops a handle, a file identity, or a known cleanup result."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm33-1`)
+**Commit**: `0797d361`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `combined-r34` over `70efef8a..0f912b06` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r34.codex.md`. It completes cr-ecm32-2 (`02522882`).
 
 ## Evidence
