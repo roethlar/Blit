@@ -5,9 +5,9 @@
 - **The check.** Only the count was checked.
 
 The reviewer's run had a log marked incomplete. It still named a stale failure, a file a later pass had landed, which made the number of names match the recorded count. `jobs retry` exited 0, left out a file that had really failed, and overwrote the one that had landed.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r41` (Codex openreview, 2026-11-24) reviewed `d7f5f5e9..b6e6fab9` — the `combined-r40` fixes — with `guard_confirmed: true`: "The per-failure identity and Linux `openat2` fast path are worth keeping. A 72-directory-deep resume completed with a 64-descriptor limit and produced the correct bytes. I would require the following changes." "`jobs retry` accepted a crash-recovered log, overwrote an already-landed file, omitted a file that still needed copying, and exited 0. A log with a sequence-number gap produced the same result. Check sequence continuity and terminal summary coverage before completing a short record. Recovery can append `run-end` to a partial log." The remaining work is cr-ecm40-1
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm39-2`)
+**Commit**: `3098728b`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r40` over `86d69ee3..d7f5f5e9` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r40.codex.md`. It completes cr-ecm38-7 (`949f1c89`).
 
 ## Evidence

@@ -4,9 +4,9 @@
 - **An alias of the root.** An absolute link within the destination that names it by another path (a second absolute alias for the same directory) was taken for a way out. The base copied through it; the head exited 2, both for an ordinary copy and for a resume.
 - **Directory-only syntax.** A path written as a directory (`x/`) had its place found from the root by its names alone, losing the `/`, and the fallback made a regular file there.
 - **A dangling link.** After the held root was renamed, a dangling link within it was looked for by its path, not found in what had taken the root's name, and its file never made.
-**Status**: Fixed on Linux; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r41` (Codex openreview, 2026-11-24) reviewed `d7f5f5e9..b6e6fab9` — the `combined-r40` fixes — with `guard_confirmed: true`: "The per-failure identity and Linux `openat2` fast path are worth keeping. A 72-directory-deep resume completed with a 64-descriptor limit and produced the correct bytes. I would require the following changes." "An absolute alias to the destination root worked. An alias directly to a subdirectory of that root caused both ordinary copy and resume to exit 2 for a file inside the destination. Verify the resolved directory's ancestry against the held root for aliases to descendants." The remaining work is cr-ecm40-5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm39-5`)
+**Commit**: `57ba8bb2`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r40` over `86d69ee3..d7f5f5e9` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r40.codex.md`. It completes cr-ecm38-2 (`fbb002d5`) in part.
 
 ## Evidence

@@ -5,9 +5,9 @@
 - **One descriptor per directory.** It held a descriptor for each directory it had entered, to walk back a `..`.
 
 With one worker, a 64-descriptor limit and a file 72 directories deep, the base completed the resume; the head failed with `Too many open files`.
-**Status**: Fixed on Linux; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r41` (Codex openreview, 2026-11-24) reviewed `d7f5f5e9..b6e6fab9` — the `combined-r40` fixes — with `guard_confirmed: true`: "The per-failure identity and Linux `openat2` fast path are worth keeping. A 72-directory-deep resume completed with a 64-descriptor limit and produced the correct bytes. I would require the following changes." "After an in-root parent was renamed and its old name reused, `Walk::up` returned the replacement directory's inode. A subsequent write can land in the wrong directory. Verify the identity of the reacquired parent before continuing through `..`." "With `openat2` unavailable through the repository's test seam, path resolution succeeded but the new fast-path test failed because the fallback held two descriptors. Condition the fast-path assertion on syscall availability and retain the bounded-descriptor test for the fallback." The remaining work is cr-ecm40-3 and -7
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm39-6`)
+**Commit**: `0f09ab1e`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r40` over `86d69ee3..d7f5f5e9` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r40.codex.md`. It completes cr-ecm38-2 (`fbb002d5`) in part.
 
 ## Evidence

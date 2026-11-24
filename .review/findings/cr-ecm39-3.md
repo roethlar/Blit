@@ -1,9 +1,9 @@
 # cr-ecm39-3: an older record's whole leftover list was trusted over a log that said "not known"
 
 **Severity**: HIGH — a saved `--ignore-existing` retry keeps a partial as a file someone put there. cr-ecm38-3 made the record writer mark the leftover account incomplete when a failure's disposition is not known. A record written before that may call the account whole although its run's log says a disposition was not known. With such a record, `jobs retry` under `--ignore-existing` exited 0 and left a nine-byte partial for an eight-byte source.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r41` (Codex openreview, 2026-11-24) reviewed `d7f5f5e9..b6e6fab9` — the `combined-r40` fixes — with `guard_confirmed: true`: "The per-failure identity and Linux `openat2` fast path are worth keeping. A 72-directory-deep resume completed with a 64-descriptor limit and produced the correct bytes. I would require the following changes." "With an older record and a finished log containing no event for its failed file, `--ignore-existing` reported "Up to date" and left the partial bytes in place. Require affirmative disposition evidence for each failed identity. The current check accepts any identity absent from `left_unknown`, including one the log never mentioned." The remaining work is cr-ecm40-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm39-3`)
+**Commit**: `7e3ffba2`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r40` over `86d69ee3..d7f5f5e9` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r40.codex.md`. It completes cr-ecm38-3 (`929ce1a3`).
 
 ## Evidence

@@ -9,9 +9,9 @@ The reviewer's run had two files of one spelling:
 - the other became writable before the second.
 
 The base copied the available file. The head retried only the missing name and saved one identity for two failures.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r41` (Codex openreview, 2026-11-24) reviewed `d7f5f5e9..b6e6fab9` — the `combined-r40` fixes — with `guard_confirmed: true`: "The per-failure identity and Linux `openat2` fast path are worth keeping. A 72-directory-deep resume completed with a 64-descriptor limit and produced the correct bytes. I would require the following changes." "Before manifest resolution, the public encoder returned one path and `truncated=false` for two failures sharing a display name. After resolution it returned both. Require resolved identities at the encoding boundary or mark the list incomplete when distinct failures collapse in the emitted set." The remaining work is cr-ecm40-6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm39-1`)
+**Commit**: `deb7fa27`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r40` over `86d69ee3..d7f5f5e9` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r40.codex.md`. It completes cr-ecm38-1 (`b1f6b6d5`).
 
 ## Evidence

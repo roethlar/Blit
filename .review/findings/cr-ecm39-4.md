@@ -7,9 +7,9 @@ The reviewer's log:
 - then attributed its text-named sibling's write failure to that same raw file.
 
 The closing summary added the correct failure, leaving both in the log.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r41` (Codex openreview, 2026-11-24) reviewed `d7f5f5e9..b6e6fab9` — the `combined-r40` fixes — with `guard_confirmed: true`: "The per-failure identity and Linux `openat2` fast path are worth keeping. A 72-directory-deep resume completed with a 64-descriptor limit and produced the correct bytes. I would require the following changes." "In a push with 24 pairs of identically displayed names, 12 UTF-8 files landed. The sender logged all 12 as their rejected byte-named siblings. Associate live events with the granted manifest entry. The sender currently announces raw names for rejected entries too, so a per-pass map still misattributes them." The remaining work is cr-ecm40-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm39-4`)
+**Commit**: `9a85aa5e`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r40` over `86d69ee3..d7f5f5e9` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r40.codex.md`. It completes log-named-text (`f62df807`).
 
 ## Evidence
