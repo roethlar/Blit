@@ -1,9 +1,9 @@
 # cr-ecm36-3: a failure's display-shortened path was taken for another file
 
 **Severity**: HIGH — a saved retry names a file that is not one. A failure's path is shortened on the wire to fit the report: a 4,618-byte path became a 4,096-byte `[truncated]…` rendering. Read back, that rendering was taken for a file's name. For one missing long path the CLI saved both the full name, from the failed-path set, and the rendering, called the list complete, and `blit jobs retry` reported two failures.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r38` (Codex openreview, 2026-11-24) reviewed `2c55cb3a..6ee7ed5e` — the `combined-r37` fixes — with `guard_confirmed: true`: "Passing the root into the stream and tar writers, marking failed mmap copies through the open file handle, and preserving uncertainty after a source-only failure are sound changes." "With 260 missing long names, `--retries 1` retried zero even though the saved record contained 225 exact names. For one 4,583-byte name, JSON exposed a 4,096-byte `relative_path` without a shortening flag, and the saved record lost the reason. Give the diagnostic a reference to the exact entry and use it in retry, persistence and JSON." "I had the base binary save one failed long name. It stored both the full name and its shortened rendering. The head retried both and reported two failures. When the identity count exceeds the recorded failure count, require corroborating exact identities or report that the retry is ambiguous." The remaining work is cr-ecm37-5 and -6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm36-3`)
+**Commit**: `f29d3dc7`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r37` over `d2494965..2c55cb3a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r37.codex.md`. It completes cr-ecm35-3 (`4146e1fa`) in part.
 
 ## Evidence

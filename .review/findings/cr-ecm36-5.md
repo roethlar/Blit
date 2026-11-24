@@ -3,9 +3,9 @@
 **Severity**: MEDIUM — a run reports the opposite of what it left. cr-ecm35-4 made a resume record its source fails say "left" for a partial this run made, but it judged that from history, not from the destination:
 - With a block's I/O error held, the held failure's "nothing left" won, though the partial this run made stayed at nine bytes for an eight-byte source.
 - With the partial removed before the source's abort, the record still said it was left.
-**Status**: Fixed on Unix; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r38` (Codex openreview, 2026-11-24) reviewed `2c55cb3a..6ee7ed5e` — the `combined-r37` fixes — with `guard_confirmed: true`: "Passing the root into the stream and tar writers, marking failed mmap copies through the open file handle, and preserving uncertainty after a source-only failure are sound changes." "Removing directory search permission before a resume record closed produced `left_in_place=false`. The nine-byte partial for an eight-byte source was still there. Carry lookup errors as an unknown disposition so an `--ignore-existing` retry cannot mistake that partial for a file to keep." The remaining work is cr-ecm37-3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm36-5`)
+**Commit**: `e07ef48a`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r37` over `d2494965..2c55cb3a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r37.codex.md`. It completes cr-ecm35-4 (`6da696f5`).
 
 ## Evidence

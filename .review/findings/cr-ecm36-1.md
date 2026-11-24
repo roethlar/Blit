@@ -3,9 +3,9 @@
 **Severity**: HIGH — a file can be made outside the destination. Two gaps after cr-ecm35-1:
 - **No root.** The streamed-record receiver and the tar-member writer called the opener with no root. A dangling link at the name could lead their creation outside the destination.
 - **Opens by name.** Even with a root, the opener's two ordinary opens went by the whole path. A directory on the way replaced by a link out, after the containment check judged it, could lead them out.
-**Status**: Fixed (Linux for the opens beneath the root); awaiting review
+**Status**: Reviewed, found incomplete — `combined-r38` (Codex openreview, 2026-11-24) reviewed `2c55cb3a..6ee7ed5e` — the `combined-r37` fixes — with `guard_confirmed: true`: "Passing the root into the stream and tar writers, marking failed mmap copies through the open file handle, and preserving uncertainty after a source-only failure are sound changes." "The thread-local root descriptor is reused by pathname. If a daemon processes another job after a destination directory is rotated and recreated, a reused worker can write into the retired directory. Hold the root per session, validate cached directories by identity, and use held directories for parent creation and fallback opens." "The base CLI copied through an absolute symlink to a file inside the destination and exited 0. The head reported that the link led outside, exited 2 and left the old bytes. The equivalent relative link worked. Resolve permitted targets against the held root before opening them." The remaining work is cr-ecm37-1 and -4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm36-1`)
+**Commit**: `d5378b09`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r37` over `d2494965..2c55cb3a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r37.codex.md`. It completes cr-ecm35-1 (`be844676`) in part.
 
 ## Evidence

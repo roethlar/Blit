@@ -1,9 +1,9 @@
 # cr-ecm36-8: the forty-link test expected Linux's limit on every Unix
 
 **Severity**: MEDIUM — a test that fails where it should pass, and a resolver bound that is Linux's. cr-ecm35-1's guard required a chain of 40 links to nothing to have its file made on every Unix. macOS (XNU) follows at most 32 links in a path (`MAXSYMLINKS`), so there the opener's own open fails with `ELOOP` before the resolver is reached. The resolver's bound of 40 was likewise Linux's alone.
-**Status**: Fixed; awaiting review (the macOS half is proved by cross-compilation only)
+**Status**: Verified — `combined-r38` (Codex openreview, 2026-11-24) reviewed `2c55cb3a..6ee7ed5e` — the `combined-r37` fixes — with `guard_confirmed: true`: the review covered it and required no change
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm36-8`)
+**Commit**: `5a570d02`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r37` over `d2494965..2c55cb3a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r37.codex.md`. It completes cr-ecm35-1 (`be844676`) in part.
 
 ## Evidence
