@@ -2795,6 +2795,11 @@ mod tests {
             // Run as root, the file is root's own: nothing to model.
             return Ok(());
         }
+        // ci-resume-inode: the file another owns kept open, so its number is
+        // not given to the fresh partial: a filesystem that reuses a freed
+        // number at once (CI's) gave the fresh file the old one's, and the
+        // two looked alike.
+        let theirs = File::open(&dst)?;
         // The run as root, and the file this test's user's — another's.
         RUN_AS.lock().unwrap().push((dst.clone(), 0));
         let copied = resume_copy_from(&mut File::open(&src)?, data.len() as u64, &dst, 1024);
@@ -2802,8 +2807,13 @@ mod tests {
         copied?;
         assert_ne!(
             std::fs::metadata(&dst)?.ino(),
-            found.ino(),
+            theirs.metadata()?.ino(),
             "a fresh partial"
+        );
+        assert_eq!(
+            theirs.metadata()?.ino(),
+            found.ino(),
+            "the other's file, held"
         );
         assert_eq!(std::fs::read(&dst)?, data);
         Ok(())
