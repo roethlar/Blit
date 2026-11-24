@@ -1003,6 +1003,7 @@ mod tests {
             left_in_place: false,
             path_shortened: false,
             left_unknown: false,
+            identity_known: false,
         }
     }
 
@@ -1766,6 +1767,7 @@ mod cr_fix2_2_tests {
                 left_in_place: false,
                 path_shortened: false,
                 left_unknown: false,
+                identity_known: false,
             }],
             failed_paths: vec!["a".to_string()],
             failed_paths_truncated: false,

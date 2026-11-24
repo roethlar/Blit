@@ -200,6 +200,11 @@ pub struct FileFailure {
     /// the destination could not be looked at. `left_in_place` is false
     /// then.
     pub left_unknown: bool,
+    /// cr-ecm39-1: the failure's identity was known as it was recorded — a
+    /// text name recorded by its text by whoever knew it — and is not named
+    /// again from the manifest. In memory only: the wire carries the
+    /// identity itself.
+    pub identity_known: bool,
 }
 
 impl FileFailure {
@@ -248,6 +253,7 @@ impl FileFailure {
             path_shortened: wire.path_shortened,
             // cr-ecm37-3: as the wire carries it (contract 32).
             left_unknown: wire.left_unknown,
+            identity_known: false,
         }
     }
 }
@@ -392,12 +398,13 @@ pub struct SinkOutcome {
     /// carried them all.
     left_unknown: std::collections::HashSet<String>,
     left_unknown_total: u64,
-    /// cr-ecm38-1: the failures recorded by their text alone whose text IS
-    /// their identity — a text path, or a list entry that names no file —
-    /// as the session knew it: [`named_raw`](Self::named_raw) leaves them.
-    /// The rest recorded by text are a write site's, named afterwards from
-    /// the manifest.
-    text_known: std::collections::HashSet<String>,
+    /// cr-ecm38-1, cr-ecm39-1: the write sites' failures recorded by their
+    /// text alone, their identity still to be named from the manifest
+    /// ([`named_raw`](Self::named_raw)) — kept apart from the identities
+    /// known as they were recorded, which `failed_identities` holds. Marked
+    /// known by the text instead, a known failure and a write site's of a
+    /// sibling of its spelling were one identity for two failures.
+    unnamed_texts: std::collections::HashSet<String>,
 }
 
 impl SinkOutcome {
@@ -417,7 +424,7 @@ impl SinkOutcome {
             removed_incomplete: std::collections::HashSet::new(),
             left_unknown: std::collections::HashSet::new(),
             left_unknown_total: 0,
-            text_known: std::collections::HashSet::new(),
+            unnamed_texts: std::collections::HashSet::new(),
         }
     }
 
@@ -468,7 +475,7 @@ impl SinkOutcome {
     /// looked at.
     pub fn failed_unknown(relative_path: impl Into<String>, reason: impl Into<String>) -> Self {
         let mut outcome = Self::default();
-        outcome.record_failure_as(relative_path.into(), None, reason.into(), None);
+        outcome.record_failure_as(relative_path.into(), None, reason.into(), None, false);
         outcome
     }
 
@@ -488,11 +495,13 @@ impl SinkOutcome {
         raw_relative_path: Option<Vec<u8>>,
         reason: impl Into<String>,
     ) {
-        let relative_path = relative_path.into();
-        if raw_relative_path.is_none() {
-            self.text_known.insert(relative_path.clone());
-        }
-        self.record_named_failure(relative_path, raw_relative_path, reason);
+        self.record_failure_as(
+            relative_path.into(),
+            raw_relative_path,
+            reason.into(),
+            Some(false),
+            true,
+        );
     }
 
     /// [`record_failure`](Self::record_failure) for an entry whose exact
@@ -521,6 +530,7 @@ impl SinkOutcome {
             raw_relative_path,
             reason.into(),
             Some(left_in_place),
+            false,
         );
     }
 
@@ -533,6 +543,7 @@ impl SinkOutcome {
         raw_relative_path: Option<Vec<u8>>,
         reason: String,
         left: Option<bool>,
+        known: bool,
     ) {
         let left_in_place = left == Some(true);
         if left.is_none() {
@@ -553,8 +564,15 @@ impl SinkOutcome {
         log::warn!("file failed, session continues: {named} ({reason})");
         self.files_failed_total = self.files_failed_total.saturating_add(1);
         self.failed_paths.insert(relative_path.clone());
-        self.failed_identities
-            .insert((relative_path.clone(), raw_relative_path.clone()));
+        // cr-ecm39-1: an identity known as recorded — by its bytes, or a text
+        // known to be its name — is exact now; a write site's by its text
+        // alone waits to be named from the manifest.
+        if raw_relative_path.is_none() && !known {
+            self.unnamed_texts.insert(relative_path.clone());
+        } else {
+            self.failed_identities
+                .insert((relative_path.clone(), raw_relative_path.clone()));
+        }
         if left_in_place {
             match &raw_relative_path {
                 Some(raw) => {
@@ -572,6 +590,7 @@ impl SinkOutcome {
                 raw_relative_path,
                 left_in_place,
                 left_unknown: left.is_none(),
+                identity_known: known,
                 path_shortened: false,
             });
         }
@@ -592,7 +611,8 @@ impl SinkOutcome {
     /// so the initiator carries the unnamed remainder forward instead of
     /// letting a later clean pass erase it.
     pub fn has_unnamed_failures(&self) -> bool {
-        self.files_failed_total > self.failed_identities.len() as u64
+        let named = self.failed_identities.len() + self.unnamed_texts.len();
+        self.files_failed_total > named as u64
     }
 
     /// Whether this outcome failed `relative_path`.
@@ -649,7 +669,8 @@ impl SinkOutcome {
         self.left_unknown_total = self
             .left_unknown_total
             .saturating_add(other.left_unknown_total);
-        self.text_known.extend(other.text_known.iter().cloned());
+        self.unnamed_texts
+            .extend(other.unnamed_texts.iter().cloned());
     }
 
     /// cr-rework-1: the failed paths whose failure left this run's own
@@ -707,27 +728,18 @@ impl SinkOutcome {
     /// status to the raw set, so the status belongs to the entry that
     /// failed and not to every name of that text.
     pub fn named_raw(mut self, raw_of: impl Fn(&str) -> Option<Vec<u8>>) -> Self {
-        // cr-ecm38-1: all but those whose text is known to be their identity.
+        // cr-ecm38-1, cr-ecm39-1: all but those whose identity was known as
+        // they were recorded — each failure by its own mark.
         for failure in &mut self.failures {
-            if failure.raw_relative_path.is_none()
-                && !self.text_known.contains(&failure.relative_path)
-            {
+            if failure.raw_relative_path.is_none() && !failure.identity_known {
                 failure.raw_relative_path = raw_of(&failure.relative_path);
             }
         }
-        // cr-ecm13-3: and every failed path recorded by its text alone, for
-        // the exact set.
-        let unnamed: Vec<String> = self
-            .failed_identities
-            .iter()
-            .filter(|(text, raw)| raw.is_none() && !self.text_known.contains(text))
-            .map(|(text, _)| text.clone())
-            .collect();
-        for text in unnamed {
-            if let Some(raw) = raw_of(&text) {
-                self.failed_identities.remove(&(text.clone(), None));
-                self.failed_identities.insert((text, Some(raw)));
-            }
+        // cr-ecm13-3: and every failed path a write site recorded by its text
+        // alone, for the exact set.
+        for text in std::mem::take(&mut self.unnamed_texts) {
+            let raw = raw_of(&text);
+            self.failed_identities.insert((text, raw));
         }
         let moved: Vec<(String, Vec<u8>)> = self
             .left_in_place
@@ -801,6 +813,13 @@ impl SinkOutcome {
         // path fits — say so, or a later clean retry pass would clear
         // failures no pass was ever given.
         let unnamed = self.has_unnamed_failures();
+        // cr-ecm39-1: with the write sites' not yet named, each by its text.
+        let identities: std::collections::HashSet<(String, Option<Vec<u8>>)> = self
+            .failed_identities
+            .iter()
+            .cloned()
+            .chain(self.unnamed_texts.iter().map(|text| (text.clone(), None)))
+            .collect();
         // Deterministic order: the report's order for the named ones,
         // then the rest sorted, so a retry set is reproducible.
         let mut ordered: Vec<(&String, &Option<Vec<u8>>)> = Vec::new();
@@ -808,7 +827,7 @@ impl SinkOutcome {
             std::collections::HashSet::new();
         for failure in &self.failures {
             let identity = (&failure.relative_path, &failure.raw_relative_path);
-            if self.failed_identities.contains(&(
+            if identities.contains(&(
                 failure.relative_path.clone(),
                 failure.raw_relative_path.clone(),
             )) && placed.insert(identity)
@@ -816,8 +835,7 @@ impl SinkOutcome {
                 ordered.push(identity);
             }
         }
-        let mut rest: Vec<(&String, &Option<Vec<u8>>)> = self
-            .failed_identities
+        let mut rest: Vec<(&String, &Option<Vec<u8>>)> = identities
             .iter()
             .map(|(text, bytes)| (text, bytes))
             .filter(|identity| !placed.contains(identity))
@@ -7517,6 +7535,7 @@ mod tests {
                 left_in_place: false,
                 path_shortened: false,
                 left_unknown: false,
+                identity_known: false,
             })
             .collect();
         unbounded.files_failed_total = unbounded.failures.len() as u64;
@@ -7771,6 +7790,7 @@ mod tests {
             left_in_place: false,
             path_shortened: false,
             left_unknown: false,
+            identity_known: false,
         };
         assert_eq!(FileFailure::from_wire(&failure.to_wire()), failure);
     }
@@ -10359,6 +10379,30 @@ mod cr_win_1_tests {
         assert!(outcome.failures[0]
             .reason
             .starts_with("source: read error; "));
+    }
+
+    /// cr-ecm39-1: a known text failure and a write site's failure of a
+    /// byte-named sibling of its spelling are two failures, each by its own
+    /// identity: naming the write site's from the manifest leaves the known
+    /// one. Marked known by the text, neither was named, and they were saved
+    /// as one.
+    #[test]
+    fn a_known_text_and_a_sibling_of_its_spelling_are_two_failures() {
+        let mut outcome = SinkOutcome::default();
+        outcome.record_known_failure("dup\u{FFFD}", None, "source: missing at retry");
+        outcome.record_failure("dup\u{FFFD}", "denied");
+        let named = outcome.named_raw(|text| (text == "dup\u{FFFD}").then(|| b"dup\xff".to_vec()));
+        assert!(!named.has_unnamed_failures());
+        let (paths, mut raw, truncated) = named.wire_failed_identities();
+        assert_eq!(paths.len(), 2, "{paths:?}");
+        assert!(!truncated);
+        raw.sort();
+        assert_eq!(raw, [Vec::new(), b"dup\xff".to_vec()]);
+        assert_eq!(named.failures[0].raw_relative_path, None);
+        assert_eq!(
+            named.failures[1].raw_relative_path,
+            Some(b"dup\xff".to_vec())
+        );
     }
 
     /// cr-ecm38-5: a "not known" failure whose shortened entry is linked to

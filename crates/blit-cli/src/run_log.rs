@@ -1000,6 +1000,7 @@ mod tests {
                 left_in_place: false,
                 path_shortened: false,
                 left_unknown: false,
+                identity_known: false,
             }],
             ..RunTotals::default()
         };
@@ -1060,6 +1061,7 @@ mod tests {
                     left_in_place: false,
                     path_shortened: false,
                     left_unknown: false,
+                    identity_known: false,
                 },
                 blit_core::remote::transfer::sink::FileFailure {
                     relative_path: shown.clone(),
@@ -1068,6 +1070,7 @@ mod tests {
                     left_in_place: false,
                     path_shortened: false,
                     left_unknown: false,
+                    identity_known: false,
                 },
             ],
             // Review cr-jl4-1: which failures left their own copy is kept.

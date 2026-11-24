@@ -1007,6 +1007,7 @@ mod tests {
                 left_in_place: false,
                 path_shortened: false,
                 left_unknown: false,
+                identity_known: false,
             }],
             ..RunTotals::default()
         };
@@ -1261,6 +1262,7 @@ mod tests {
                 left_in_place: false,
                 path_shortened: false,
                 left_unknown: false,
+                identity_known: false,
             }],
             ..RunTotals::default()
         };
@@ -1452,6 +1454,7 @@ mod tests {
                     left_in_place: false,
                     path_shortened: false,
                     left_unknown: false,
+                    identity_known: false,
                 },
                 FileFailure {
                     relative_path: text.clone(),
@@ -1460,6 +1463,7 @@ mod tests {
                     left_in_place: false,
                     path_shortened: false,
                     left_unknown: false,
+                    identity_known: false,
                 },
             ],
             ..RunTotals::default()

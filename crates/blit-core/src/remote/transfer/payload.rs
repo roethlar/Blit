@@ -105,6 +105,7 @@ pub async fn prepare_payload_with(
                         left_in_place: false,
                         path_shortened: false,
                         left_unknown: false,
+                        identity_known: false,
                     }),
                 }
             };
@@ -131,6 +132,7 @@ pub async fn prepare_payload_with(
                         left_in_place: false,
                         path_shortened: false,
                         left_unknown: false,
+                        identity_known: false,
                     }),
                 }
             }
@@ -177,6 +179,7 @@ pub async fn prepare_payload_with(
                         left_in_place: false,
                         path_shortened: false,
                         left_unknown: false,
+                        identity_known: false,
                     }),
                 }
             };
@@ -517,6 +520,7 @@ pub fn build_tar_shard_with(
                 left_in_place: false,
                 path_shortened: false,
                 left_unknown: false,
+                identity_known: false,
             });
         };
 

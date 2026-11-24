@@ -176,6 +176,7 @@ mod tests {
             left_in_place: false,
             path_shortened: false,
             left_unknown: false,
+            identity_known: false,
         }
     }
 
