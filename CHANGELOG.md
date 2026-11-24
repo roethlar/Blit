@@ -294,11 +294,12 @@ part, and a job you can list, read, re-run and retry.
   — as any later run would.
 - A FIFO, or a device, where a copy expects a file no longer holds the
   transfer. At a destination path, an ordinary copy fails that file
-  and leaves it as it is; with `--resume`, a destination that is no
-  regular file is replaced by a fresh copy of the file, as before. One
-  put in a source file's place after the scan fails that file. Opened
-  as a file is, a FIFO waited for its other end — and the whole
-  transfer with it.
+  and leaves it as it is, and so does `--resume` to or from a daemon,
+  which sends such a file whole; a local `--resume` replaces a
+  destination that is no regular file with a fresh copy of the file,
+  as before. One put in a source file's place after the scan fails
+  that file. Opened as a file is, a FIFO waited for its other end —
+  and the whole transfer with it.
 - `check` of a single file against a destination of another name
   compares the two. With the source named in `--files-from`, or a
   pattern naming either file, it looked for one file's name on the
