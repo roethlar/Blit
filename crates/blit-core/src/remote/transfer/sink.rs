@@ -1650,28 +1650,62 @@ impl TransferSink for FsTransferSink {
     /// reason first, the destination's account after it, and its flag.
     async fn fail_resume_record(&self, relative_path: &str, reason: &str) -> Result<SinkOutcome> {
         let held = self.take_resume_block_failure(relative_path);
-        // cr-ecm35-4: a fresh partial this run made and holds stays, unstamped
-        // and one byte longer than its source, for the next run to resume —
-        // and the record says so.
-        let made = self
+        // cr-ecm35-4, cr-ecm36-5: what the hold holds — whether this run made
+        // it, and which file it is — and what stands at the name as the record
+        // closes: the held partial, there still, stays (unstamped, one byte
+        // longer than its source, for the next run to resume) when this run
+        // made it, or its held failure says it was left; gone from the name,
+        // nothing of it is there. Holding nothing, the held failure's own word
+        // stands.
+        let partial = self
             .resume_files
             .lock()
             .expect("resume-files lock poisoned")
             .get(relative_path)
-            .is_some_and(|partial| partial.made);
-        self.forget_resume(relative_path);
-        Ok(match held {
-            Some((held, left)) => {
-                SinkOutcome::failed_leaving(relative_path, format!("{reason}; {held}"), left)
+            .map(|partial| (partial.made, partial.identity));
+        let stands = match partial {
+            Some((_, Some(identity))) => {
+                resolve_resume_destination(
+                    &self.containment,
+                    &self.dst_root,
+                    self.canonical_dst_root.as_deref(),
+                    relative_path,
+                    self.raw_name_for(relative_path).as_deref(),
+                    "block-fail",
+                )
+                .await
+                .ok()
+                .and_then(|dst| std::fs::metadata(dst).ok())
+                .as_ref()
+                .and_then(file_identity)
+                    == Some(identity)
             }
-            None if made => SinkOutcome::failed_leaving(
+            _ => false,
+        };
+        self.forget_resume(relative_path);
+        let held_left = held.as_ref().is_some_and(|(_, left)| *left);
+        let left = match partial {
+            Some((made, _)) => stands && (made || held_left),
+            None => held_left,
+        };
+        let kept = || {
+            format!(
+                "{INCOMPLETE_LEFT_IN_PLACE}, one byte longer than the source, for the next run to \
+                 resume"
+            )
+        };
+        Ok(match held {
+            Some((held, _)) if left && !held_left => SinkOutcome::failed_leaving(
                 relative_path,
-                format!(
-                    "{reason}; {INCOMPLETE_LEFT_IN_PLACE}, one byte longer than the source, for the \
-                     next run to resume"
-                ),
+                format!("{reason}; {held}; {}", kept()),
                 true,
             ),
+            Some((held, _)) => {
+                SinkOutcome::failed_leaving(relative_path, format!("{reason}; {held}"), left)
+            }
+            None if left => {
+                SinkOutcome::failed_leaving(relative_path, format!("{reason}; {}", kept()), true)
+            }
             None => SinkOutcome::failed(relative_path, reason),
         })
     }
@@ -10055,6 +10089,45 @@ mod cr_win_1_tests {
             .await
             .unwrap();
         assert!(!outcome.failures[0].left_in_place, "{outcome:?}");
+    }
+
+    /// cr-ecm36-5: a failed resume record says what stands at the name as it
+    /// closes. A partial this run made, a block's failure held for it, is
+    /// left — it was reported nothing left — and one gone from the name
+    /// before the record closed left nothing — it was reported left.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_resume_record_says_what_stands_as_it_closes() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        sink.note_resume_baseline("errored.bin", ResumeBaseline::Whole);
+        sink.hold_resume_partial("errored.bin", 8).await.unwrap();
+        sink.hold_resume_block_failure("errored.bin", &eyre::eyre!("block write: I/O error"));
+        let outcome = sink
+            .fail_resume_record("errored.bin", "source: read error")
+            .await
+            .unwrap();
+        assert!(outcome.failures[0].left_in_place, "{outcome:?}");
+        assert_eq!(std::fs::metadata(dst.join("errored.bin")).unwrap().len(), 9);
+
+        sink.note_resume_baseline("gone.bin", ResumeBaseline::Whole);
+        sink.hold_resume_partial("gone.bin", 8).await.unwrap();
+        std::fs::remove_file(dst.join("gone.bin")).unwrap();
+        let outcome = sink
+            .fail_resume_record("gone.bin", "source: read error")
+            .await
+            .unwrap();
+        assert!(!outcome.failures[0].left_in_place, "{outcome:?}");
+        assert!(!outcome.left_in_place_holds("gone.bin"));
     }
 
     /// cr-ecm22-5: a record the source closes failed lets its partial go —
