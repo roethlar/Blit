@@ -560,10 +560,21 @@ fn open_beneath(dst: &Path, root: &Path, make: bool) -> Option<std::io::Result<F
             // No `openat2` here (a kernel before 5.6, or a filter that
             // refuses it): by the name, as before.
             Some(libc::ENOSYS) | Some(libc::EPERM) => None,
-            Some(libc::EXDEV) => Some(Err(std::io::Error::other(format!(
-                "{} leads out of the destination",
-                dst.display()
-            )))),
+            // cr-ecm37-4: a way out, as the kernel sees every absolute link —
+            // one that leads back into the destination among them. The place
+            // is resolved against the destination instead — the chain of
+            // links followed, its directory held — and opened there only
+            // when it lies within; else it leads out. Refused outright, an
+            // absolute link to a file within the destination failed a copy
+            // it had always taken.
+            Some(libc::EXDEV) => Some(
+                crate::copy::resolve_destination(dst, Some(root))
+                    .map_err(|error| std::io::Error::other(format!("{error:#}")))
+                    .and_then(|resolved| {
+                        let mode = if make { 0o666 } else { 0 };
+                        resolved.open_as(flags & !libc::O_CLOEXEC, mode)
+                    }),
+            ),
             _ => Some(Err(error)),
         };
     }
@@ -1160,6 +1171,42 @@ mod mode_tests {
         let made = open_to_write(&root.join("sub").join("g.bin"), Some(&root), true);
         assert!(made.is_err(), "refused: {made:?}");
         assert!(!outside.join("g.bin").exists(), "nothing made outside");
+    }
+
+    /// cr-ecm37-4 (Linux): an absolute link that leads within the
+    /// destination is followed, as it always was — to a file, and as a
+    /// directory on the way — and one that leads out is still refused.
+    /// Opened beneath the root, the kernel took every absolute link for a
+    /// way out, and the copy failed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_absolute_link_within_the_destination_is_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(dir.path().join("dst").join("real")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let root = std::fs::canonicalize(dir.path().join("dst")).unwrap();
+        let target = root.join("real").join("target.bin");
+        std::fs::write(&target, b"old").unwrap();
+        std::os::unix::fs::symlink(&target, root.join("link.bin")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("into")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
+
+        let mut through = open_to_write(&root.join("link.bin"), Some(&root), false).unwrap();
+        std::io::Write::write_all(&mut through, b"new").unwrap();
+        drop(through);
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(
+            root.join("link.bin").is_symlink(),
+            "the link is left as it was"
+        );
+
+        create_regular_within(&root.join("into").join("made.bin"), Some(&root)).unwrap();
+        assert!(root.join("real").join("made.bin").is_file());
+
+        let made = create_regular_within(&root.join("out").join("f.bin"), Some(&root));
+        assert!(made.is_err(), "refused: {made:?}");
+        assert!(!outside.join("f.bin").exists(), "nothing made outside");
     }
 
     /// cr-ecm35-1: a chain of links to nothing as long as the system follows

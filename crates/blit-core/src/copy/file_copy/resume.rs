@@ -662,8 +662,14 @@ impl Resolved {
     /// The file at the name, opened with `flags` in the held directory and
     /// never through a link; one made is private (600).
     pub(crate) fn open(&self, flags: libc::c_int) -> std::io::Result<File> {
+        self.open_as(flags, 0o600)
+    }
+
+    /// [`Self::open`], a file made taking `mode` (less the umask): the
+    /// opener's own creations are made as any other file is (cr-ecm37-4).
+    pub(crate) fn open_as(&self, flags: libc::c_int, mode: libc::c_uint) -> std::io::Result<File> {
         use std::os::unix::io::AsRawFd as _;
-        open_in(self.directory.as_raw_fd(), &self.name, flags)
+        open_in_as(self.directory.as_raw_fd(), &self.name, flags, mode)
     }
 
     /// cr-ecm21-3, D-2026-11-23-1: a FRESH private partial at the name in
@@ -1014,6 +1020,17 @@ fn open_in(
     name: &std::ffi::CStr,
     flags: libc::c_int,
 ) -> std::io::Result<File> {
+    open_in_as(directory, name, flags, 0o600)
+}
+
+/// [`open_in`], a file made taking `mode`.
+#[cfg(unix)]
+fn open_in_as(
+    directory: std::os::unix::io::RawFd,
+    name: &std::ffi::CStr,
+    flags: libc::c_int,
+    mode: libc::c_uint,
+) -> std::io::Result<File> {
     use std::os::unix::io::{FromRawFd as _, OwnedFd};
     // SAFETY: `directory` is open for the length of the call, and `name` is
     // a NUL-terminated string that outlives it.
@@ -1022,7 +1039,7 @@ fn open_in(
             directory,
             name.as_ptr(),
             flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o600 as libc::c_uint,
+            mode,
         )
     };
     if opened < 0 {
