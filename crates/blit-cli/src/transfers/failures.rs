@@ -19,9 +19,7 @@ use blit_core::remote::transfer::FileFailure;
 use serde_json::{json, Value};
 
 use blit_core::transfers::failures::shown_path;
-pub(crate) use blit_core::transfers::failures::{
-    failures_from_wire, refuse_source_delete_on_failures,
-};
+pub(crate) use blit_core::transfers::failures::{failures_of, refuse_source_delete_on_failures};
 
 use crate::style::{Palette, Role};
 
@@ -154,9 +152,12 @@ pub(crate) fn failures_json(failures: &[FileFailure]) -> Value {
         failures
             .iter()
             .map(|failure| {
+                // cr-ecm37-5: a path the report could not link to its exact
+                // name is shortened, and says so.
                 json!({
                     "relative_path": failure.relative_path,
                     "reason": failure.reason,
+                    "path_shortened": failure.path_shortened,
                 })
             })
             .collect(),
@@ -367,6 +368,19 @@ mod tests {
             format!("{:?}", exit_for_failures(1)),
             format!("{:?}", ExitCode::from(EXIT_PARTIAL_FAILURE))
         );
+    }
+
+    /// cr-ecm37-5: a path the report could not link to its exact name is
+    /// shortened, and the JSON says so.
+    #[test]
+    fn the_json_says_when_a_path_is_shortened() {
+        let shortened = FileFailure {
+            path_shortened: true,
+            ..failure("[truncated]…name.bin", "missing")
+        };
+        let value = failures_json(&[shortened, failure("whole.bin", "missing")]);
+        assert_eq!(value[0]["path_shortened"], true);
+        assert_eq!(value[1]["path_shortened"], false);
     }
 
     /// The JSON shape every route carries: one object per named failure,

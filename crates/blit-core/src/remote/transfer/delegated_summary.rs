@@ -80,12 +80,15 @@ pub fn delegated_summary_from_session(
 /// [`DelegatedPullSummary::files_failed`]: a returned list shorter than
 /// that count means the sender capped its detail, not that failures
 /// were lost.
+///
+/// cr-ecm37-5: each failure named by its exact entry in the summary's
+/// failed-path list where the report links it to one.
 pub fn delegated_summary_failures(summary: &DelegatedPullSummary) -> Vec<FileFailure> {
-    summary
-        .failures
-        .iter()
-        .map(FileFailure::from_wire)
-        .collect()
+    crate::remote::transfer::sink::failures_from_report(
+        &summary.failures,
+        &summary.failed_paths,
+        &summary.failed_paths_raw,
+    )
 }
 
 #[cfg(test)]

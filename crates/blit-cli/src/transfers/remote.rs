@@ -412,7 +412,7 @@ pub fn print_deferred_push_result(args: &TransferArgs, state: &DeferredPushState
         // replaces it — a partial run still reports what landed.
         super::failures::print_failure_block(
             state.summary.files_failed,
-            &super::failures::failures_from_wire(&state.summary.failures),
+            &super::failures::failures_of(&state.summary),
             unretried,
         );
     }
@@ -603,7 +603,7 @@ pub fn print_deferred_pull_result(args: &TransferArgs, state: &DeferredPullState
         // replaces it — a partial run still reports what landed.
         super::failures::print_failure_block(
             state.summary.files_failed,
-            &super::failures::failures_from_wire(&state.summary.failures),
+            &super::failures::failures_of(&state.summary),
             unretried,
         );
     }
@@ -741,7 +741,7 @@ fn print_pull_json(
     // process still exits with the partial-failure status, so a consumer
     // that only checks the status is not misled by a document that
     // otherwise looks like a clean pull.
-    let failures = super::failures::failures_from_wire(&summary.failures);
+    let failures = super::failures::failures_of(summary);
     let summary = json!({
         "operation": "pull",
         "destination": dest_root.to_string_lossy(),
@@ -768,7 +768,7 @@ fn print_push_json(
     // (files_requested, bytes_zero_copy, first_payload_ms) are gone;
     // files_resumed is new with push-side --resume.
     // pfc-5: same two fields, same shape, as every other route's document.
-    let failures = super::failures::failures_from_wire(&summary.failures);
+    let failures = super::failures::failures_of(summary);
     let summary = json!({
         "operation": "push",
         "destination": destination,

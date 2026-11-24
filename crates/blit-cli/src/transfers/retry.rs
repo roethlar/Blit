@@ -133,7 +133,7 @@ impl PassFailures {
     pub(crate) fn from_summary(summary: &TransferSummary) -> Self {
         Self {
             files_failed: summary.files_failed,
-            failures: super::failures::failures_from_wire(&summary.failures),
+            failures: super::failures::failures_of(summary),
             failed_paths: summary.failed_paths.clone(),
             failed_paths_truncated: summary.failed_paths_truncated,
             failed_paths_raw: at_their_places(&summary.failed_paths, &summary.failed_paths_raw),
@@ -221,7 +221,11 @@ impl PassFailures {
         }
         let truncated =
             self.failed_paths_truncated || (self.files_failed as usize) > self.failures.len();
-        let mut named = RetrySet::default();
+        // cr-ecm37-5: a list cut for size still names exactly every file it
+        // carries — with the report's names, that is what the pass is given.
+        // Given the report's alone, 260 long names, each report entry's path
+        // shortened, retried none of the 225 the list carried.
+        let mut named = exact();
         // cr-ecm36-3: a path the report shortened names no file to retry.
         for failure in self
             .failures
@@ -404,7 +408,12 @@ impl PassFailures {
     /// Write the final state back onto a wire-shaped summary.
     pub(crate) fn apply_to_summary(&self, summary: &mut TransferSummary) {
         summary.files_failed = self.files_failed;
-        summary.failures = self.failures.iter().map(FileFailure::to_wire).collect();
+        // cr-ecm37-5: each entry linked to its exact name in the list.
+        summary.failures = blit_core::remote::transfer::sink::failures_to_report(
+            &self.failures,
+            &self.failed_paths,
+            &where_any(&self.failed_paths_raw),
+        );
         summary.failed_paths = self.failed_paths.clone();
         summary.failed_paths_truncated = self.failed_paths_truncated;
         summary.failed_paths_raw = where_any(&self.failed_paths_raw);
@@ -756,6 +765,52 @@ async fn wait_before_pass(args: &TransferArgs, _pass: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cr-ecm37-5: a failed-path list cut for size still names exactly every
+    /// file it carries, and the pass is given them all; given the report's
+    /// names alone, whose paths were shortened, it was given none.
+    #[test]
+    fn a_cut_list_gives_the_pass_every_name_it_carries() {
+        let report = PassFailures {
+            files_failed: 3,
+            failures: vec![FileFailure {
+                relative_path: "[truncated]…c".into(),
+                reason: "r".into(),
+                path_shortened: true,
+                ..FileFailure::default()
+            }],
+            failed_paths: vec!["a".into(), "b".into()],
+            failed_paths_raw: vec![Vec::new(), Vec::new()],
+            failed_paths_truncated: true,
+            ..PassFailures::default()
+        };
+        let (set, truncated) = report.retry_set();
+        assert_eq!(set.text, [PathBuf::from("a"), PathBuf::from("b")].into());
+        assert!(truncated);
+    }
+
+    /// cr-ecm37-5: the report written back onto the run's summary links each
+    /// entry to its exact name in the list, so a reader of that summary has
+    /// the name a shortened path stands for.
+    #[test]
+    fn the_final_summary_links_its_report() {
+        let long = format!("{}/name.bin", "d".repeat(4600));
+        let report = PassFailures {
+            files_failed: 1,
+            failures: vec![FileFailure {
+                relative_path: long.clone(),
+                reason: "r".into(),
+                ..FileFailure::default()
+            }],
+            failed_paths: vec![long],
+            failed_paths_raw: vec![Vec::new()],
+            ..PassFailures::default()
+        };
+        let mut summary = TransferSummary::default();
+        report.apply_to_summary(&mut summary);
+        assert!(summary.failures[0].path_shortened);
+        assert_eq!(summary.failures[0].failed_path_at, 1);
+    }
 
     /// cr-ecm37-3: under --ignore-existing a failure that may or may not
     /// have left this run's copy is not retried — kept, the copy would stand

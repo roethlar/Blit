@@ -1586,6 +1586,11 @@ message FileFailure {
   // not known — the destination could not be looked at as the file closed.
   // `left_in_place` is false then. Never read from `reason`.
   bool left_unknown = 6;
+  // Contract 33 (cr-ecm37-5): where this failure's exact name stands in the
+  // same summary's `failed_paths` — 1-based; 0 where that list does not
+  // carry it. A reader takes the name from there: `relative_path` may be
+  // shortened for the wire.
+  uint32 failed_path_at = 7;
 }
 
 // DESTINATION → SOURCE at close: the end that wrote bytes and

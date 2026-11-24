@@ -1057,12 +1057,7 @@ pub async fn run_local_session(
         // summary the wire carriers return, so the local surface pfc-5
         // renders is the remote one.
         files_failed: outcome.summary.files_failed,
-        failures: outcome
-            .summary
-            .failures
-            .iter()
-            .map(FileFailure::from_wire)
-            .collect(),
+        failures: crate::transfers::failures::failures_of(&outcome.summary),
         failed_paths: outcome.summary.failed_paths.clone(),
         failed_paths_truncated: outcome.summary.failed_paths_truncated,
         failed_paths_raw: outcome.summary.failed_paths_raw.clone(),

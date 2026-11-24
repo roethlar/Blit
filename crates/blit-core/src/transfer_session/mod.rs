@@ -246,7 +246,9 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// v32: `FileFailure.left_unknown` (cr-ecm37-3) — a failure whose
 /// disposition the destination could not tell says so; a report that
 /// cannot carry every such flag marks its leftover account inexact.
-pub const CONTRACT_VERSION: u32 = 32;
+/// v33: `FileFailure.failed_path_at` (cr-ecm37-5) — each report entry linked
+/// to its exact name in the summary's failed-path list, and read back as it.
+pub const CONTRACT_VERSION: u32 = 33;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames
@@ -1632,6 +1634,7 @@ fn requested_but_unscanned(
             left_in_place: false,
             path_shortened: false,
             left_unknown: false,
+            failed_path_at: 0,
         });
     }
     (out, dropped)
@@ -2582,6 +2585,7 @@ async fn source_send_half(
                                             left_in_place: false,
                                             path_shortened: false,
                                             left_unknown: false,
+                                            failed_path_at: 0,
                                         },
                                     )))
                                     .await?;
@@ -3573,6 +3577,7 @@ async fn send_payload_records(
                     left_in_place: false,
                     path_shortened: false,
                     left_unknown: false,
+                    failed_path_at: 0,
                 })))
                 .await?;
             }
@@ -3594,6 +3599,7 @@ async fn send_payload_records(
                             left_in_place: false,
                             path_shortened: false,
                             left_unknown: false,
+                            failed_path_at: 0,
                         })))
                         .await?;
                         continue;
@@ -3611,6 +3617,7 @@ async fn send_payload_records(
                             left_in_place: false,
                             path_shortened: false,
                             left_unknown: false,
+                            failed_path_at: 0,
                         })))
                         .await?;
                         continue;
@@ -3627,6 +3634,7 @@ async fn send_payload_records(
                         left_in_place: false,
                         path_shortened: false,
                         left_unknown: false,
+                        failed_path_at: 0,
                     })))
                     .await?;
                     continue;
@@ -3717,6 +3725,7 @@ async fn send_payload_records(
                         left_in_place: false,
                         path_shortened: false,
                         left_unknown: false,
+                        failed_path_at: 0,
                     })))
                     .await?;
                 }
@@ -3860,6 +3869,7 @@ async fn send_resume_block_records(
                     left_in_place: false,
                     path_shortened: false,
                     left_unknown: false,
+                    failed_path_at: 0,
                 })))
                 .await?;
                 return Ok(());
@@ -5780,7 +5790,9 @@ async fn destination_session_inner(
                 // cr-ecm13-3: and the bytes of those that are not text.
                 // cr-ecm37-3: and an account inexact where the report cannot
                 // carry every failure whose disposition is not known.
-                let failures = contained_failures.wire_failures();
+                // cr-ecm37-5: each entry linked to its exact name in the list.
+                let failures =
+                    contained_failures.wire_failures_linked(&retry_paths, &failed_paths_raw);
                 let (left_in_place, left_in_place_raw, left_in_place_truncated) =
                     contained_failures.wire_left_account(&failures);
                 let (removed_incomplete, removed_incomplete_truncated) =

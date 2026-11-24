@@ -243,11 +243,7 @@ impl From<&TransferSummary> for RunTotals {
             failed_paths: summary.failed_paths.clone(),
             failed_paths_raw: raw_at_their_places(&summary.failed_paths, &summary.failed_paths_raw),
             failed_paths_truncated: summary.failed_paths_truncated,
-            failures: summary
-                .failures
-                .iter()
-                .map(FileFailure::from_wire)
-                .collect(),
+            failures: crate::transfers::failures::failures_of(summary),
             left_in_place: summary.left_in_place.clone(),
             left_in_place_truncated: summary.left_in_place_truncated,
             left_in_place_raw: summary.left_in_place_raw.clone(),
@@ -1148,6 +1144,29 @@ mod tests {
             ..totals
         };
         assert_eq!(whole.failed_files()[1].left_in_place, Some(false));
+    }
+
+    /// cr-ecm37-5: a failure whose path the wire shortened keeps its reason
+    /// in the account, joined to its exact name. Its shortened path no name,
+    /// the record lost the reason.
+    #[test]
+    fn a_shortened_failure_keeps_its_reason() {
+        let long = format!("{}/name.bin", "d".repeat(4600));
+        let mut outcome = crate::remote::transfer::sink::SinkOutcome::default();
+        outcome.record_failure(long.clone(), "source: missing");
+        let (paths, raw, truncated) = outcome.wire_failed_identities();
+        let summary = crate::generated::TransferSummary {
+            files_failed: 1,
+            failures: outcome.wire_failures_linked(&paths, &raw),
+            failed_paths: paths,
+            failed_paths_raw: raw,
+            failed_paths_truncated: truncated,
+            ..Default::default()
+        };
+        let files = RunTotals::from(&summary).failed_files();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert_eq!(files[0].path, long);
+        assert_eq!(files[0].reason.as_deref(), Some("source: missing"));
     }
 
     /// cr-ecm37-3: a failure the report kept as not known to have left its

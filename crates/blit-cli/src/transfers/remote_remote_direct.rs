@@ -286,7 +286,8 @@ fn print_delegated_json(
 ) {
     use serde_json::json;
     // pfc-5: same two fields, same shape, as every other route's document.
-    let failures = super::failures::failures_from_wire(&summary.failures);
+    let failures =
+        blit_core::remote::transfer::delegated_summary::delegated_summary_failures(summary);
     let body = json!({
         "operation": "delegated_pull",
         "source": format_remote_endpoint(src),

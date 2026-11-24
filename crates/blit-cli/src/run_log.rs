@@ -958,11 +958,9 @@ pub fn totals_from_delegated(summary: &blit_core::generated::DelegatedPullSummar
             &summary.failed_paths_raw,
         ),
         failed_paths_truncated: summary.failed_paths_truncated,
-        failures: summary
-            .failures
-            .iter()
-            .map(blit_core::remote::transfer::sink::FileFailure::from_wire)
-            .collect(),
+        failures: blit_core::remote::transfer::delegated_summary::delegated_summary_failures(
+            summary,
+        ),
         left_in_place: summary.left_in_place.clone(),
         left_in_place_truncated: summary.left_in_place_truncated,
         left_in_place_raw: summary.left_in_place_raw.clone(),

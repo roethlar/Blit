@@ -1103,6 +1103,7 @@ async fn skip_for_an_ungranted_path_is_a_violation() {
         left_in_place: false,
         path_shortened: false,
         left_unknown: false,
+        failed_path_at: 0,
     })))
     .await
     .unwrap();
@@ -1160,6 +1161,7 @@ async fn skip_for_a_granted_need_then_source_done_completes_with_the_failure_rep
         left_in_place: false,
         path_shortened: false,
         left_unknown: false,
+        failed_path_at: 0,
     })))
     .await
     .unwrap();

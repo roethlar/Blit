@@ -33,6 +33,17 @@ pub fn failures_from_wire(wire: &[crate::generated::FileFailure]) -> Vec<FileFai
     wire.iter().map(FileFailure::from_wire).collect()
 }
 
+/// cr-ecm37-5: a summary's report read back, each failure named by its exact
+/// entry in the summary's failed-path list where the report links it to one
+/// — a path shortened for the wire is the name it is again.
+pub fn failures_of(summary: &crate::generated::TransferSummary) -> Vec<FileFailure> {
+    crate::remote::transfer::sink::failures_from_report(
+        &summary.failures,
+        &summary.failed_paths,
+        &summary.failed_paths_raw,
+    )
+}
+
 /// Number of failed files a refusal names inline before deferring to
 /// the report/log. The refusal is one error line, not the report.
 const REFUSAL_NAMED_FAILURES: usize = 3;
@@ -154,6 +165,7 @@ mod tests {
             left_in_place: false,
             path_shortened: false,
             left_unknown: false,
+            failed_path_at: 0,
         }];
         let read_back = failures_from_wire(&wire);
         assert_eq!(read_back.len(), 1);

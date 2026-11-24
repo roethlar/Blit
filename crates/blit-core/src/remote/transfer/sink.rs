@@ -231,6 +231,7 @@ impl FileFailure {
                 .unwrap_or_default(),
             left_in_place: self.left_in_place,
             left_unknown: self.left_unknown,
+            failed_path_at: 0,
         }
     }
 
@@ -249,6 +250,68 @@ impl FileFailure {
             left_unknown: wire.left_unknown,
         }
     }
+}
+
+/// cr-ecm37-5: each failure's place in a summary's failed-path list `paths`
+/// (with `raw` at their places, or none) — 1-based, 0 where the list does
+/// not carry it — by its exact identity.
+fn report_links<'a>(paths: &'a [String], raw: &'a [Vec<u8>]) -> impl Fn(&FileFailure) -> u32 + 'a {
+    let mut places: std::collections::HashMap<(&'a str, &'a [u8]), u32> =
+        std::collections::HashMap::with_capacity(paths.len());
+    for (at, path) in paths.iter().enumerate() {
+        let bytes = raw.get(at).map_or(&[][..], Vec::as_slice);
+        places
+            .entry((path.as_str(), bytes))
+            .or_insert(u32::try_from(at).map_or(0, |at| at.saturating_add(1)));
+    }
+    move |failure: &FileFailure| {
+        let bytes = failure.raw_relative_path.as_deref().unwrap_or_default();
+        places
+            .get(&(failure.relative_path.as_str(), bytes))
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+/// cr-ecm37-5: an in-memory report as it goes back on the wire, each entry
+/// linked to its exact name's place in `paths` — whole, as a summary that
+/// stays in this process holds it.
+pub fn failures_to_report(
+    failures: &[FileFailure],
+    paths: &[String],
+    raw: &[Vec<u8>],
+) -> Vec<crate::generated::FileFailure> {
+    let place_of = report_links(paths, raw);
+    failures
+        .iter()
+        .map(|failure| {
+            let mut entry = failure.to_wire();
+            entry.failed_path_at = place_of(failure);
+            entry
+        })
+        .collect()
+}
+
+/// cr-ecm37-5: a report read back from a summary whose failed-path list is
+/// `paths` (with `raw` at their places, or none): each entry linked to its
+/// exact name there is that name again — its path no longer shortened.
+pub fn failures_from_report(
+    wire: &[crate::generated::FileFailure],
+    paths: &[String],
+    raw: &[Vec<u8>],
+) -> Vec<FileFailure> {
+    wire.iter()
+        .map(|entry| {
+            let mut failure = FileFailure::from_wire(entry);
+            let at = (entry.failed_path_at as usize).checked_sub(1);
+            if let Some((at, path)) = at.and_then(|at| paths.get(at).map(|path| (at, path))) {
+                failure.relative_path = path.clone();
+                failure.raw_relative_path = raw.get(at).filter(|bytes| !bytes.is_empty()).cloned();
+                failure.path_shortened = false;
+            }
+            failure
+        })
+        .collect()
 }
 
 /// A path set in wire form: sorted, bounded by
@@ -757,12 +820,26 @@ impl SinkOutcome {
     }
 
     pub fn wire_failures(&self) -> Vec<crate::generated::FileFailure> {
+        self.wire_failures_linked(&[], &[])
+    }
+
+    /// cr-ecm37-5: [`wire_failures`](Self::wire_failures), each entry linked to
+    /// its exact name's place in `paths` (with `raw` at their places, or none)
+    /// — the failed-path list the same summary carries — so a path shortened
+    /// for the wire is read back as the name it is.
+    pub fn wire_failures_linked(
+        &self,
+        paths: &[String],
+        raw: &[Vec<u8>],
+    ) -> Vec<crate::generated::FileFailure> {
         use prost::Message as _;
+        let place_of = report_links(paths, raw);
 
         let mut wire: Vec<crate::generated::FileFailure> = Vec::new();
         let mut remaining = MAX_WIRE_FAILURES_ENCODED_BYTES;
         for failure in self.failures.iter().take(MAX_REPORTED_FILE_FAILURES) {
-            let entry = failure.to_wire();
+            let mut entry = failure.to_wire();
+            entry.failed_path_at = place_of(failure);
             let cost = entry
                 .encoded_len()
                 .saturating_add(WIRE_FAILURE_ENVELOPE_BYTES);
@@ -10245,6 +10322,25 @@ mod cr_win_1_tests {
         assert!(outcome.failures[0]
             .reason
             .starts_with("source: read error; "));
+    }
+
+    /// cr-ecm37-5: a failure whose path the wire shortens is linked to its
+    /// exact name in the summary's list and read back as it; unlinked, it
+    /// stays shortened and says so.
+    #[test]
+    fn a_shortened_failure_is_read_back_as_its_exact_name() {
+        let long = format!("{}/name.bin", "d".repeat(MAX_FAILURE_PATH_BYTES + 500));
+        let mut outcome = SinkOutcome::default();
+        outcome.record_failure(long.clone(), "source: missing");
+        let (paths, raw, _) = outcome.wire_failed_identities();
+        let wired = outcome.wire_failures_linked(&paths, &raw);
+        assert!(wired[0].path_shortened);
+        assert_eq!(wired[0].failed_path_at, 1);
+        let read = failures_from_report(&wired, &paths, &raw);
+        assert_eq!(read[0].relative_path, long);
+        assert!(!read[0].path_shortened);
+        let unlinked = failures_from_report(&outcome.wire_failures(), &[], &[]);
+        assert!(unlinked[0].path_shortened);
     }
 
     /// cr-ecm37-3: a failure whose disposition is not known is said by its

@@ -1319,7 +1319,7 @@ async fn run_move_inner(
             refuse_source_delete_on_failures(
                 &format_remote_endpoint(&remote),
                 state.summary.files_failed,
-                &failures::failures_from_wire(&state.summary.failures),
+                &failures::failures_of(&state.summary),
             )?;
 
             // Delete remote source: the path the session read (cr-uv2-1),
@@ -1404,7 +1404,7 @@ async fn run_move_inner(
             refuse_source_delete_on_failures(
                 &src_path.display().to_string(),
                 state.summary.files_failed,
-                &failures::failures_from_wire(&state.summary.failures),
+                &failures::failures_of(&state.summary),
             )?;
 
             // Delete local source
