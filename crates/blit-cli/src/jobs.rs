@@ -454,6 +454,25 @@ fn failed_identities(
         .filter(|failure| !legacy_entry(failure))
         .map(|failure| (failure.path.clone(), failure.raw.clone()))
         .collect();
+    // cr-ecm37-6: a record names each file it failed once. One that names
+    // more than it counts was saved by a build that could name a file twice
+    // — by its name, and by a rendering of it shortened for the wire (before
+    // cr-ecm36-3) — and which entry is the file cannot be told from the
+    // record, nor from its log, which that build wrote the same way; its
+    // words decide nothing. Nothing is retried. Retried, the rendering was
+    // asked for as a file, and a second failure reported.
+    if (known.len() as u64) > record.files_failed {
+        eyre::bail!(
+            "job {} names {} files for the {} it failed — a record from an earlier blit can \
+             name a long file twice, once by a shortened rendering of its name, and which entry \
+             is the file cannot be told — so nothing is retried; run the whole job again \
+             instead (`blit jobs save {} <name>`, then `blit jobs run <name>`)",
+            record.run_id,
+            known.len(),
+            record.files_failed,
+            record.run_id
+        );
+    }
     let short = |known: &HashSet<(String, Option<String>)>| {
         record.failures_truncated || (known.len() as u64) < record.files_failed
     };
@@ -2371,6 +2390,47 @@ mod retry_name_tests {
         assert!(writer.finish(Outcome::Failed, None).complete);
         let (failed, _) = failed_identities(dir.path(), &old(counted)).expect("settled by its log");
         assert_eq!(failed, [("real.txt".to_string(), None)].into());
+    }
+
+    /// cr-ecm37-6: a record that names more files than it failed — an earlier
+    /// blit's, which saved a long name twice, once by a shortened rendering
+    /// of it — is not retried: which entry is the file cannot be told.
+    /// Retried, the rendering was asked for as a file, and a second failure
+    /// reported. One entry for its one failure is retried.
+    #[test]
+    fn a_record_naming_more_files_than_it_failed_is_not_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = RunRecord::starting(
+            "6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d",
+            &JobSpec::new(
+                "m1",
+                "copy",
+                "/".into(),
+                blit_core::job_record::SpecEndpoint::Local { path: "/a/".into() },
+                blit_core::job_record::SpecEndpoint::Local { path: "/b/".into() },
+                Default::default(),
+                None,
+            ),
+        );
+        let long = format!("{}/name.bin", "d".repeat(4600));
+        record.files_failed = 1;
+        record.failures = vec![
+            blit_core::job_record::Failure {
+                path: long.clone(),
+                reason: "source: missing".into(),
+                raw: None,
+            },
+            blit_core::job_record::Failure {
+                path: format!("[truncated]…{}", &long[long.len() - 4000..]),
+                reason: "source: missing".into(),
+                raw: None,
+            },
+        ];
+        assert!(failed_identities(dir.path(), &record).is_err());
+
+        record.failures.truncate(1);
+        let (failed, _) = failed_identities(dir.path(), &record).expect("a whole record");
+        assert_eq!(failed, [(long, None)].into());
     }
 
     /// cr-ecm34-7: a file whose name is the old synthesized entry's,
