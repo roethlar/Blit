@@ -937,9 +937,30 @@ pub struct LogRead {
     /// that says, settles it. While any stays, `left_in_place` is not the
     /// whole list.
     pub left_unknown: Vec<(String, Option<String>)>,
+    /// cr-ecm41-2: the next event's place in the session's log being read,
+    /// and whether that log has given its summary and its end.
+    next_seq: u64,
+    this_summed: bool,
+    this_ended: bool,
 }
 
 impl LogRead {
+    /// cr-ecm41-2: one session's log begins; its events are numbered from 0.
+    pub fn begin_log(&mut self) {
+        self.logs += 1;
+        self.next_seq = 0;
+        self.this_summed = false;
+        self.this_ended = false;
+    }
+
+    /// cr-ecm41-2: that log ends here. It lost nothing only where it gave
+    /// its own summary and its end — another session's do not stand for it.
+    pub fn end_log(&mut self) {
+        if !(self.this_summed && self.this_ended) {
+            self.incomplete = true;
+        }
+    }
+
     /// Review cr-jl3a-1: the log alone says how the run ended only when it
     /// is finished, ends with its `run-end` and `summary`, and lost nothing.
     /// cr-ecm41-1: and its summary says every event reached it.
@@ -962,6 +983,14 @@ impl LogRead {
             self.incomplete = true;
             return;
         };
+        // cr-ecm41-2: every event its writer numbered, in order, and nothing
+        // after its end (a summary included). Read without, a log missing
+        // two events in its middle named a file that had landed as the one
+        // that failed, in a record it called whole.
+        if self.this_ended || event.seq != self.next_seq {
+            self.incomplete = true;
+        }
+        self.next_seq = event.seq.saturating_add(1);
         match event.body {
             EventBody::FileFailed {
                 path,
@@ -1022,9 +1051,13 @@ impl LogRead {
                 self.left_unknown
                     .retain(|unknown| !(unknown.0 == path && unknown.1 == raw));
             }
-            EventBody::Summary(summary) => self.summary = Some(summary),
+            EventBody::Summary(summary) => {
+                self.this_summed = true;
+                self.summary = Some(summary);
+            }
             EventBody::RunEnd { outcome, detail } => {
-                self.ended = Some((event.ts_ms, outcome, detail))
+                self.this_ended = true;
+                self.ended = Some((event.ts_ms, outcome, detail));
             }
             EventBody::LogIncomplete { .. } => self.incomplete = true,
             _ => {}
@@ -1175,11 +1208,12 @@ pub async fn ask_daemon(record: &RunRecord) -> eyre::Result<DaemonAnswer> {
         false,
         move |header, lines| {
             let mut read = sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            read.logs += 1;
+            read.begin_log();
             read.unfinished |= !header.finished;
             for line in LogLines::new(lines) {
                 read.read_line(line?);
             }
+            read.end_log();
             Ok(())
         },
     )
@@ -1430,6 +1464,100 @@ mod tests {
         assert!(!dir.path().join(format!("{}.spec.json", ids[0])).exists());
     }
 
+    /// cr-ecm41-2: the detached reader takes a session's log as whole only
+    /// with every event its writer numbered, in order, and its own summary
+    /// and end, nothing after the end. Two events out of its middle, a log
+    /// was taken as whole, and its record named a file that had landed as
+    /// the one that failed.
+    #[test]
+    fn a_detached_log_is_whole_only_in_sequence_with_its_summary_then_its_end() {
+        use crate::job_log::{Event, EventBody, LogLine, Summary};
+        let event = |seq, body| {
+            LogLine::Event(Event {
+                ts_ms: 5,
+                seq,
+                body,
+            })
+        };
+        let start = || EventBody::Diagnostic {
+            message: "the log's start".into(),
+        };
+        let failed = |path: &str| EventBody::FileFailed {
+            path: path.into(),
+            reason: "denied".into(),
+            raw: None,
+            left_in_place: Some(false),
+        };
+        let copied = |path: &str| EventBody::FileCopied {
+            path: path.into(),
+            bytes: None,
+            raw: None,
+        };
+        let summary = || {
+            EventBody::Summary(Summary {
+                files_failed: 1,
+                all_events_logged: true,
+                ..Summary::default()
+            })
+        };
+        let end = || EventBody::RunEnd {
+            outcome: Outcome::Failed,
+            detail: None,
+        };
+        let read = |events: Vec<(u64, EventBody)>| {
+            let mut read = LogRead::default();
+            read.begin_log();
+            for (seq, body) in events {
+                read.read_line(event(seq, body));
+            }
+            read.end_log();
+            read
+        };
+        let whole = read(vec![
+            (0, start()),
+            (1, failed("landed")),
+            (2, copied("landed")),
+            (3, failed("missing")),
+            (4, summary()),
+            (5, end()),
+        ]);
+        assert!(whole.complete());
+        assert_eq!(whole.failures.len(), 1);
+        assert_eq!(whole.failures[0].path, "missing");
+        let gapped = read(vec![
+            (0, start()),
+            (1, failed("landed")),
+            (4, summary()),
+            (5, end()),
+        ]);
+        assert!(!gapped.complete(), "two events out of the middle");
+        let summary_after_end = read(vec![
+            (0, start()),
+            (1, failed("missing")),
+            (2, end()),
+            (3, summary()),
+        ]);
+        assert!(!summary_after_end.complete(), "the summary after the end");
+        let after_end = read(vec![
+            (0, start()),
+            (1, failed("missing")),
+            (2, summary()),
+            (3, end()),
+            (4, copied("missing")),
+        ]);
+        assert!(!after_end.complete(), "an event after the end");
+        // A second session's log with no summary or end of its own.
+        let mut two = whole.clone();
+        two.begin_log();
+        two.read_line(event(0, start()));
+        two.read_line(event(1, copied("other")));
+        two.end_log();
+        assert!(
+            !two.complete(),
+            "a session's log without its own summary and end"
+        );
+    }
+
     /// cr-ecm41-1: a daemon's log whose summary holds no evidence that every
     /// event reached it — an older blit's, or one whose relay was cut — is
     /// not complete, and settles no detached run.
@@ -1612,10 +1740,14 @@ mod tests {
             raw: None,
             left_in_place: Some(false),
         };
-        let mut read = LogRead {
-            logs: 1,
-            ..LogRead::default()
-        };
+        let mut read = LogRead::default();
+        read.begin_log();
+        read.read_line(event(
+            0,
+            EventBody::Diagnostic {
+                message: "the log's start".into(),
+            },
+        ));
         read.read_line(event(1, failed()));
         read.read_line(event(2, failed()));
         read.read_line(event(
