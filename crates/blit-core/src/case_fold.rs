@@ -2309,6 +2309,15 @@ mod tests {
 
     /// EXCLUDE_CASE_MATCHING slice 2 (AC-3, AC-5): the line, to the letter.
     #[test]
+    // ci-windows-case-note: of the Unix reading as a host that reads paths
+    // so checks it, and of the Windows reading by its rules. On Windows
+    // each is the other way about (`of_role`): the Unix reading cannot be
+    // put to that filter and stands by rule, the Windows one is checked.
+    // There `each_claim_is_checked_against_the_filter` checks every claim.
+    #[cfg_attr(
+        windows,
+        ignore = "the Unix reading, checked: on Windows it stands by rule"
+    )]
     fn the_case_note_says_what_the_first_lettered_pattern_matches() {
         let note = |patterns: &[&str]| {
             let typed: Vec<(&str, Option<&str>)> = patterns.iter().map(|p| (*p, None)).collect();
@@ -2435,6 +2444,15 @@ mod tests {
     /// letters begin or end the name, or stand a fixed way from either,
     /// has no such name, and its spelling is printed as before.
     #[test]
+    // ci-windows-case-note: of the Unix reading as a host that reads paths
+    // so checks it, and of the Windows reading by its rules. On Windows
+    // each is the other way about (`of_role`): the Unix reading cannot be
+    // put to that filter and stands by rule, the Windows one is checked.
+    // There `each_claim_is_checked_against_the_filter` checks every claim.
+    #[cfg_attr(
+        windows,
+        ignore = "the Unix reading, checked: on Windows it stands by rule"
+    )]
     fn a_spelling_that_reads_as_what_the_pattern_has_as_typed_is_not_printed() {
         let others = |pattern: &str| {
             Spellings::of(pattern, false)
@@ -2530,6 +2548,15 @@ mod tests {
     /// matches, and the note never shows one it does not: each letter is
     /// changed only for the single letter the option pairs it with.
     #[test]
+    // ci-windows-case-note: of the Unix reading as a host that reads paths
+    // so checks it, and of the Windows reading by its rules. On Windows
+    // each is the other way about (`of_role`): the Unix reading cannot be
+    // put to that filter and stands by rule, the Windows one is checked.
+    // There `each_claim_is_checked_against_the_filter` checks every claim.
+    #[cfg_attr(
+        windows,
+        ignore = "the Unix reading, checked: on Windows it stands by rule"
+    )]
     fn the_case_note_shows_only_spellings_ignore_case_matches() {
         let others = |pattern: &str| {
             Spellings::of(pattern, false)
