@@ -785,6 +785,8 @@ struct Walk<'a> {
     root: std::os::unix::io::RawFd,
     here: Option<HeldDir>,
     names: Vec<std::ffi::OsString>,
+    /// cr-ecm40-3: which directory each of `names` was when entered.
+    ids: Vec<(libc::dev_t, libc::ino_t)>,
     links: usize,
     shown: &'a Path,
 }
@@ -838,6 +840,7 @@ impl<'a> Walk<'a> {
             root,
             here: None,
             names: Vec::new(),
+            ids: Vec::new(),
             links: 0,
             shown,
         }
@@ -879,24 +882,36 @@ impl<'a> Walk<'a> {
         if self.names.pop().is_none() {
             return Err(self.leads_out());
         }
+        self.ids.pop();
         self.here = None;
-        if self.names.is_empty() {
+        let Some(&came_through) = self.ids.last() else {
             return Ok(());
-        }
+        };
         let place: std::path::PathBuf = self.names.iter().collect();
-        if let Ok(found) =
-            super::openat2_beneath(self.root, &place, libc::O_PATH | libc::O_DIRECTORY, 0)
-        {
-            self.here = Some(HeldDir::new(found));
-            return Ok(());
+        let found =
+            match super::openat2_beneath(self.root, &place, libc::O_PATH | libc::O_DIRECTORY, 0) {
+                Ok(found) => HeldDir::new(found),
+                Err(_) => {
+                    let mut found: Option<HeldDir> = None;
+                    for name in &self.names {
+                        let at = found.as_ref().map_or(self.root, HeldDir::raw);
+                        let next = open_directory_at(at, &name_of(name)?)?;
+                        found = Some(HeldDir::new(next));
+                    }
+                    found.ok_or_else(|| self.leads_out())?
+                }
+            };
+        // cr-ecm40-3: found again by its names, it is gone on into only where
+        // it is still the directory the walk came down through. Renamed, and
+        // another put at its name, the walk went on in the other, and a file
+        // was written there.
+        if identity_of(found.raw())? != came_through {
+            return Err(std::io::Error::other(format!(
+                "{}: a directory on the way was replaced during the copy",
+                self.shown.display()
+            )));
         }
-        let mut found: Option<HeldDir> = None;
-        for name in &self.names {
-            let at = found.as_ref().map_or(self.root, HeldDir::raw);
-            let next = open_directory_at(at, &name_of(name)?)?;
-            found = Some(HeldDir::new(next));
-        }
-        self.here = found;
+        self.here = Some(found);
         Ok(())
     }
 
@@ -913,6 +928,7 @@ impl<'a> Walk<'a> {
             };
             self.here = None;
             self.names.clear();
+            self.ids.clear();
             Ok(Self::names(&place))
         } else {
             Ok(Self::names(target))
@@ -1007,9 +1023,13 @@ impl<'a> Walk<'a> {
                     }
                 }
                 libc::S_IFDIR => {
+                    use std::os::unix::io::AsRawFd as _;
                     let entered = open_directory_at(self.here(), &c_name)?;
+                    // cr-ecm40-3: and which directory it is, to know it again.
+                    let identity = identity_of(entered.as_raw_fd())?;
                     self.here = Some(HeldDir::new(entered));
                     self.names.push(name);
+                    self.ids.push(identity);
                 }
                 _ => return Err(std::io::Error::from_raw_os_error(libc::ENOTDIR)),
             }
@@ -1024,6 +1044,19 @@ impl<'a> Walk<'a> {
             None => open_directory_at(self.root, c"."),
         }
     }
+}
+
+/// cr-ecm40-3: which directory `directory` is — its device and inode.
+#[cfg(target_os = "linux")]
+fn identity_of(directory: std::os::unix::io::RawFd) -> std::io::Result<(libc::dev_t, libc::ino_t)> {
+    // SAFETY: `stat` is plain integers, filled by the call.
+    let mut found: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `directory` is open for the call and `found` a properly sized
+    // `stat` that outlives it.
+    if unsafe { libc::fstat(directory, &mut found) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((found.st_dev, found.st_ino))
 }
 
 #[cfg(target_os = "linux")]
@@ -3206,5 +3239,48 @@ mod tests {
         assert_eq!(std::fs::read(&dst)?, data);
 
         Ok(())
+    }
+}
+
+/// cr-ecm40-3 (Linux): a `..` walked back finds the directory above again
+/// from the root, and goes on only where it is the one the walk came down
+/// through — with `openat2` and without. Renamed, and another directory put
+/// at its name, the walk went on in the other.
+#[cfg(all(test, target_os = "linux"))]
+mod walk_identity_tests {
+    use std::os::unix::io::AsRawFd as _;
+    use std::path::Path;
+
+    #[test]
+    fn a_parent_replaced_at_its_name_is_not_walked_back_into() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("dst/a/b")).unwrap();
+        let root = std::fs::canonicalize(dir.path().join("dst")).unwrap();
+        let within = super::super::Within::hold(&root);
+        let held = within.held.as_ref().expect("held").as_raw_fd();
+        let shown = root.join("a/b/f.bin");
+        for refused in [false, true] {
+            super::super::NO_OPENAT2.with(|seam| seam.set(refused));
+            // As it was: walked back into.
+            let mut walk = super::Walk::new(&within, held, &shown);
+            walk.enter(super::Walk::names(Path::new("a/b")), false)
+                .unwrap();
+            let back = walk.up();
+            drop(walk);
+            // Renamed, and another at its name: not.
+            let mut walk = super::Walk::new(&within, held, &shown);
+            walk.enter(super::Walk::names(Path::new("a/b")), false)
+                .unwrap();
+            std::fs::rename(root.join("a"), root.join(format!("moved-{refused}"))).unwrap();
+            std::fs::create_dir_all(root.join("a/b")).unwrap();
+            let replaced = walk.up();
+            drop(walk);
+            super::super::NO_OPENAT2.with(|seam| seam.set(false));
+            back.unwrap_or_else(|e| panic!("no openat2: {refused}: {e}"));
+            assert!(
+                replaced.is_err(),
+                "no openat2: {refused}: walked back into another"
+            );
+        }
     }
 }
