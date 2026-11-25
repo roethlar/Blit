@@ -1,9 +1,9 @@
 # cr-ecm41-6: the kernel-walk guard took any `openat2` failure for its absence
 
 **Severity**: MEDIUM — a guard passes over a broken call. Brought in by cr-ecm40-7.
-**Status**: Fixed; awaiting review
+**Status**: Verified — `combined-r43` (Codex openreview, 2026-11-25) reviewed `e2c2e08d..4e12d761` — the `combined-r42` fixes and GitHub CI's three — with `guard_confirmed: true`: "I would keep the granted-header identity, the failure-bounded disposition tracking, the explicit log-delivery field, and the independent `openat2` probe. I would require the following corrections."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm41-6`)
+**Commit**: `f33d6f0d`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r42` over `b6e6fab9..e2c2e08d` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r42.codex.md`.
 
 ## Evidence

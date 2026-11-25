@@ -1,9 +1,9 @@
 # ci-windows-missing-text: a removal guard expected Unix's words for a missing name
 
 **Severity**: MEDIUM — a guard fails on Windows; the code gives the system's own words, as designed.
-**Status**: Fixed (the guard); awaiting the next CI run on Windows
+**Status**: Verified — GitHub CI run 45715973925 at `4e12d761` (2026-11-25): the daemon's tests, this guard among them, passed on Windows.
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix ci-windows-missing-text`)
+**Commit**: `52438421`
 **Reviewer**: none — found by GitHub CI run 45520218555 at `e2c2e08d`, 2026-11-25 — the run after the first's seven fixes, which reached the test binaries the first never ran; for the next openreview.
 
 ## Evidence

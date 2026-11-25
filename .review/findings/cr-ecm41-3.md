@@ -1,9 +1,9 @@
 # cr-ecm41-3: the sender told a sibling's bytes once a request had taken the granted header out
 
 **Severity**: MEDIUM — the log names a file it sent as its sibling. cr-ecm40-4's remaining half.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r43` (Codex openreview, 2026-11-25) reviewed `e2c2e08d..4e12d761` — the `combined-r42` fixes and GitHub CI's three — with `guard_confirmed: true`: "I would keep the granted-header identity, the failure-bounded disposition tracking, the explicit log-delivery field, and the independent `openat2` probe. I would require the following corrections." "Changing only fixture creation order so both byte-named siblings appeared first made the guard panic before it checked the sender's output. Use a scripted source that releases the sibling after the first header has been requested." The remaining work is cr-ecm42-6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm41-3`)
+**Commit**: `22e12f00`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r42` over `b6e6fab9..e2c2e08d` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r42.codex.md`.
 
 ## Evidence

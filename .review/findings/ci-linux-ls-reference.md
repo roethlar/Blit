@@ -1,9 +1,9 @@
 # ci-linux-ls-reference: the `ls` guards compared with whatever `ls` the system has
 
 **Severity**: MEDIUM — two guards fail where the system's `ls` is not the reference (Ubuntu 26.04's uutils); the code says what GNU `ls` says.
-**Status**: Fixed (the guards); awaiting the next CI run on Linux
+**Status**: Reviewed, found incomplete — `combined-r43` (Codex openreview, 2026-11-25) reviewed `e2c2e08d..4e12d761` — the `combined-r42` fixes and GitHub CI's three — with `guard_confirmed: true`: "I would keep the granted-header identity, the failure-bounded disposition tracking, the explicit log-delivery field, and the independent `openat2` probe. I would require the following corrections." "The pinned Linux CI runner found GNU `ls` as `gnuls`. Both parity tests failed because its diagnostic began `gnuls:` and the expected prefix was `ls:`. Invoke the selected reference with `argv[0]` set to `ls`, or normalize just that program-name prefix." The remaining work is cr-ecm42-5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix ci-linux-ls-reference`)
+**Commit**: `4a17d5ac`
 **Reviewer**: none — found by GitHub CI run 45520218555 at `e2c2e08d`, 2026-11-25 — the run after the first's seven fixes, which reached the test binaries the first never ran; for the next openreview.
 
 ## Evidence

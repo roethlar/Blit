@@ -1,9 +1,9 @@
 # cr-ecm41-2: the detached reader trusted a log with a gap, or without its own summary and end
 
 **Severity**: HIGH — a detached run's record names a file that landed as the one that failed, and calls itself whole.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r43` (Codex openreview, 2026-11-25) reviewed `e2c2e08d..4e12d761` — the `combined-r42` fixes and GitHub CI's three — with `guard_confirmed: true`: "I would keep the granted-header identity, the failure-bounded disposition tracking, the explicit log-delivery field, and the independent `openat2` probe. I would require the following corrections." "I gave `jobs retry` a truncated record and a log with two consecutively numbered file events after `run-end`. It exited 0, overwrote `landed`, and left `missing` absent. Both readers should require a single terminal `summary` followed by `run-end` and end of file." The remaining work is cr-ecm42-1
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm41-2`)
+**Commit**: `9dabfe07`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r42` over `b6e6fab9..e2c2e08d` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r42.codex.md`.
 
 ## Evidence

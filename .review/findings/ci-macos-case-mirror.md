@@ -1,9 +1,9 @@
 # ci-macos-case-mirror: a case-note guard asked the mirror whether the filesystem folds case
 
 **Severity**: MEDIUM — a guard fails on a filesystem that folds case (macOS); the code is right.
-**Status**: Fixed (the guard); awaiting the next CI run on macOS
+**Status**: Reviewed, found incomplete — `combined-r43` (Codex openreview, 2026-11-25) reviewed `e2c2e08d..4e12d761` — the `combined-r42` fixes and GitHub CI's three — with `guard_confirmed: true`: "I would keep the granted-header identity, the failure-bounded disposition tracking, the explicit log-delivery field, and the independent `openat2` probe. I would require the following corrections." "The new probe detects folding independently, but both post-mirror loops then skip every entry. An incorrect deletion of an unambiguous name such as `xA` can pass. Assert the outcomes for distinct entries and exercise colliding spellings in separate fixtures." The remaining work is cr-ecm42-7
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix ci-macos-case-mirror`)
+**Commit**: `3df41965`
 **Reviewer**: none — found by GitHub CI run 45520218555 at `e2c2e08d`, 2026-11-25 — the run after the first's seven fixes, which reached the test binaries the first never ran; for the next openreview.
 
 ## Evidence

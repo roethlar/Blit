@@ -1,9 +1,9 @@
 # cr-ecm41-1: a log held no positive evidence that every event reached it
 
 **Severity**: HIGH — a retry overwrites a file that landed, and leaves out one that failed. log-relay-cut's remaining half.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r43` (Codex openreview, 2026-11-25) reviewed `e2c2e08d..4e12d761` — the `combined-r42` fixes and GitHub CI's three — with `guard_confirmed: true`: "I would keep the granted-header identity, the failure-bounded disposition tracking, the explicit log-delivery field, and the independent `openat2` probe. I would require the following corrections." "I gave `jobs retry` a truncated record and a log with two consecutively numbered file events after `run-end`. It exited 0, overwrote `landed`, and left `missing` absent. Both readers should require a single terminal `summary` followed by `run-end` and end of file." "A first session whose summary lacked `all_events_logged` correctly read as incomplete. Adding a second, complete session made the combined result complete, and `settle` produced an untruncated record that retained the first session's leftover. A missing or false delivery marker in any contributing session must keep the aggregate incomplete." "I queued one failure, interrupted a pending close, and retried the close. The log contained zero file failures, yet both `all_events_logged` and `LogReport.complete` were true. Shutting down the relay's runtime before closing produced the same result. Preserve the pending drain across close attempts and propagate cancellation or failure from every relay in the chain." The remaining work is cr-ecm42-1, -2 and -3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm41-1`)
+**Commit**: `ccdfa891`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r42` over `b6e6fab9..e2c2e08d` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r42.codex.md`.
 
 ## Evidence

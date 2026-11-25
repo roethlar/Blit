@@ -1,9 +1,9 @@
 # cr-ecm41-4: an absolute alias to a regular file beneath the root was refused
 
 **Severity**: MEDIUM — a copy and a resume fail for a file inside the destination. cr-ecm40-5's remaining half.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r43` (Codex openreview, 2026-11-25) reviewed `e2c2e08d..4e12d761` — the `combined-r42` fixes and GitHub CI's three — with `guard_confirmed: true`: "I would keep the granted-header identity, the failure-bounded disposition tracking, the explicit log-delivery field, and the independent `openat2` probe. I would require the following corrections." "On Linux, I pointed `dst/entry` through an absolute alias to `dst/sub/leaf`. Ordinary copy and resume both succeeded with an existing leaf. Both exited 2 and reported that the path led outside when the leaf was absent. Resolve the dangling alias to its existing parent, verify that parent against the held root, and create the leaf there." The remaining work is cr-ecm42-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm41-4`)
+**Commit**: `a75fd187`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r42` over `b6e6fab9..e2c2e08d` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r42.codex.md`.
 
 ## Evidence
