@@ -1060,7 +1060,12 @@ fn the_line_claims_only_what_the_mirror_then_does() {
             case.excludes,
             asked.all()
         );
-        let folds = dst.join("KEEP.1").exists();
+        // ci-macos-case-mirror: whether the filesystem folds case, asked of
+        // it. Told by `KEEP.1`, a mirror whose includes leave `keep.1` out
+        // never made it, and on a filesystem that folds — `b` and `B` one
+        // entry — the guard expected the one kept and the other gone.
+        std::fs::write(tmp.path().join("fold-probe"), b"").unwrap();
+        let folds = tmp.path().join("FOLD-PROBE").exists();
         for (entry, kept_as_typed, _) in case.entries {
             if !folds {
                 assert_eq!(
