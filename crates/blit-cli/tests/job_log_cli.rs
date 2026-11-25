@@ -326,6 +326,98 @@ fn a_push_is_logged_here_and_on_the_daemon_under_one_run_id() {
     assert_eq!(by_job_id, there);
 }
 
+/// cr-ecm40-4: a push of pairs of names of one spelling — `dupN` + U+FFFD,
+/// and `dupN` + byte `FF` — lands both of each, the second on the retry
+/// (cr-ecm13-3), and this machine's log names each file it sent by its own
+/// name. The sender announced the bytes of the one the destination refused
+/// too, and where the text spelling was granted they named it: that send was
+/// logged by the bytes. Which of a pair is listed first is the filesystem's
+/// (creation order on Btrfs, newest first on tmpfs), so the pairs are made
+/// in both orders.
+#[cfg(unix)]
+#[test]
+fn a_push_logs_each_file_it_sent_by_its_own_name() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+    let ctx = TestContext::new();
+    let src = ctx.workspace.join("src");
+    fs::create_dir_all(&src).unwrap();
+    let raw_of = |n: usize| {
+        OsString::from_vec(
+            format!("dup{n}")
+                .into_bytes()
+                .into_iter()
+                .chain([0xff])
+                .collect(),
+        )
+    };
+    let text_of = |n: usize| format!("dup{n}\u{fffd}");
+    if fs::write(src.join(raw_of(9)), b"probe").is_err() {
+        eprintln!("this filesystem refuses a name that is not text: nothing to push");
+        return;
+    }
+    fs::remove_file(src.join(raw_of(9))).unwrap();
+    for n in 0..4 {
+        let by_bytes = || fs::write(src.join(raw_of(n)), format!("{n} by its bytes")).unwrap();
+        let by_text = || fs::write(src.join(text_of(n)), format!("{n} by its text")).unwrap();
+        if n % 2 == 0 {
+            by_bytes();
+            by_text();
+        } else {
+            by_text();
+            by_bytes();
+        }
+    }
+    let remote = format!("127.0.0.1:{}", ctx.daemon_port);
+    let pushed = run(
+        &ctx,
+        &[
+            "copy",
+            "-v",
+            &format!("{}/", src.display()),
+            &format!("{remote}:/test/"),
+        ],
+    );
+    let said = text(&pushed.stderr);
+    assert!(pushed.status.success(), "{said}");
+    let mut expected = Vec::new();
+    for n in 0..4 {
+        assert_eq!(
+            fs::read(ctx.module_dir.join(raw_of(n))).unwrap(),
+            format!("{n} by its bytes").as_bytes(),
+            "{said}"
+        );
+        assert_eq!(
+            fs::read(ctx.module_dir.join(text_of(n))).unwrap(),
+            format!("{n} by its text").as_bytes(),
+            "{said}"
+        );
+        expected.push((text_of(n), None));
+        expected.push((text_of(n), Some(format!("dup{n}\\xff"))));
+    }
+    expected.sort();
+    let id = job_id_in(&said);
+    let logged = run(&ctx, &["jobs", "log", &id, "--json"]);
+    let mut named: Vec<(String, Option<String>)> = text(&logged.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|event| event["kind"] == "file-sent")
+        .map(|event| {
+            (
+                event["path"].as_str().unwrap().to_string(),
+                event["raw"].as_str().map(str::to_string),
+            )
+        })
+        .collect();
+    named.sort();
+    assert_eq!(
+        named,
+        expected,
+        "each send by its own name\n{}",
+        text(&logged.stdout)
+    );
+}
+
 #[test]
 fn a_pull_logs_each_file_copied_here() {
     let ctx = TestContext::new();
