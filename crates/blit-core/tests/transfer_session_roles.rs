@@ -3761,6 +3761,131 @@ async fn in_stream_payload_before_manifest_complete_is_protocol_violation() {
     );
 }
 
+/// cr-ecm41-3: a sender names a file by its bytes from the header the
+/// destination asks for, and only then. A scripted destination asks for the
+/// first of a spelling — `dup` + U+FFFD — before its sibling, `dup` + byte
+/// `FF`, is listed, then reads on: the sender, its lane full, had to wait
+/// between them. Told as the manifest went out, for whichever header of a
+/// text was then first in the sender's map, the sibling was told once the
+/// request had taken the granted one out, and its bytes named the file sent.
+/// Two pairs are made in both orders around the files between, as Btrfs
+/// lists by creation and tmpfs newest first; a name only its bytes spell,
+/// asked for too, is told.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_sender_names_a_file_by_the_header_asked_for() {
+    use blit_core::remote::transfer::progress::audit_lane;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+    let tmp = tempfile::tempdir().unwrap();
+    let src_root = tmp.path().join("src");
+    std::fs::create_dir_all(&src_root).unwrap();
+    let raw_of = |n: &str| OsString::from_vec(n.bytes().chain([0xff]).collect());
+    if std::fs::write(src_root.join(raw_of("probe")), b"probe").is_err() {
+        eprintln!("this filesystem refuses a name that is not text");
+        return;
+    }
+    std::fs::remove_file(src_root.join(raw_of("probe"))).unwrap();
+    std::fs::write(src_root.join("dupA\u{fffd}"), b"A by its text").unwrap();
+    std::fs::write(src_root.join(raw_of("dupB")), b"B by its bytes").unwrap();
+    for n in 0..5_000 {
+        std::fs::write(src_root.join(format!("f{n:05}")), b"x").unwrap();
+    }
+    std::fs::write(src_root.join(raw_of("dupA")), b"A by its bytes").unwrap();
+    std::fs::write(src_root.join("dupB\u{fffd}"), b"B by its text").unwrap();
+    std::fs::write(src_root.join(raw_of("solo")), b"only by its bytes").unwrap();
+
+    let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (audit, audited) = audit_lane(100_000);
+    let source_cfg = SourceSessionConfig {
+        instruments: SourceInstruments {
+            progress: Some(RemoteTransferProgress::new(ui_tx).with_audit(audit)),
+            ..Default::default()
+        },
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::initiator(basic_open(TransferRole::Source)),
+        plan_options: PlanOptions::default(),
+        data_plane_host: None,
+    };
+    let (source_transport, mut peer) = in_process_pair();
+    let source = Arc::new(FsTransferSource::new(src_root));
+    let source_task = tokio::spawn(run_source(source_cfg, source_transport, source));
+
+    assert!(matches!(recv_or_panic(&mut peer).await, Frame::Hello(_)));
+    peer.send(hello_frame()).await.unwrap();
+    assert!(matches!(recv_or_panic(&mut peer).await, Frame::Open(_)));
+    peer.send(wire(Frame::Accept(Default::default())))
+        .await
+        .unwrap();
+    // Each spelling's entries as listed, by their bytes or none.
+    let mut listed: BTreeMap<String, Vec<Option<Vec<u8>>>> = BTreeMap::new();
+    let mut asked_early = None;
+    let mut asked_solo = false;
+    loop {
+        let header = match recv_or_panic(&mut peer).await {
+            Frame::ManifestEntry(header) => header,
+            Frame::ManifestComplete(_) => break,
+            _ => continue,
+        };
+        let text = header.relative_path.clone();
+        if !text.starts_with("dup") && !text.starts_with("solo") {
+            continue;
+        }
+        let first = !listed.contains_key(&text);
+        listed
+            .entry(text.clone())
+            .or_default()
+            .push(header.raw_relative_path.clone());
+        let ask = if asked_early.is_none() && first && header.raw_relative_path.is_none() {
+            asked_early = Some(text.clone());
+            true
+        } else if text.starts_with("solo") && !asked_solo {
+            asked_solo = true;
+            true
+        } else {
+            false
+        };
+        if ask {
+            peer.send(wire(Frame::NeedBatch(NeedBatch {
+                entries: vec![NeedEntry {
+                    relative_path: text,
+                    resume: false,
+                }],
+            })))
+            .await
+            .unwrap();
+            // The sender has taken the header out once it counts the need.
+            loop {
+                match ui_rx.recv().await {
+                    Some(ProgressEvent::ManifestBatch { files: 1, .. }) => break,
+                    Some(_) => continue,
+                    None => panic!("the sender's progress ended"),
+                }
+            }
+        }
+    }
+    let early = asked_early.expect("a spelling listed by its text first");
+    assert_eq!(
+        listed[&early].len(),
+        2,
+        "both of its spelling listed: {listed:?}"
+    );
+    assert!(asked_solo);
+    source_task.abort();
+    let _ = source_task.await;
+    let mut told = Vec::new();
+    while let Some(event) = audited.recv().await {
+        if let ProgressEvent::RawName { path, raw } = event {
+            told.push((path, raw));
+        }
+    }
+    assert_eq!(
+        told,
+        [("solo\u{fffd}".to_string(), b"solo\xff".to_vec())],
+        "only the asked-for name told by its bytes"
+    );
+}
+
 #[tokio::test]
 async fn need_for_unknown_path_faults_the_source() {
     let tmp = tempfile::tempdir().unwrap();

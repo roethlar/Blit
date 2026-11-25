@@ -1572,22 +1572,6 @@ fn record_scan_failures(
     }
 }
 
-/// cr-ssc5-1, cr-ecm40-4: keep `header` as its text's entry when it is the
-/// first of that text — as the destination grants the first and refuses the
-/// rest — and say whether it was.
-fn keep_first_of_its_text(
-    sent: &mut std::collections::HashMap<String, FileHeader>,
-    header: &FileHeader,
-) -> bool {
-    match sent.entry(header.relative_path.clone()) {
-        std::collections::hash_map::Entry::Occupied(_) => false,
-        std::collections::hash_map::Entry::Vacant(place) => {
-            place.insert(header.clone());
-            true
-        }
-    }
-}
-
 fn requested_but_unscanned(
     scope: Option<&HashSet<PathBuf>>,
     unnamed: &[String],
@@ -1855,6 +1839,18 @@ async fn source_recv_half(
                     };
                     match header {
                         Some(h) => {
+                            // Review cr-jl1a-1: a job log names a raw-named
+                            // file by its exact bytes. cr-ecm41-3: those of
+                            // the header granted, as it is asked for, and before the need is
+                            // counted. Told as the manifest went out, for whichever header of
+                            // a text was then first in the map, a sibling
+                            // listed after a request had taken the granted
+                            // one out was told too, and its bytes named the
+                            // file sent.
+                            if let (Some(p), Some(raw)) = (&progress, &h.raw_relative_path) {
+                                p.report_raw_name(h.relative_path.clone(), raw.clone())
+                                    .await;
+                            }
                             // The need list is the transfer denominator. Report
                             // only after resolving the path to its retained
                             // manifest header, so both file and byte totals are
@@ -2336,7 +2332,7 @@ async fn source_send_half(
                 if moving {
                     listed_for_account.push(crate::moved::name_key(own_name(&header)));
                 }
-                let first_of_its_text = if let Some(probe) = &small_file_probe {
+                if let Some(probe) = &small_file_probe {
                     let wait_started = probe.start();
                     let mut sent = sent.lock().expect("sent-manifest lock poisoned");
                     let wait = wait_started.elapsed();
@@ -2345,27 +2341,21 @@ async fn source_send_half(
                     // header collapsing to the same text is reported there and
                     // never granted, so this end must keep resolving the text
                     // to the header that was granted.
-                    let first = keep_first_of_its_text(&mut sent, &header);
+                    sent.entry(header.relative_path.clone())
+                        .or_insert_with(|| header.clone());
                     let map_op = map_op_started.elapsed();
                     drop(sent);
                     probe.note_manifest_insert(wait, map_op);
-                    first
                 } else {
-                    keep_first_of_its_text(&mut sent.lock().expect("sent-manifest lock poisoned"), &header)
-                };
-                // Review cr-jl1a-1: a job log names a raw-named file by its
-                // exact bytes. cr-ecm40-4: the file's bytes only for the one
-                // of its text this end keeps — the one the destination grants.
-                // Announced for a second of that text, which the destination
-                // refuses, its bytes named the granted file in the log.
-                if let (true, Some(p), Some(raw)) = (
-                    first_of_its_text,
-                    instruments.progress.as_ref(),
-                    &header.raw_relative_path,
-                ) {
-                    p.report_raw_name(header.relative_path.clone(), raw.clone())
-                        .await;
+                    sent.lock()
+                        .expect("sent-manifest lock poisoned")
+                        .entry(header.relative_path.clone())
+                        .or_insert_with(|| header.clone());
                 }
+                // Review cr-jl1a-1: a job log names a raw-named file by its
+                // exact bytes — announced where the destination asks for it,
+                // from the header granted (`source_recv_half`), not here
+                // (cr-ecm40-4, cr-ecm41-3).
                 tx.send(frame(Frame::ManifestEntry(header))).await?;
             }
             scan.finish().await
