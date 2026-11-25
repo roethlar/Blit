@@ -770,10 +770,14 @@ impl RunLog {
                 });
             }
         }
+        // log-relay-cut: marked as `log-incomplete`, the fact every reader
+        // of a log acts on — events were lost. Said only in a diagnostic's
+        // words, the log was read as whole, and a retry completed a record
+        // from it.
         if relay_cut {
-            bodies.push(EventBody::Diagnostic {
-                message: "the transfer still held its log lane open when the run ended; \
-                          events it had not handed over are missing"
+            bodies.push(EventBody::LogIncomplete {
+                reason: "the transfer still held its log lane open when the run ended; \
+                         events it had not handed over are missing"
                     .into(),
             });
         }
@@ -1437,6 +1441,38 @@ mod tests {
                 ("failed", None),
             ]
         );
+    }
+
+    /// log-relay-cut: a lane the transfer still holds when the run closes is
+    /// cut, and the log says it lost events as `log-incomplete`, which a
+    /// retry reads — not only in a diagnostic's words.
+    #[tokio::test(start_paused = true)]
+    async fn a_lane_held_open_at_the_close_leaves_the_log_incomplete() {
+        use crate::job_log::{open_log, LogLine};
+        let dir = tempfile::tempdir().unwrap();
+        let log = RunLog::new(
+            Some(LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: DEFAULT_KEEP,
+                finished: None,
+            }),
+            "0123456789abcdef0123456789abcdef",
+        );
+        log.start(Role::Initiator, RunInfo::default(), None);
+        let held = crate::remote::transfer::RemoteTransferProgress::audit_only(
+            log.audit_lane_at(End::Receiving).expect("a lane"),
+        );
+        let report = log
+            .close(Outcome::Failed, None, None)
+            .await
+            .expect("a report");
+        drop(held);
+        let incomplete = open_log(&report.path.expect("a log")).unwrap().any(|line| {
+            matches!(line, Ok(LogLine::Event(event))
+                    if matches!(event.body, EventBody::LogIncomplete { .. }))
+        });
+        assert!(incomplete, "the cut marked");
     }
 
     /// log-named-text: a failure the account names by its text alone is a

@@ -296,7 +296,9 @@ pub enum EventBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
-    /// Logging stopped here, for `reason`; nothing after it was kept.
+    /// Events were lost, for `reason`: logging stopped here (nothing after
+    /// it was kept), or what the transfer had not handed over by the close
+    /// is missing (log-relay-cut).
     LogIncomplete { reason: String },
     /// A kind this build does not know, from a newer writer.
     #[serde(other)]
@@ -1542,7 +1544,7 @@ fn describe(body: &EventBody) -> String {
             }
         }
         EventBody::LogIncomplete { reason } => {
-            format!("LOG INCOMPLETE  {reason}; nothing after this was kept")
+            format!("LOG INCOMPLETE  {reason}")
         }
         EventBody::Unknown => "unknown  an event from a newer blit".into(),
     }
