@@ -604,10 +604,15 @@ fn failed_identities(
                     // leftover.
                     job_log::EventBody::FileCopied { path, raw, .. } => {
                         let identity = (path, raw);
-                        left.remove(&identity);
-                        unknown.remove(&identity);
-                        still_failed.remove(&identity);
-                        said.insert(identity);
+                        // cr-ecm41-5: the evidence kept only for a file a
+                        // failure is pending on — every copied name kept,
+                        // a retry's reading grew with the run.
+                        let pending = left.remove(&identity)
+                            | unknown.remove(&identity)
+                            | still_failed.remove(&identity);
+                        if pending {
+                            said.insert(identity);
+                        }
                     }
                     job_log::EventBody::FileSent { path, raw } => {
                         still_failed.remove(&(path, raw));
@@ -616,9 +621,12 @@ fn failed_identities(
                     // the run's there.
                     job_log::EventBody::FileDeleted { path, raw } => {
                         let identity = (path, raw);
-                        left.remove(&identity);
-                        unknown.remove(&identity);
-                        said.insert(identity);
+                        let pending = left.remove(&identity)
+                            | unknown.remove(&identity)
+                            | still_failed.contains(&identity);
+                        if pending {
+                            said.insert(identity);
+                        }
                     }
                     job_log::EventBody::Summary(_) => summed = true,
                     job_log::EventBody::RunEnd { .. } => ended = true,
@@ -2577,6 +2585,75 @@ mod retry_name_tests {
         assert!(
             settle(&written_so).is_ok(),
             "a record written so needs no log"
+        );
+    }
+
+    /// cr-ecm41-5: what settles a failure's disposition is kept for the
+    /// files a failure is pending on, not for every file the run copied or
+    /// removed: a log of one failure among many copies keeps one. Keeping
+    /// every copied name, the reading grew with the run.
+    #[test]
+    fn disposition_evidence_is_kept_for_the_failed_files_only() {
+        use blit_core::job_log::{EventBody, Outcome, Role, RunInfo};
+        use blit_core::run_log::LogPlace;
+        let dir = tempfile::tempdir().unwrap();
+        let spec = JobSpec::new(
+            "m1",
+            "copy",
+            "/".into(),
+            blit_core::job_record::SpecEndpoint::Local { path: "/a/".into() },
+            blit_core::job_record::SpecEndpoint::Local { path: "/b/".into() },
+            Default::default(),
+            None,
+        );
+        let place = LogPlace {
+            dir: dir.path().join("jobs").join("logs"),
+            participant: "m1".into(),
+            keep: 50,
+            finished: None,
+        };
+        let run_id = "8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e";
+        let writer = place
+            .start(run_id, 1, Role::Initiator, RunInfo::default())
+            .expect("a log");
+        for n in 0..500 {
+            writer.record(EventBody::FileCopied {
+                path: format!("copied-{n}.bin"),
+                bytes: None,
+                raw: None,
+            });
+        }
+        writer.record(EventBody::FileFailed {
+            path: "b.txt".into(),
+            reason: "denied".into(),
+            raw: None,
+            left_in_place: None,
+        });
+        writer.record(EventBody::FileCopied {
+            path: "b.txt".into(),
+            bytes: None,
+            raw: None,
+        });
+        writer.record(EventBody::FileDeleted {
+            path: "gone.bin".into(),
+            raw: None,
+        });
+        writer.record(EventBody::FileFailed {
+            path: "c.txt".into(),
+            reason: "denied".into(),
+            raw: None,
+            left_in_place: Some(false),
+        });
+        writer.record(EventBody::Summary(Default::default()));
+        assert!(writer.finish(Outcome::Failed, None).complete);
+        let mut record = RunRecord::starting(run_id, &spec);
+        record.files_failed = 1;
+        let (_, logged) = failed_identities(dir.path(), &record, true).expect("read");
+        assert!(logged.read);
+        assert_eq!(
+            logged.settled,
+            [("b.txt".to_string(), None), ("c.txt".to_string(), None)].into(),
+            "the failed files' evidence, and nothing else"
         );
     }
 
