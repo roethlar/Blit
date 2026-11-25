@@ -147,7 +147,7 @@ fn tree(root: &Path) {
 /// The system `ls`, in the reference locale and UTC, from `root`.
 #[cfg(target_os = "linux")]
 fn system_ls(root: &Path, args: &[&str]) -> std::process::Output {
-    Command::new("ls")
+    Command::new(common::gnu_coreutils("ls").expect("the reference, looked for by the test"))
         .args(args)
         .current_dir(root)
         .env("LC_ALL", "C.UTF-8")
@@ -254,6 +254,10 @@ fn is_root() -> bool {
 #[cfg(target_os = "linux")]
 #[test]
 fn ls_equals_the_system_ls() {
+    if common::gnu_coreutils("ls").is_none() {
+        eprintln!("no GNU ls here, the reference: nothing is compared with it");
+        return;
+    }
     use std::os::unix::fs::PermissionsExt;
 
     let ctx = TestContext::new();
@@ -387,6 +391,10 @@ fn ls_equals_the_system_ls() {
 #[cfg(target_os = "linux")]
 #[test]
 fn ls_of_a_local_path_equals_the_system_ls() {
+    if common::gnu_coreutils("ls").is_none() {
+        eprintln!("no GNU ls here, the reference: nothing is compared with it");
+        return;
+    }
     let ctx = TestContext::new();
     let root = ctx.workspace.join("here");
     tree(&root);

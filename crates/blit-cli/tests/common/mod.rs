@@ -28,6 +28,29 @@ use std::thread;
 use std::time::Duration;
 
 use blit_core::generated::{blit_client::BlitClient, ListModulesRequest};
+
+/// ci-linux-ls-reference: GNU coreutils' own `tool` — the reference the
+/// utility verbs are pinned to (UTILITY_VERBS_LOCAL_PARITY) — where this
+/// system has it: as `tool`, or as `gnu<tool>` beside another
+/// implementation. Ubuntu from 25.10 ships uutils as `ls`, and its words
+/// for a link loop are not GNU's.
+pub fn gnu_coreutils(tool: &str) -> Option<PathBuf> {
+    [tool.to_string(), format!("gnu{tool}")]
+        .into_iter()
+        .find_map(|name| {
+            let out = Command::new(&name)
+                .arg("--version")
+                .env("LC_ALL", "C")
+                .stdin(Stdio::null())
+                .output()
+                .ok()?;
+            let first = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .next()?
+                .to_string();
+            (out.status.success() && first.contains("(GNU coreutils)")).then(|| PathBuf::from(name))
+        })
+}
 use serde::Serialize;
 use tempfile::tempdir;
 use tonic::transport::Endpoint;
