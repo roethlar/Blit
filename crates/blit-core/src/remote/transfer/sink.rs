@@ -812,7 +812,16 @@ impl SinkOutcome {
         // dropped overflow) make the set inexact even when every named
         // path fits — say so, or a later clean retry pass would clear
         // failures no pass was ever given.
-        let unnamed = self.has_unnamed_failures();
+        // cr-ecm40-6: and a write site's failure not yet named whose text is
+        // also a known failure's identity collapses into it here — two
+        // failures, one entry — so the list says it is incomplete. Asked
+        // before the manifest named them, it gave one path for two failures
+        // and called itself whole.
+        let collapsed = self
+            .unnamed_texts
+            .iter()
+            .any(|text| self.failed_identities.contains(&(text.clone(), None)));
+        let unnamed = self.has_unnamed_failures() || collapsed;
         // cr-ecm39-1: with the write sites' not yet named, each by its text.
         let identities: std::collections::HashSet<(String, Option<Vec<u8>>)> = self
             .failed_identities
@@ -10383,6 +10392,23 @@ mod cr_win_1_tests {
         assert!(outcome.failures[0]
             .reason
             .starts_with("source: read error; "));
+    }
+
+    /// cr-ecm40-6: asked before the manifest names the write sites' failures,
+    /// the exact set says it is incomplete where one of them collapses into a
+    /// known failure of its spelling; named, both are there.
+    #[test]
+    fn an_unnamed_failure_that_collapses_leaves_the_set_incomplete() {
+        let mut outcome = SinkOutcome::default();
+        outcome.record_known_failure("dup\u{FFFD}", None, "source: missing at retry");
+        outcome.record_failure("dup\u{FFFD}", "denied");
+        let (paths, _, truncated) = outcome.wire_failed_identities();
+        assert_eq!(paths.len(), 1);
+        assert!(truncated, "two failures in one entry: incomplete");
+        let named = outcome.named_raw(|text| (text == "dup\u{FFFD}").then(|| b"dup\xff".to_vec()));
+        let (paths, _, truncated) = named.wire_failed_identities();
+        assert_eq!(paths.len(), 2);
+        assert!(!truncated);
     }
 
     /// cr-ecm39-1: a known text failure and a write site's failure of a
