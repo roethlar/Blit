@@ -35,6 +35,9 @@ pub const NO_REASON_REPORTED: &str = "failed (the transfer's report kept no reas
 
 /// How long closing a log waits for its audit lane to drain.
 const RELAY_DRAIN_LIMIT: Duration = Duration::from_secs(30);
+/// Why a log whose relay was cut at the close is incomplete (log-relay-cut).
+const RELAY_CUT: &str = "the transfer still held its log lane open when the run ended; events it \
+                         had not handed over are missing";
 
 /// Where a machine keeps its logs, and whose they are.
 #[derive(Clone, Debug)]
@@ -776,9 +779,7 @@ impl RunLog {
         // from it.
         if relay_cut {
             bodies.push(EventBody::LogIncomplete {
-                reason: "the transfer still held its log lane open when the run ended; \
-                         events it had not handed over are missing"
-                    .into(),
+                reason: RELAY_CUT.into(),
             });
         }
         let elapsed = active.started.elapsed();
@@ -845,6 +846,8 @@ impl RunLog {
                 files_failed: totals.files_failed,
                 bytes_copied: if written { totals.bytes_copied } else { 0 },
                 elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                // cr-ecm41-1: said where it is known — the relay drained.
+                all_events_logged: !relay_cut,
             }));
         }
         for body in bodies {
@@ -859,6 +862,7 @@ impl RunLog {
             outcome,
             detail,
             run_id,
+            events_lost: relay_cut,
         })
     }
 }
@@ -871,6 +875,9 @@ pub struct ClosingLog {
     outcome: Outcome,
     detail: Option<String>,
     run_id: String,
+    /// cr-ecm41-1: the relay was cut at the close, so events are missing
+    /// that the writer never had.
+    events_lost: bool,
 }
 
 impl ClosingLog {
@@ -883,11 +890,18 @@ impl ClosingLog {
             outcome,
             detail,
             run_id,
+            events_lost,
         } = self;
         let report = match tokio::task::spawn_blocking(move || writer.finish(outcome, detail)).await
         {
             Ok(report) if report.no_place => return None,
-            Ok(report) => {
+            Ok(mut report) => {
+                // cr-ecm41-1: the caller told, too, when events were lost
+                // before the writer had them; its report knows only its own.
+                if events_lost && report.complete {
+                    report.complete = false;
+                    report.problem.get_or_insert_with(|| RELAY_CUT.into());
+                }
                 if !report.complete {
                     log::warn!(
                         "run {run_id}: its log is incomplete: {}",
@@ -1464,15 +1478,55 @@ mod tests {
             log.audit_lane_at(End::Receiving).expect("a lane"),
         );
         let report = log
-            .close(Outcome::Failed, None, None)
+            .close(Outcome::Failed, None, Some(RunTotals::default()))
             .await
             .expect("a report");
         drop(held);
-        let incomplete = open_log(&report.path.expect("a log")).unwrap().any(|line| {
-            matches!(line, Ok(LogLine::Event(event))
-                    if matches!(event.body, EventBody::LogIncomplete { .. }))
-        });
-        assert!(incomplete, "the cut marked");
+        // cr-ecm41-1: the caller is told, and the summary says it.
+        assert!(!report.complete, "{report:?}");
+        let bodies = |path: &std::path::Path| -> Vec<EventBody> {
+            open_log(path)
+                .unwrap()
+                .filter_map(|line| match line {
+                    Ok(LogLine::Event(event)) => Some(event.body),
+                    _ => None,
+                })
+                .collect()
+        };
+        let cut = bodies(&report.path.expect("a log"));
+        assert!(
+            cut.iter()
+                .any(|body| matches!(body, EventBody::LogIncomplete { .. })),
+            "the cut marked"
+        );
+        assert!(
+            cut.iter().any(
+                |body| matches!(body, EventBody::Summary(summary) if !summary.all_events_logged)
+            ),
+            "its summary holds no evidence that every event is here"
+        );
+        // A run whose relay drained says so.
+        let drained = RunLog::new(
+            Some(LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: DEFAULT_KEEP,
+                finished: None,
+            }),
+            "1123456789abcdef0123456789abcdef",
+        );
+        drained.start(Role::Initiator, RunInfo::default(), None);
+        let report = drained
+            .close(Outcome::Ok, None, Some(RunTotals::default()))
+            .await
+            .expect("a report");
+        assert!(report.complete, "{report:?}");
+        assert!(
+            bodies(&report.path.expect("a log")).iter().any(
+                |body| matches!(body, EventBody::Summary(summary) if summary.all_events_logged)
+            ),
+            "its summary holds the evidence"
+        );
     }
 
     /// log-named-text: a failure the account names by its text alone is a

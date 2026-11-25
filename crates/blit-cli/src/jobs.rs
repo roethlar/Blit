@@ -628,7 +628,10 @@ fn failed_identities(
                             said.insert(identity);
                         }
                     }
-                    job_log::EventBody::Summary(_) => summed = true,
+                    // cr-ecm41-1: and one that says every event reached
+                    // the log. An older blit's cut relay, said only in words,
+                    // left an unbroken sequence; its summary says nothing.
+                    job_log::EventBody::Summary(summary) => summed = summary.all_events_logged,
                     job_log::EventBody::RunEnd { .. } => ended = true,
                     job_log::EventBody::LogIncomplete { .. } => whole = false,
                     _ => {}
@@ -2392,7 +2395,10 @@ mod retry_name_tests {
             raw: raw.clone(),
             left_in_place: Some(false),
         });
-        writer.record(EventBody::Summary(Default::default()));
+        writer.record(EventBody::Summary(blit_core::job_log::Summary {
+            all_events_logged: true,
+            ..Default::default()
+        }));
         assert!(writer.finish(Outcome::Failed, None).complete);
         let mut record = RunRecord::starting(
             run_id,
@@ -2478,7 +2484,10 @@ mod retry_name_tests {
             raw: None,
             left_in_place: Some(false),
         });
-        writer.record(EventBody::Summary(Default::default()));
+        writer.record(EventBody::Summary(blit_core::job_log::Summary {
+            all_events_logged: true,
+            ..Default::default()
+        }));
         assert!(writer.finish(Outcome::Failed, None).complete);
         let (failed, _) =
             failed_identities(dir.path(), &old(run_id), false).expect("settled by its log");
@@ -2496,7 +2505,10 @@ mod retry_name_tests {
             raw: None,
             left_in_place: Some(false),
         });
-        writer.record(EventBody::Summary(Default::default()));
+        writer.record(EventBody::Summary(blit_core::job_log::Summary {
+            all_events_logged: true,
+            ..Default::default()
+        }));
         assert!(writer.finish(Outcome::Failed, None).complete);
         let (failed, _) =
             failed_identities(dir.path(), &old(counted), false).expect("settled by its log");
@@ -2550,7 +2562,10 @@ mod retry_name_tests {
                 raw: None,
                 left_in_place: left,
             });
-            writer.record(EventBody::Summary(Default::default()));
+            writer.record(EventBody::Summary(blit_core::job_log::Summary {
+                all_events_logged: true,
+                ..Default::default()
+            }));
             assert!(writer.finish(Outcome::Failed, None).complete);
         };
         let settle = |record: &RunRecord| {
@@ -2577,7 +2592,10 @@ mod retry_name_tests {
             bytes: None,
             raw: None,
         });
-        writer.record(EventBody::Summary(Default::default()));
+        writer.record(EventBody::Summary(blit_core::job_log::Summary {
+            all_events_logged: true,
+            ..Default::default()
+        }));
         assert!(writer.finish(Outcome::Failed, None).complete);
         assert!(settle(&older(silent)).is_err(), "never mentioned: declined");
         let mut written_so = older(unlogged);
@@ -2644,7 +2662,10 @@ mod retry_name_tests {
             raw: None,
             left_in_place: Some(false),
         });
-        writer.record(EventBody::Summary(Default::default()));
+        writer.record(EventBody::Summary(blit_core::job_log::Summary {
+            all_events_logged: true,
+            ..Default::default()
+        }));
         assert!(writer.finish(Outcome::Failed, None).complete);
         let mut record = RunRecord::starting(run_id, &spec);
         record.files_failed = 1;
@@ -2707,7 +2728,10 @@ mod retry_name_tests {
                     reason: "disk full".into(),
                 });
             }
-            writer.record(EventBody::Summary(Default::default()));
+            writer.record(EventBody::Summary(blit_core::job_log::Summary {
+                all_events_logged: true,
+                ..Default::default()
+            }));
             writer.finish(Outcome::Failed, None);
         };
         let lost = "8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a";
@@ -2776,6 +2800,30 @@ mod retry_name_tests {
             "a recovered log completes nothing"
         );
 
+        // cr-ecm41-1: nor one with no evidence that every event reached it —
+        // an older blit's, whose relay was cut, said so in words only.
+        let unmarked = "8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f";
+        let writer = place
+            .start(unmarked, 1, Role::Initiator, RunInfo::default())
+            .expect("a log");
+        writer.record(EventBody::FileFailed {
+            path: "b.txt".into(),
+            reason: "denied".into(),
+            raw: None,
+            left_in_place: Some(false),
+        });
+        writer.record(EventBody::Diagnostic {
+            message: "the transfer still held its log lane open when the run ended; events it \
+                      had not handed over are missing"
+                .into(),
+        });
+        writer.record(EventBody::Summary(Default::default()));
+        assert!(writer.finish(Outcome::Failed, None).complete);
+        assert!(
+            failed_identities(dir.path(), &cut(unmarked), false).is_err(),
+            "a log with no evidence completes nothing"
+        );
+
         // cr-ecm40-1: nor one missing an event from its sequence.
         let gapped = "8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d";
         let writer = place
@@ -2790,7 +2838,10 @@ mod retry_name_tests {
             raw: None,
             left_in_place: Some(false),
         });
-        writer.record(EventBody::Summary(Default::default()));
+        writer.record(EventBody::Summary(blit_core::job_log::Summary {
+            all_events_logged: true,
+            ..Default::default()
+        }));
         assert!(writer.finish(Outcome::Failed, None).complete);
         let at = blit_core::job_log::logs_for_run(&logs, gapped, None).unwrap()[0]
             .path
@@ -2858,7 +2909,10 @@ mod retry_name_tests {
                     left_in_place: Some(false),
                 });
             }
-            writer.record(EventBody::Summary(Default::default()));
+            writer.record(EventBody::Summary(blit_core::job_log::Summary {
+                all_events_logged: true,
+                ..Default::default()
+            }));
             assert!(writer.finish(Outcome::Failed, None).complete);
         };
         let twice = "7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d";
@@ -2976,7 +3030,10 @@ mod retry_name_tests {
             raw: None,
             left_in_place: Some(true),
         });
-        writer.record(EventBody::Summary(Default::default()));
+        writer.record(EventBody::Summary(blit_core::job_log::Summary {
+            all_events_logged: true,
+            ..Default::default()
+        }));
         assert!(writer.finish(Outcome::Failed, None).complete);
         let mut record = RunRecord::starting(
             run_id,
@@ -3026,7 +3083,10 @@ mod retry_name_tests {
             raw: raw.clone(),
             left_in_place: Some(true),
         });
-        writer.record(EventBody::Summary(Default::default()));
+        writer.record(EventBody::Summary(blit_core::job_log::Summary {
+            all_events_logged: true,
+            ..Default::default()
+        }));
         let report = writer.finish(Outcome::Failed, None);
         assert!(report.complete, "{report:?}");
 
@@ -3076,7 +3136,10 @@ mod retry_name_tests {
         writer.record(EventBody::LogIncomplete {
             reason: "disk full".into(),
         });
-        writer.record(EventBody::Summary(Default::default()));
+        writer.record(EventBody::Summary(blit_core::job_log::Summary {
+            all_events_logged: true,
+            ..Default::default()
+        }));
         assert!(writer.finish(Outcome::Failed, None).path.is_some());
         record.run_id = other_run.into();
         let (failed, logged) = failed_identities(dir.path(), &record, false).unwrap();
@@ -3100,7 +3163,10 @@ mod retry_name_tests {
             raw: raw.clone(),
             left_in_place: Some(true),
         });
-        writer.record(EventBody::Summary(Default::default()));
+        writer.record(EventBody::Summary(blit_core::job_log::Summary {
+            all_events_logged: true,
+            ..Default::default()
+        }));
         assert!(writer.finish(Outcome::Failed, None).complete);
         let writer = place
             .start(two_roles, 1, Role::Initiator, RunInfo::default())
@@ -3115,7 +3181,10 @@ mod retry_name_tests {
             raw: raw.clone(),
             left_in_place: Some(false),
         });
-        writer.record(EventBody::Summary(Default::default()));
+        writer.record(EventBody::Summary(blit_core::job_log::Summary {
+            all_events_logged: true,
+            ..Default::default()
+        }));
         assert!(writer.finish(Outcome::Failed, None).complete);
         record.run_id = two_roles.into();
         let (failed, logged) = failed_identities(dir.path(), &record, false).unwrap();
@@ -3143,7 +3212,10 @@ mod retry_name_tests {
             path: text.clone(),
             raw: raw.clone(),
         });
-        writer.record(EventBody::Summary(Default::default()));
+        writer.record(EventBody::Summary(blit_core::job_log::Summary {
+            all_events_logged: true,
+            ..Default::default()
+        }));
         assert!(writer.finish(Outcome::Failed, None).complete);
         record.run_id = sent_after.into();
         let (_, logged) = failed_identities(dir.path(), &record, false).unwrap();
@@ -3177,7 +3249,10 @@ mod retry_name_tests {
                 bytes: None,
                 raw: theirs_raw.clone(),
             });
-            writer.record(EventBody::Summary(Default::default()));
+            writer.record(EventBody::Summary(blit_core::job_log::Summary {
+                all_events_logged: true,
+                ..Default::default()
+            }));
             assert!(writer.finish(Outcome::Failed, None).complete);
         }
         // cr-ecm38-7: two files failed, one in each role's log, and the
@@ -3229,7 +3304,10 @@ mod retry_name_tests {
                 .start(attempts, attempt, Role::Initiator, RunInfo::default())
                 .expect("a log");
             writer.record(body);
-            writer.record(EventBody::Summary(Default::default()));
+            writer.record(EventBody::Summary(blit_core::job_log::Summary {
+                all_events_logged: true,
+                ..Default::default()
+            }));
             assert!(writer.finish(Outcome::Failed, None).complete);
         }
         record.run_id = attempts.into();
@@ -3250,7 +3328,10 @@ mod retry_name_tests {
             raw: raw.clone(),
             left_in_place: Some(true),
         });
-        writer.record(EventBody::Summary(Default::default()));
+        writer.record(EventBody::Summary(blit_core::job_log::Summary {
+            all_events_logged: true,
+            ..Default::default()
+        }));
         assert!(writer.finish(Outcome::Failed, None).complete);
         let elsewhere = LogPlace {
             participant: "m2".into(),
@@ -3264,7 +3345,10 @@ mod retry_name_tests {
             bytes: None,
             raw: raw.clone(),
         });
-        writer.record(EventBody::Summary(Default::default()));
+        writer.record(EventBody::Summary(blit_core::job_log::Summary {
+            all_events_logged: true,
+            ..Default::default()
+        }));
         assert!(writer.finish(Outcome::Failed, None).complete);
         record.run_id = machines.into();
         let (_, logged) = failed_identities(dir.path(), &record, false).unwrap();

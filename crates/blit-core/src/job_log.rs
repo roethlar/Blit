@@ -367,6 +367,12 @@ pub struct Summary {
     pub files_failed: u64,
     pub bytes_copied: u64,
     pub elapsed_ms: u64,
+    /// cr-ecm41-1: every event the run's transfer reported reached the log
+    /// before this summary — its relay drained at the close. False where the
+    /// relay was cut, and in a log from a blit before the field: nothing
+    /// there says the log holds every event, and no record is completed from
+    /// it.
+    pub all_events_logged: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2081,6 +2087,7 @@ mod tests {
                 files_failed: 1,
                 bytes_copied: 3,
                 elapsed_ms: 10,
+                all_events_logged: true,
             }),
             EventBody::Phase {
                 name: "transfer".into(),
@@ -2945,6 +2952,7 @@ mod tests {
                 files_failed: 0,
                 bytes_copied: 2048,
                 elapsed_ms: 1500,
+                all_events_logged: true,
             })),
             "summary  2 copied (2.00 KiB), 1 deleted, 0 failed, in 1.5s"
         );

@@ -942,12 +942,15 @@ pub struct LogRead {
 impl LogRead {
     /// Review cr-jl3a-1: the log alone says how the run ended only when it
     /// is finished, ends with its `run-end` and `summary`, and lost nothing.
+    /// cr-ecm41-1: and its summary says every event reached it.
     pub fn complete(&self) -> bool {
         self.logs > 0
             && !self.unfinished
             && !self.incomplete
             && self.ended.is_some()
-            && self.summary.is_some()
+            && self
+                .summary
+                .is_some_and(|summary| summary.all_events_logged)
     }
 
     /// Take in one line of the log: its failures (each once), summary and
@@ -1427,6 +1430,29 @@ mod tests {
         assert!(!dir.path().join(format!("{}.spec.json", ids[0])).exists());
     }
 
+    /// cr-ecm41-1: a daemon's log whose summary holds no evidence that every
+    /// event reached it — an older blit's, or one whose relay was cut — is
+    /// not complete, and settles no detached run.
+    #[test]
+    fn a_log_without_evidence_that_it_has_every_event_is_not_complete() {
+        use crate::job_log::Summary;
+        let whole = LogRead {
+            logs: 1,
+            ended: Some((7, Outcome::Failed, None)),
+            summary: Some(Summary {
+                all_events_logged: true,
+                ..Summary::default()
+            }),
+            ..LogRead::default()
+        };
+        assert!(whole.complete());
+        let unmarked = LogRead {
+            summary: Some(Summary::default()),
+            ..whole.clone()
+        };
+        assert!(!unmarked.complete());
+    }
+
     /// Review cr-jl3a-1: a detached run is settled from its daemon's log
     /// only when that log is whole; otherwise the daemon's job state
     /// decides, and the log's failures are kept but marked truncated.
@@ -1451,6 +1477,7 @@ mod tests {
             summary: Some(Summary {
                 files_copied: 2,
                 files_failed: 1,
+                all_events_logged: true,
                 ..Summary::default()
             }),
             failures: vec![failure.clone()],
@@ -1474,6 +1501,7 @@ mod tests {
             summary: Some(Summary {
                 files_copied: 2,
                 files_failed: 3,
+                all_events_logged: true,
                 ..Summary::default()
             }),
             ..whole.clone()
@@ -1590,7 +1618,13 @@ mod tests {
         };
         read.read_line(event(1, failed()));
         read.read_line(event(2, failed()));
-        read.read_line(event(3, EventBody::Summary(Summary::default())));
+        read.read_line(event(
+            3,
+            EventBody::Summary(Summary {
+                all_events_logged: true,
+                ..Summary::default()
+            }),
+        ));
         read.read_line(event(
             4,
             EventBody::RunEnd {
