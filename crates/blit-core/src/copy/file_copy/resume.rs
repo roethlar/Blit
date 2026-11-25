@@ -942,7 +942,10 @@ impl<'a> Walk<'a> {
     /// made through it failed. cr-ecm40-5: the ancestors of the real path of
     /// the deepest directory of `target` there is, its links resolved — an
     /// alias to a directory BENEATH the root has no ancestor that is the
-    /// root by its own names, and was refused.
+    /// root by its own names, and was refused. cr-ecm41-4: and the deepest
+    /// part there is, whatever it is — an alias to a regular file has its
+    /// real path too. Passed over as no directory, its outside parent was
+    /// asked instead, and the file was refused.
     fn alias_place(&self, target: &Path) -> Option<std::path::PathBuf> {
         use std::os::unix::fs::MetadataExt as _;
         // SAFETY: `stat` is plain integers, filled by the call.
@@ -956,9 +959,6 @@ impl<'a> Walk<'a> {
             let Ok(real) = std::fs::canonicalize(ancestor) else {
                 continue;
             };
-            if !std::fs::metadata(&real).is_ok_and(|found| found.is_dir()) {
-                continue;
-            }
             let rest = target.strip_prefix(ancestor).ok()?;
             return real.ancestors().find_map(|above| {
                 let found = std::fs::metadata(above).ok()?;
