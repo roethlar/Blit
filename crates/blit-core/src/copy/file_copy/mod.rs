@@ -1624,6 +1624,17 @@ mod mode_tests {
     #[test]
     fn an_ordinary_path_is_walked_by_the_kernel() {
         let (_dir, within, file) = a_deep_path();
+        // cr-ecm40-7: only where the kernel can walk beneath the root — the
+        // seam, or a host without `openat2`, leaves the walk to serve, and
+        // `a_deep_walk_holds_one_directory_at_a_time` is its guard.
+        {
+            use std::os::unix::io::AsRawFd as _;
+            let held = within.held.as_ref().expect("held").as_raw_fd();
+            if openat2_beneath(held, Path::new("."), libc::O_PATH | libc::O_DIRECTORY, 0).is_err() {
+                eprintln!("no openat2 here: the kernel's walk is not what serves");
+                return;
+            }
+        }
         super::resume::WALK_HELD.with(|(now, most)| most.set(now.get()));
         let before = super::resume::WALK_HELD.with(|(now, _)| now.get());
         super::resume::resolve_beneath(&within, &file, true)
