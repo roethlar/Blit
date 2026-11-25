@@ -147,7 +147,12 @@ fn tree(root: &Path) {
 /// The system `ls`, in the reference locale and UTC, from `root`.
 #[cfg(target_os = "linux")]
 fn system_ls(root: &Path, args: &[&str]) -> std::process::Output {
+    use std::os::unix::process::CommandExt as _;
+    // ci-linux-gnuls-name: called `ls`, whatever name the reference is
+    // installed under — GNU names itself by what it was called, and as
+    // `gnuls` (Ubuntu from 25.10) its every message began `gnuls:`.
     Command::new(common::gnu_coreutils("ls").expect("the reference, looked for by the test"))
+        .arg0("ls")
         .args(args)
         .current_dir(root)
         .env("LC_ALL", "C.UTF-8")
