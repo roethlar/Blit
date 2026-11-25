@@ -534,17 +534,24 @@ struct PutThereBeforeItsBytes {
     at: PathBuf,
     names: &'static [&'static str],
     put: std::sync::atomic::AtomicBool,
+    /// gate-put-race: the put, once, with every caller waiting for it.
+    once: std::sync::Once,
 }
 
 impl PutThereBeforeItsBytes {
     const THEIRS: &'static [u8] = b"somebody's file";
 
+    /// gate-put-race: every caller waits until the files are put. Marked put
+    /// before they were, a second worker's open went on and sent its bytes
+    /// while the first was still writing them, and the destination made the
+    /// name — free then — as its own: the guard, not the run, wrote over it.
     fn put(&self) {
-        if !self.put.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        self.once.call_once(|| {
             for name in self.names {
                 std::fs::write(self.at.join(name), Self::THEIRS).unwrap();
             }
-        }
+            self.put.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
     }
 }
 
@@ -601,6 +608,7 @@ async fn a_push_that_keeps_what_exists_writes_over_nothing_put_there_since() {
         at: daemon.dest_root.clone(),
         names: &["small.txt", "big.bin"],
         put: std::sync::atomic::AtomicBool::new(false),
+        once: std::sync::Once::new(),
     });
     let pushed = run_push_session(
         &daemon.endpoint,
