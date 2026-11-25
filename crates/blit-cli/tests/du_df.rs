@@ -521,9 +521,15 @@ fn df_reports_the_filesystem_that_holds_the_path() {
     let ran = blit(&ctx, &["df", &missing]);
     assert_eq!(ran.code, Some(1));
     assert!(ran.stdout.is_empty());
+    // ci-windows-df-words: in the system's own words for a path that is not
+    // there (`os_reason`) — Unix's were expected, and Windows says "The
+    // system cannot find the file specified."
+    let words = blit_core::disk_usage::os_reason(
+        &fs::symlink_metadata(ctx.module_dir.join("t/no-such-entry")).unwrap_err(),
+    );
     assert_eq!(
         ran.stderr.trim_end(),
-        format!("blit df: {missing}: No such file or directory")
+        format!("blit df: {missing}: {words}")
     );
 }
 
