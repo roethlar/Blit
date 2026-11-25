@@ -945,7 +945,10 @@ impl<'a> Walk<'a> {
     /// root by its own names, and was refused. cr-ecm41-4: and the deepest
     /// part there is, whatever it is — an alias to a regular file has its
     /// real path too. Passed over as no directory, its outside parent was
-    /// asked instead, and the file was refused.
+    /// asked instead, and the file was refused. cr-ecm42-4: and a part that
+    /// is a link to nothing is followed to where it points ([`real_path`]):
+    /// an alias to a file not yet made had no real path, its outside parent
+    /// was asked, and the file was refused.
     fn alias_place(&self, target: &Path) -> Option<std::path::PathBuf> {
         use std::os::unix::fs::MetadataExt as _;
         // SAFETY: `stat` is plain integers, filled by the call.
@@ -955,23 +958,13 @@ impl<'a> Walk<'a> {
         if unsafe { libc::fstat(self.root, &mut root) } < 0 {
             return None;
         }
-        for ancestor in target.ancestors() {
-            let Ok(real) = std::fs::canonicalize(ancestor) else {
-                continue;
-            };
-            let rest = target.strip_prefix(ancestor).ok()?;
-            return real.ancestors().find_map(|above| {
-                let found = std::fs::metadata(above).ok()?;
-                (found.dev() == root.st_dev && found.ino() == root.st_ino)
-                    .then(|| {
-                        real.strip_prefix(above)
-                            .ok()
-                            .map(|inside| inside.join(rest))
-                    })
-                    .flatten()
-            });
-        }
-        None
+        let real = real_path(target, &mut 0)?;
+        real.ancestors().find_map(|above| {
+            let found = std::fs::metadata(above).ok()?;
+            (found.dev() == root.st_dev && found.ino() == root.st_ino)
+                .then(|| real.strip_prefix(above).ok().map(Path::to_path_buf))
+                .flatten()
+        })
     }
 
     fn is_link(&self, name: &std::ffi::CStr) -> std::io::Result<bool> {
@@ -1057,6 +1050,37 @@ fn identity_of(directory: std::os::unix::io::RawFd) -> std::io::Result<(libc::de
         return Err(std::io::Error::last_os_error());
     }
     Ok((found.st_dev, found.st_ino))
+}
+
+/// cr-ecm42-4: `path`'s real path, as the system would follow it, its last
+/// parts allowed not to exist: what exists resolved (`canonicalize`), a link
+/// to nothing followed to where it points (at most [`MAX_FOLLOWED_LINKS`]),
+/// and a name that is not there kept after its parent's real path.
+#[cfg(target_os = "linux")]
+fn real_path(path: &Path, links: &mut usize) -> Option<std::path::PathBuf> {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return Some(real);
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(found) if found.file_type().is_symlink() => {
+            *links += 1;
+            if *links > MAX_FOLLOWED_LINKS {
+                return None;
+            }
+            let text = std::fs::read_link(path).ok()?;
+            let next = if text.is_absolute() {
+                text
+            } else {
+                path.parent()?.join(text)
+            };
+            real_path(&next, links)
+        }
+        Ok(_) => None,
+        Err(_) => {
+            let name = path.file_name()?;
+            Some(real_path(path.parent()?, links)?.join(name))
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]

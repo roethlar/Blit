@@ -1591,6 +1591,53 @@ mod mode_tests {
         }
     }
 
+    /// cr-ecm42-4 (Linux): an absolute link within the destination to an
+    /// alias of a file beneath the root that is not there yet has the file
+    /// made there, with `openat2` and without; an alias of a file outside that
+    /// is not there is refused, and nothing made. The alias had no real path,
+    /// its outside parent was asked, and the copy failed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_absolute_link_to_an_alias_of_a_missing_file_beneath_the_root_has_it_made() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("dst").join("sub")).unwrap();
+        std::fs::create_dir_all(dir.path().join("outside")).unwrap();
+        let root = std::fs::canonicalize(dir.path().join("dst")).unwrap();
+        std::os::unix::fs::symlink(root.join("sub").join("leaf"), dir.path().join("leafalias"))
+            .unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("outside").join("new.bin"),
+            dir.path().join("outalias"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(dir.path().join("leafalias"), root.join("entry")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("outalias"), root.join("out.bin")).unwrap();
+        let within = Within::hold(&root);
+        for refused in [false, true] {
+            let _ = std::fs::remove_file(root.join("sub").join("leaf"));
+            super::NO_OPENAT2.with(|seam| seam.set(refused));
+            // As a copy makes a file not there, then writes it.
+            let made = create_regular_within(&root.join("entry"), Some(&within));
+            let written =
+                made.and_then(|_| open_to_write(&root.join("entry"), Some(&within), false));
+            let out = create_regular_within(&root.join("out.bin"), Some(&within));
+            super::NO_OPENAT2.with(|seam| seam.set(false));
+            let mut written = written.unwrap_or_else(|e| panic!("no openat2: {refused}: {e}"));
+            std::io::Write::write_all(&mut written, b"new").unwrap();
+            drop(written);
+            assert_eq!(
+                std::fs::read(root.join("sub").join("leaf")).unwrap(),
+                b"new",
+                "no openat2: {refused}"
+            );
+            assert!(
+                out.is_err(),
+                "no openat2: {refused}: out of the destination"
+            );
+            assert!(!dir.path().join("outside").join("new.bin").exists());
+        }
+    }
+
     /// cr-ecm41-4 (Linux): an absolute link within the destination to an
     /// alias of a regular FILE beneath the root is followed — written
     /// through, with `openat2` and without — and an alias of a file outside
