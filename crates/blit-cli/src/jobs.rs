@@ -551,28 +551,26 @@ fn failed_identities(
                 continue;
             };
             logged.read = true;
-            let mut whole = log.finished;
-            let mut ended = false;
             // cr-ecm40-1: and closed by its run — its own summary, which a
             // log recovery finished (`run-end` appended to what a crash
             // left), or one whose handles all went away, never holds — with
             // every event its writer numbered there, in order. Taken whole
             // so, a recovered log completed a record with what its crash
             // had lost, and the retry overwrote a file that had landed.
-            let mut summed = false;
-            let mut next_seq = 0u64;
+            // cr-ecm41-1, cr-ecm42-1: in the one shape every reader asks of
+            // a log (`LogShape`): its summary holds the evidence that every
+            // event reached it, and nothing follows its end. Events written
+            // after the end, numbered on, completed a record.
+            let mut shape = job_log::LogShape::default();
             let (left, still_failed, unknown, said) = streams
                 .entry((log.key.participant().to_string(), log.key.role()))
                 .or_default();
             for line in lines {
                 let Ok(LogLine::Event(event)) = line else {
-                    whole = false;
+                    shape.lost();
                     continue;
                 };
-                if event.seq != next_seq {
-                    whole = false;
-                }
-                next_seq = event.seq.saturating_add(1);
+                shape.take(&event);
                 match event.body {
                     job_log::EventBody::FileFailed {
                         path,
@@ -628,16 +626,10 @@ fn failed_identities(
                             said.insert(identity);
                         }
                     }
-                    // cr-ecm41-1: and one that says every event reached
-                    // the log. An older blit's cut relay, said only in words,
-                    // left an unbroken sequence; its summary says nothing.
-                    job_log::EventBody::Summary(summary) => summed = summary.all_events_logged,
-                    job_log::EventBody::RunEnd { .. } => ended = true,
-                    job_log::EventBody::LogIncomplete { .. } => whole = false,
                     _ => {}
                 }
             }
-            logged.complete &= whole && summed && ended;
+            logged.complete &= log.finished && shape.whole();
         }
         for (left, still_failed, unknown, said) in streams.into_values() {
             logged.left.extend(left);
@@ -2822,6 +2814,64 @@ mod retry_name_tests {
         assert!(
             failed_identities(dir.path(), &cut(unmarked), false).is_err(),
             "a log with no evidence completes nothing"
+        );
+
+        // cr-ecm42-1: nor one with events written after its end, numbered on
+        // — the reviewer's: a landed file and the missing one after `run-end`.
+        let tailed = "8a9a8a9a8a9a8a9a8a9a8a9a8a9a8a9a";
+        let writer = place
+            .start(tailed, 1, Role::Initiator, RunInfo::default())
+            .expect("a log");
+        writer.record(EventBody::FileFailed {
+            path: "b.txt".into(),
+            reason: "denied".into(),
+            raw: None,
+            left_in_place: Some(false),
+        });
+        writer.record(EventBody::Summary(blit_core::job_log::Summary {
+            all_events_logged: true,
+            ..Default::default()
+        }));
+        assert!(writer.finish(Outcome::Failed, None).complete);
+        let at = blit_core::job_log::logs_for_run(&logs, tailed, None).unwrap()[0]
+            .path
+            .clone();
+        let mut lines = String::new();
+        std::io::Read::read_to_string(
+            &mut blit_core::job_log::decode(std::fs::File::open(&at).unwrap()).unwrap(),
+            &mut lines,
+        )
+        .unwrap();
+        let last: blit_core::job_log::Event =
+            serde_json::from_str(lines.lines().last().unwrap()).unwrap();
+        for (n, body) in [
+            EventBody::FileCopied {
+                path: "landed".into(),
+                bytes: None,
+                raw: None,
+            },
+            EventBody::FileFailed {
+                path: "missing".into(),
+                reason: "denied".into(),
+                raw: None,
+                left_in_place: Some(false),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let after = blit_core::job_log::Event {
+                ts_ms: last.ts_ms,
+                seq: last.seq + 1 + n as u64,
+                body,
+            };
+            lines.push_str(&serde_json::to_string(&after).unwrap());
+            lines.push('\n');
+        }
+        std::fs::write(&at, lines).unwrap();
+        assert!(
+            failed_identities(dir.path(), &cut(tailed), false).is_err(),
+            "a log with events after its end completes nothing"
         );
 
         // cr-ecm40-1: nor one missing an event from its sequence.

@@ -937,28 +937,26 @@ pub struct LogRead {
     /// that says, settles it. While any stays, `left_in_place` is not the
     /// whole list.
     pub left_unknown: Vec<(String, Option<String>)>,
-    /// cr-ecm41-2: the next event's place in the session's log being read,
-    /// and whether that log has given its summary and its end. cr-ecm42-2:
-    /// its summary counts only where it holds the evidence that every event
-    /// reached the log — each session's own; the last one's spoke for all.
-    next_seq: u64,
-    this_summed: bool,
-    this_ended: bool,
+    /// cr-ecm41-2, cr-ecm42-2: the session's log being read, held on its own
+    /// to the shape every reader asks of a log (cr-ecm42-1, [`LogShape`]) —
+    /// its own summary, holding the evidence, then its own end; another
+    /// session's do not stand for it.
+    ///
+    /// [`LogShape`]: crate::job_log::LogShape
+    shape: crate::job_log::LogShape,
 }
 
 impl LogRead {
     /// cr-ecm41-2: one session's log begins; its events are numbered from 0.
     pub fn begin_log(&mut self) {
         self.logs += 1;
-        self.next_seq = 0;
-        self.this_summed = false;
-        self.this_ended = false;
+        self.shape = crate::job_log::LogShape::default();
     }
 
     /// cr-ecm41-2: that log ends here. It lost nothing only where it gave
     /// its own summary and its end — another session's do not stand for it.
     pub fn end_log(&mut self) {
-        if !(self.this_summed && self.this_ended) {
+        if !self.shape.whole() {
             self.incomplete = true;
         }
     }
@@ -982,17 +980,15 @@ impl LogRead {
     pub fn read_line(&mut self, line: crate::job_log::LogLine) {
         use crate::job_log::{EventBody, LogLine};
         let LogLine::Event(event) = line else {
+            self.shape.lost();
             self.incomplete = true;
             return;
         };
         // cr-ecm41-2: every event its writer numbered, in order, and nothing
-        // after its end (a summary included). Read without, a log missing
-        // two events in its middle named a file that had landed as the one
-        // that failed, in a record it called whole.
-        if self.this_ended || event.seq != self.next_seq {
-            self.incomplete = true;
-        }
-        self.next_seq = event.seq.saturating_add(1);
+        // after its end. Read without, a log missing two events in its middle
+        // named a file that had landed as the one that failed, in a record it
+        // called whole.
+        self.shape.take(&event);
         match event.body {
             EventBody::FileFailed {
                 path,
@@ -1053,12 +1049,8 @@ impl LogRead {
                 self.left_unknown
                     .retain(|unknown| !(unknown.0 == path && unknown.1 == raw));
             }
-            EventBody::Summary(summary) => {
-                self.this_summed = summary.all_events_logged;
-                self.summary = Some(summary);
-            }
+            EventBody::Summary(summary) => self.summary = Some(summary),
             EventBody::RunEnd { outcome, detail } => {
-                self.this_ended = true;
                 self.ended = Some((event.ts_ms, outcome, detail));
             }
             EventBody::LogIncomplete { .. } => self.incomplete = true,

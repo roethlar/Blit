@@ -1688,6 +1688,52 @@ pub enum LogLine {
     },
 }
 
+/// cr-ecm42-1: whether one log is whole, as every reader of a run's logs — a
+/// retry's, a detached run's — takes it: every event its writer numbered, in
+/// order, from 0; exactly one summary, holding the evidence that every event
+/// reached the log (cr-ecm41-1), and then its `run-end`, with nothing after.
+/// Read each its own way, the retry's reader took events after the end, and
+/// neither held a log to one summary and then the end.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LogShape {
+    next_seq: u64,
+    summaries: u32,
+    evidence: bool,
+    ended: bool,
+    broken: bool,
+}
+
+impl LogShape {
+    /// Take in the log's next event.
+    pub fn take(&mut self, event: &Event) {
+        if self.ended || event.seq != self.next_seq {
+            self.broken = true;
+        }
+        self.next_seq = event.seq.saturating_add(1);
+        match &event.body {
+            EventBody::Summary(summary) => {
+                self.summaries += 1;
+                self.evidence = summary.all_events_logged;
+            }
+            EventBody::RunEnd { .. } => self.ended = true,
+            EventBody::LogIncomplete { .. } => self.broken = true,
+            // Between the summary and the end, nothing.
+            _ if self.summaries > 0 => self.broken = true,
+            _ => {}
+        }
+    }
+
+    /// A line that is not an event: something was lost.
+    pub fn lost(&mut self) {
+        self.broken = true;
+    }
+
+    /// The log, read to its end, is whole.
+    pub fn whole(&self) -> bool {
+        !self.broken && self.summaries == 1 && self.evidence && self.ended
+    }
+}
+
 /// Read a log line by line: a finished `.jsonl.gz`, a partial (running or
 /// left by a crash) or an exported plain copy. Compression is detected from
 /// the content, not the name. Blank lines are skipped.
@@ -1840,6 +1886,73 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// cr-ecm42-1: a log is whole only in its shape — every event in
+    /// sequence, one summary holding the evidence, then the end, then
+    /// nothing.
+    #[test]
+    fn a_log_is_whole_only_in_its_shape() {
+        let event = |seq, body| Event {
+            ts_ms: 1,
+            seq,
+            body,
+        };
+        let summary = |evidence| {
+            EventBody::Summary(Summary {
+                all_events_logged: evidence,
+                ..Summary::default()
+            })
+        };
+        let end = || EventBody::RunEnd {
+            outcome: Outcome::Ok,
+            detail: None,
+        };
+        let note = || EventBody::Diagnostic {
+            message: "a line".into(),
+        };
+        let shape = |bodies: Vec<EventBody>| {
+            let mut shape = LogShape::default();
+            for (seq, body) in bodies.into_iter().enumerate() {
+                shape.take(&event(seq as u64, body));
+            }
+            shape.whole()
+        };
+        assert!(shape(vec![note(), summary(true), end()]));
+        assert!(
+            !shape(vec![note(), summary(true), end(), note()]),
+            "after the end"
+        );
+        assert!(
+            !shape(vec![note(), summary(true), summary(true), end()]),
+            "two summaries"
+        );
+        assert!(
+            !shape(vec![note(), summary(true), note(), end()]),
+            "between the summary and the end"
+        );
+        assert!(
+            !shape(vec![note(), summary(true), end(), end()]),
+            "a second end"
+        );
+        assert!(
+            !shape(vec![note(), end(), summary(true)]),
+            "the summary after the end"
+        );
+        assert!(!shape(vec![note(), summary(false), end()]), "no evidence");
+        assert!(!shape(vec![note(), end()]), "no summary");
+        assert!(!shape(vec![note(), summary(true)]), "no end");
+        let mut gap = LogShape::default();
+        gap.take(&event(0, note()));
+        gap.take(&event(2, summary(true)));
+        gap.take(&event(3, end()));
+        assert!(!gap.whole(), "a gap");
+        let mut lost = LogShape::default();
+        lost.take(&event(0, note()));
+        lost.lost();
+        lost.take(&event(1, summary(true)));
+        lost.take(&event(2, end()));
+        assert!(!lost.whole(), "a line lost");
+    }
+
     use super::*;
     use filetime::FileTime;
     use tempfile::TempDir;
