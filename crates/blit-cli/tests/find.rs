@@ -989,10 +989,11 @@ fn sized_and_aged(root: &Path) {
     }
     fs::write(t.join("gone.tmp/inner/f"), b"x").unwrap();
     // A name that is not text: found, matched and removed as the name it
-    // is (AC-12).
+    // is (AC-12). ci-macos-find-raw: where the filesystem takes one — APFS
+    // refuses it (`Illegal byte sequence`), and the tree was never made.
     {
         use std::os::unix::ffi::OsStrExt;
-        fs::write(t.join(std::ffi::OsStr::from_bytes(b"bad\xff.tmp")), b"x").unwrap();
+        let _ = fs::write(t.join(std::ffi::OsStr::from_bytes(b"bad\xff.tmp")), b"x");
     }
     fs::write(t.join("sub/deep/x.tmp"), b"x").unwrap();
     fs::write(t.join("sub/deep/keep.txt"), b"x").unwrap();
