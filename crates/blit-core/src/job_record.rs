@@ -938,7 +938,9 @@ pub struct LogRead {
     /// whole list.
     pub left_unknown: Vec<(String, Option<String>)>,
     /// cr-ecm41-2: the next event's place in the session's log being read,
-    /// and whether that log has given its summary and its end.
+    /// and whether that log has given its summary and its end. cr-ecm42-2:
+    /// its summary counts only where it holds the evidence that every event
+    /// reached the log — each session's own; the last one's spoke for all.
     next_seq: u64,
     this_summed: bool,
     this_ended: bool,
@@ -1052,7 +1054,7 @@ impl LogRead {
                     .retain(|unknown| !(unknown.0 == path && unknown.1 == raw));
             }
             EventBody::Summary(summary) => {
-                self.this_summed = true;
+                self.this_summed = summary.all_events_logged;
                 self.summary = Some(summary);
             }
             EventBody::RunEnd { outcome, detail } => {
@@ -1556,6 +1558,20 @@ mod tests {
             !two.complete(),
             "a session's log without its own summary and end"
         );
+        // cr-ecm42-2: a session whose summary holds no evidence that every
+        // event reached it, then a whole one: the aggregate is not whole.
+        let mut hidden = read(vec![
+            (0, start()),
+            (1, failed("missing")),
+            (2, EventBody::Summary(Summary::default())),
+            (3, end()),
+        ]);
+        hidden.begin_log();
+        for (seq, body) in [(0, start()), (1, summary()), (2, end())] {
+            hidden.read_line(event(seq, body));
+        }
+        hidden.end_log();
+        assert!(!hidden.complete(), "one session without the evidence");
     }
 
     /// cr-ecm41-1: a daemon's log whose summary holds no evidence that every
