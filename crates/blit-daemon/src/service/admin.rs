@@ -1674,10 +1674,11 @@ mod typed_operand_tests {
 
         assert_eq!(removed(&["report "], false, false), (1, vec![]));
         assert!(root.join("report").exists() && !root.join("report ").exists());
-        assert_eq!(
-            removed(&[" report"], false, false),
-            (0, vec![(0, "No such file or directory".to_string())])
-        );
+        // ci-windows-missing-text: in the system's own words for a name
+        // that is not there — Unix's were expected, and Windows says
+        // "The system cannot find the file specified."
+        let missing = os_reason(&fs::symlink_metadata(root.join(" report")).unwrap_err());
+        assert_eq!(removed(&[" report"], false, false), (0, vec![(0, missing)]));
 
         // A directory typed as one, or with names on the way that say
         // nothing, is the directory.
