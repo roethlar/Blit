@@ -117,7 +117,12 @@ fn du_prints_the_unix_commands_lines() {
         blocks(&under("a/deep")) >= 292 + 68,
         "what the files hold, in 1K"
     );
-    assert!(blocks(&operand) >= blocks(&under("a")) + blocks(&under("b")));
+    // ci-windows-du-rounding: each line is rounded up to whole 1K blocks on
+    // its own. Off Unix a line counts the bytes its files hold (`Looked::
+    // allocated`), so two children rounded up can show one block more
+    // between them than their parent; Unix counts allocated blocks.
+    let rounding = if cfg!(unix) { 0 } else { 1 };
+    assert!(blocks(&operand) + rounding >= blocks(&under("a")) + blocks(&under("b")));
 
     let all = lines(&blit(&ctx, &["du", "-a", &operand]).out());
     assert_eq!(all.len(), rows.len() + 6, "the six files too");
