@@ -796,6 +796,7 @@ Owner goal 2026-11-20: "continue all work until 100% complete. review with codex
 | ci-macos-eilseq | A move guard makes a name that is not UTF-8, which APFS refuses (`Illegal byte sequence`; `a_moves_account_holds_each_file_as_the_walk_saw_it`). Found by GitHub CI run 45508559853, 2026-11-24 | `[~]` MEDIUM; fixed (the guard no longer assumes a platform it does not hold on; the code under it unchanged); awaiting review | `.review/findings/ci-macos-eilseq.md` |
 | ci-windows-case-note | On Windows the case note's example spellings keep their wildcards (`1*A*2` for `1xAx2`; three `case_fold` guards). Found by GitHub CI run 45508559853, 2026-11-24 | `[ ]` HIGH; admitted | `.review/findings/ci-windows-case-note.md` |
 | ci-windows-rm-call-off | On Windows a removal called off runs to its end (`a_removal_called_off_stops_where_it_is`: Ok(101) where an error was expected). Found by GitHub CI run 45508559853, 2026-11-24 | `[~]` HIGH; fixed (the guard no longer assumes a platform it does not hold on; the code under it unchanged); awaiting review | `.review/findings/ci-windows-rm-call-off.md` |
+| log-relay-cut | A log whose event relay was cut at the close says it lost events only in a diagnostic's words, so a retry takes it as whole and can complete a record from it (cr-ecm40-1's fault, by a third way). Found while fixing cr-ecm40-1, 2026-11-24 | `[ ]` HIGH; admitted | `.review/findings/log-relay-cut.md` |
 
 ## Reconciled legacy finding groups
 
