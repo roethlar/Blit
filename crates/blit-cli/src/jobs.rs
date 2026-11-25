@@ -391,6 +391,11 @@ struct LoggedLeftovers {
     /// whether they left their copy, by identity: for those, `left` is not
     /// the answer.
     left_unknown: HashSet<(String, Option<String>)>,
+    /// cr-ecm40-2: the files whose events SAY what their failure left — a
+    /// failure with its disposition, a copy that landed it, a removal — by
+    /// identity. A file the log never mentions is not among them: absent
+    /// from `left_unknown` says nothing of it.
+    settled: HashSet<(String, Option<String>)>,
 }
 
 /// The failed files that left the run's own incomplete copy, by identity.
@@ -451,9 +456,9 @@ fn dispositions_known(
     }
     if logged.read
         && logged.complete
-        && failed
-            .iter()
-            .all(|identity| !logged.left_unknown.contains(identity))
+        && failed.iter().all(|identity| {
+            logged.settled.contains(identity) && !logged.left_unknown.contains(identity)
+        })
     {
         return Ok(());
     }
@@ -538,7 +543,7 @@ fn failed_identities(
         // revive it; one stream's events never clear another's evidence;
         // what each stream holds at its end is united.
         type Identities = HashSet<(String, Option<String>)>;
-        let mut streams: HashMap<(String, Role), (Identities, Identities, Identities)> =
+        let mut streams: HashMap<(String, Role), (Identities, Identities, Identities, Identities)> =
             HashMap::new();
         for log in found {
             let Ok(lines) = job_log::open_log(&log.path) else {
@@ -548,7 +553,7 @@ fn failed_identities(
             logged.read = true;
             let mut whole = log.finished;
             let mut ended = false;
-            let (left, still_failed, unknown) = streams
+            let (left, still_failed, unknown, said) = streams
                 .entry((log.key.participant().to_string(), log.key.role()))
                 .or_default();
             for line in lines {
@@ -564,6 +569,9 @@ fn failed_identities(
                         ..
                     } => {
                         let identity = (path.clone(), raw.clone());
+                        if left_in_place.is_some() {
+                            said.insert(identity.clone());
+                        }
                         match left_in_place {
                             Some(true) => {
                                 unknown.remove(&identity);
@@ -587,6 +595,7 @@ fn failed_identities(
                         left.remove(&identity);
                         unknown.remove(&identity);
                         still_failed.remove(&identity);
+                        said.insert(identity);
                     }
                     job_log::EventBody::FileSent { path, raw } => {
                         still_failed.remove(&(path, raw));
@@ -597,6 +606,7 @@ fn failed_identities(
                         let identity = (path, raw);
                         left.remove(&identity);
                         unknown.remove(&identity);
+                        said.insert(identity);
                     }
                     job_log::EventBody::RunEnd { .. } => ended = true,
                     job_log::EventBody::LogIncomplete { .. } => whole = false,
@@ -605,9 +615,10 @@ fn failed_identities(
             }
             logged.complete &= whole && ended;
         }
-        for (left, still_failed, unknown) in streams.into_values() {
+        for (left, still_failed, unknown, said) in streams.into_values() {
             logged.left.extend(left);
             logged.left_unknown.extend(unknown);
+            logged.settled.extend(said);
             known.extend(still_failed);
         }
         if legacy && !(logged.read && logged.complete) {
@@ -2263,6 +2274,7 @@ mod retry_name_tests {
             complete: false,
             left: [(text.clone(), raw.clone())].into(),
             left_unknown: HashSet::new(),
+            settled: HashSet::new(),
         };
         assert_eq!(
             own_leftovers(&record, &failed, &names_it).unwrap(),
@@ -2275,6 +2287,7 @@ mod retry_name_tests {
             complete: true,
             left: HashSet::new(),
             left_unknown: HashSet::new(),
+            settled: HashSet::new(),
         };
         assert!(own_leftovers(&record, &failed, &complete_without)
             .unwrap()
@@ -2284,6 +2297,7 @@ mod retry_name_tests {
             complete: false,
             left: HashSet::new(),
             left_unknown: HashSet::new(),
+            settled: HashSet::new(),
         };
         assert!(own_leftovers(&record, &failed, &incomplete_without).is_err());
         // cr-ecm34-6: a complete log whose events do not say — written
@@ -2294,6 +2308,7 @@ mod retry_name_tests {
             complete: true,
             left: HashSet::new(),
             left_unknown: [(text.clone(), raw.clone())].into(),
+            settled: HashSet::new(),
         };
         assert!(own_leftovers(&record, &failed, &complete_unsaid).is_err());
         // cr-ecm35-5: an unknown is its own file's: one for another file
@@ -2303,6 +2318,7 @@ mod retry_name_tests {
             complete: true,
             left: HashSet::new(),
             left_unknown: [("other.txt".to_string(), None)].into(),
+            settled: HashSet::new(),
         };
         assert!(own_leftovers(&record, &failed, &unsaid_elsewhere)
             .unwrap()
@@ -2524,6 +2540,20 @@ mod retry_name_tests {
         assert!(settle(&older(known)).is_ok(), "known: retried");
         let unlogged = "9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c";
         assert!(settle(&older(unlogged)).is_err(), "no log: declined");
+        // cr-ecm40-2: a whole log that never mentions the failed file says
+        // nothing of what it left — declined. Taken as known, the retry said
+        // "Up to date" over the partial.
+        let silent = "9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d";
+        let writer = place
+            .start(silent, 1, Role::Initiator, RunInfo::default())
+            .expect("a log");
+        writer.record(EventBody::FileCopied {
+            path: "other.bin".into(),
+            bytes: None,
+            raw: None,
+        });
+        assert!(writer.finish(Outcome::Failed, None).complete);
+        assert!(settle(&older(silent)).is_err(), "never mentioned: declined");
         let mut written_so = older(unlogged);
         written_so.dispositions_exact = true;
         assert!(
