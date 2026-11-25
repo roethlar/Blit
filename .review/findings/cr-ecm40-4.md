@@ -1,9 +1,9 @@
 # cr-ecm40-4: the sender announced the bytes of the entries the destination refuses
 
 **Severity**: MEDIUM — the log names a file it sent as its sibling. cr-ecm39-4's remaining half.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r42` (Codex openreview, 2026-11-25) reviewed `b6e6fab9..e2c2e08d` — the `combined-r41` fixes, log-relay-cut and GitHub CI's seven — with `guard_confirmed: true`: "I would keep the held-directory walk, the identity check when it reopens a parent, and the change that marks a collapsed failure list incomplete. I found six corrections the approach still needs." "A `NeedBatch` removes the first header from the sender's map. A later byte-named sibling can then appear to be the first entry with that display text. With 8,192 intervening manifest entries, the receiver wrote only the UTF-8 file `dup�`, but the sender logged it as `dup\xff`. Emit the completion identity from the granted header or retain a consumed marker for the whole pass." The remaining work is cr-ecm41-3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm40-4`)
+**Commit**: `d7d6d816`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r41` over `d7f5f5e9..b6e6fab9` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r41.codex.md`.
 
 ## Evidence

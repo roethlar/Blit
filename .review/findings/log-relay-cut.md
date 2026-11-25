@@ -1,9 +1,9 @@
 # log-relay-cut: a log whose relay was cut at its close said it lost events only in words
 
 **Severity**: HIGH — a retry completes a short record from a log that lost events: cr-ecm40-1's fault, by a third way.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r42` (Codex openreview, 2026-11-25) reviewed `b6e6fab9..e2c2e08d` — the `combined-r41` fixes, log-relay-cut and GitHub CI's seven — with `guard_confirmed: true`: "I would keep the held-directory walk, the identity check when it reopens a parent, and the change that marks a collapsed failure list incomplete. I found six corrections the approach still needs." "I gave `jobs retry` a truncated record and a log modeled on the previous writer's relay-cut output. Its sequence was contiguous because the lost events never reached the writer. The retry exited 0, overwrote a file that had landed, and left the actual failed file missing. Record successful relay drainage explicitly and decline reconstruction from older logs that cannot establish it. Propagate that fact to the caller too. With the new writer, I observed `LogIncomplete` on disk alongside `LogReport.complete == true`." The remaining work is cr-ecm41-1
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix log-relay-cut`)
+**Commit**: `c52f2b59`
 **Reviewer**: none — found outside a review, while fixing cr-ecm40-1; for the next openreview.
 
 ## Evidence

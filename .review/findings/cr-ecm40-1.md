@@ -1,9 +1,9 @@
 # cr-ecm40-1: a log recovery finished, or one with a gap, completed a short record
 
 **Severity**: HIGH — a retry overwrites a file that landed, and leaves out one that failed.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r42` (Codex openreview, 2026-11-25) reviewed `b6e6fab9..e2c2e08d` — the `combined-r41` fixes, log-relay-cut and GitHub CI's seven — with `guard_confirmed: true`: "I would keep the held-directory walk, the identity check when it reopens a parent, and the change that marks a collapsed failure list incomplete. I found six corrections the approach still needs." "I gave `jobs retry` a truncated record and a log modeled on the previous writer's relay-cut output. Its sequence was contiguous because the lost events never reached the writer. The retry exited 0, overwrote a file that had landed, and left the actual failed file missing. Record successful relay drainage explicitly and decline reconstruction from older logs that cannot establish it. Propagate that fact to the caller too. With the new writer, I observed `LogIncomplete` on disk alongside `LogReport.complete == true`." "A complete destination log identified `missing` as the sole failed file. After I omitted two middle events, the detached reader still reported the log complete and produced an untruncated record naming `landed` instead. Validate sequence continuity and terminal summary/end ordering for each session before either reader trusts it." The remaining work is cr-ecm41-1 and -2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm40-1`)
+**Commit**: `15fcd228`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r41` over `d7f5f5e9..b6e6fab9` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r41.codex.md`.
 
 ## Evidence

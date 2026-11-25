@@ -1,9 +1,9 @@
 # cr-ecm40-5: an absolute alias to a directory beneath the root was refused
 
 **Severity**: MEDIUM — a copy and a resume fail for a file inside the destination. Brought in by cr-ecm39-5.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r42` (Codex openreview, 2026-11-25) reviewed `b6e6fab9..e2c2e08d` — the `combined-r41` fixes, log-relay-cut and GitHub CI's seven — with `guard_confirmed: true`: "I would keep the held-directory walk, the identity check when it reopens a parent, and the change that marks a collapsed failure list incomplete. I found six corrections the approach still needs." "On Linux, `dst/entry` pointed through an absolute alias to an existing `dst/sub/file`. Both `copy` and `copy --resume` exited 2 and left the old bytes in place. The resolver skips the canonical leaf because it is a regular file, then examines the alias's outside parent. Resolve the leaf when following it and verify its resolved parent against the held root." The remaining work is cr-ecm41-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm40-5`)
+**Commit**: `89b107d6`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r41` over `d7f5f5e9..b6e6fab9` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r41.codex.md`.
 
 ## Evidence

@@ -1,9 +1,9 @@
 # ci-listing-case: two listing guards made `A.txt` beside `a.txt`
 
 **Severity**: MEDIUM — the guards fail on a case-insensitive filesystem (macOS, Windows); the code is right.
-**Status**: Fixed (the guard); awaiting the next CI run on the platform that failed it
+**Status**: Verified — GitHub CI run 45520218555 at `e2c2e08d` (2026-11-25): blit-core's library tests, this guard among them, passed on Linux, macOS and Windows.
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix ci-listing-case`)
+**Commit**: `ccd1d177`
 **Reviewer**: none — found by GitHub CI run 45508559853 at `b6e6fab9`, 2026-11-24 — the first CI since 2026-10-24, after the owner pushed to GitHub; for the next openreview.
 
 ## Evidence

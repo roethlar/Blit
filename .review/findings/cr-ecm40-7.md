@@ -1,9 +1,9 @@
 # cr-ecm40-7: the kernel-walk guard assumed `openat2`
 
 **Severity**: MEDIUM — a guard fails where the seam or the host leaves the walk to serve; the code is right. Brought in by cr-ecm39-6.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r42` (Codex openreview, 2026-11-25) reviewed `b6e6fab9..e2c2e08d` — the `combined-r41` fixes, log-relay-cut and GitHub CI's seven — with `guard_confirmed: true`: "I would keep the held-directory walk, the identity check when it reopens a parent, and the change that marks a collapsed failure list incomplete. I found six corrections the approach still needs." "On a kernel where a valid `openat2` succeeded, I introduced an invalid mode. The guard printed `no openat2 here` and passed. Probe capability independently and fail on unexpected errors." The remaining work is cr-ecm41-6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm40-7`)
+**Commit**: `2b605ed7`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r41` over `d7f5f5e9..b6e6fab9` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r41.codex.md`.
 
 ## Evidence

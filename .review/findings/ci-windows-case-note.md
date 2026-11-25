@@ -1,9 +1,9 @@
 # ci-windows-case-note: three case-note guards assumed a host that reads paths as Unix does
 
 **Severity**: MEDIUM — three guards fail on Windows; the code does there what its design says (admitted HIGH while its cause was unknown).
-**Status**: Fixed (the guards); awaiting the next CI run on Windows
+**Status**: Verified — GitHub CI run 45520218555 at `e2c2e08d` (2026-11-25): blit-core's library tests, this guard among them, passed on Linux, macOS and Windows.
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix ci-windows-case-note`)
+**Commit**: `2c2573bb`
 **Reviewer**: none — found by GitHub CI run 45508559853 at `b6e6fab9`, 2026-11-24 — the first CI since 2026-10-24, after the owner pushed to GitHub; for the next openreview.
 
 ## Evidence

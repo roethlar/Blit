@@ -1,9 +1,9 @@
 # ci-macos-block-hold: a resume guard noted byte names on a destination that stores none
 
 **Severity**: MEDIUM — a guard fails on macOS; the code refuses there as it should.
-**Status**: Fixed (the guard); awaiting the next CI run on the platform that failed it
+**Status**: Verified — GitHub CI run 45520218555 at `e2c2e08d` (2026-11-25): blit-core's library tests, this guard among them, passed on Linux, macOS and Windows.
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix ci-macos-block-hold`)
+**Commit**: `e2b34f80`
 **Reviewer**: none — found by GitHub CI run 45508559853 at `b6e6fab9`, 2026-11-24 — the first CI since 2026-10-24, after the owner pushed to GitHub; for the next openreview.
 
 ## Evidence

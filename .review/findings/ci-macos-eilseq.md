@@ -1,9 +1,9 @@
 # ci-macos-eilseq: a move guard made a name that is not text on a filesystem that refuses one
 
 **Severity**: MEDIUM — a guard fails on macOS; the code is right.
-**Status**: Fixed (the guard); awaiting the next CI run on the platform that failed it
+**Status**: Verified — GitHub CI run 45520218555 at `e2c2e08d` (2026-11-25): blit-core's library tests, this guard among them, passed on Linux, macOS and Windows.
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix ci-macos-eilseq`)
+**Commit**: `95234b92`
 **Reviewer**: none — found by GitHub CI run 45508559853 at `b6e6fab9`, 2026-11-24 — the first CI since 2026-10-24, after the owner pushed to GitHub; for the next openreview.
 
 ## Evidence
