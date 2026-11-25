@@ -275,7 +275,8 @@ struct State {
     error: Option<String>,
     /// The task draining the audit lane into the log, and the lane's
     /// planned totals.
-    relay: Option<tokio::task::JoinHandle<()>>,
+    /// cr-ecm42-3: whether it, and every relay before it, drained.
+    relay: Option<tokio::task::JoinHandle<bool>>,
     planned: Option<Arc<PlannedTotals>>,
     disposition: Disposition,
     /// The closed log's non-UTF-8 names, kept for the run's record (review
@@ -506,10 +507,13 @@ impl RunLog {
         state.planned = Some(planned);
         state.relay = Some(tokio::spawn(async move {
             // One lane at a time, in order: an earlier pass's events land
-            // before this one's.
-            if let Some(earlier) = earlier {
-                let _ = earlier.await;
-            }
+            // before this one's. cr-ecm42-3: and whether that one drained
+            // is carried on — one that was cut, failed or stopped with its
+            // runtime lost its events, and the chain was taken as drained.
+            let earlier_drained = match earlier {
+                Some(earlier) => matches!(earlier.await, Ok(true)),
+                None => true,
+            };
             // cr-ecm39-4: the names this lane's pass heard, its own — one
             // entry for each text, as its manifest grants — so a file is
             // named by the bytes of its own pass, never another's.
@@ -517,6 +521,7 @@ impl RunLog {
             while let Some(event) = receiver.recv().await {
                 log.observe_from(&event, end, Some(&mut names)).await;
             }
+            earlier_drained
         }));
         Some(sender)
     }
@@ -699,17 +704,26 @@ impl RunLog {
     ) -> Option<ClosingLog> {
         // Every fact the transfer reported reaches the log before it closes:
         // the relay ends once the transfer has dropped its senders.
-        let relay = self.state().relay.take();
+        // cr-ecm42-3: drained only where the relay, and every relay before
+        // it, ended draining — not cut, failed, or stopped with its runtime;
+        // and a close dropped while it waits puts the relay back for the next.
+        let mut pending = PendingRelay {
+            log: self,
+            relay: self.state().relay.take(),
+        };
         let mut relay_cut = false;
-        if let Some(mut relay) = relay {
-            if tokio::time::timeout(RELAY_DRAIN_LIMIT, &mut relay)
-                .await
-                .is_err()
-            {
-                relay.abort();
-                relay_cut = true;
+        if let Some(relay) = pending.relay.as_mut() {
+            match tokio::time::timeout(RELAY_DRAIN_LIMIT, &mut *relay).await {
+                Ok(Ok(true)) => {}
+                Ok(_) => relay_cut = true,
+                Err(_) => {
+                    relay.abort();
+                    relay_cut = true;
+                }
             }
         }
+        // Settled: drained, or cut and told.
+        pending.relay = None;
         let (mut active, notes, totals, error, run_id, planned, disposition) = {
             let mut state = self.state();
             let active = state.active.take()?;
@@ -864,6 +878,23 @@ impl RunLog {
             run_id,
             events_lost: relay_cut,
         })
+    }
+}
+
+/// cr-ecm42-3: the relay a close has taken to wait for, put back if that close
+/// is dropped before it settles, so a close tried again waits for it in
+/// turn. Dropped with the close, it was forgotten: a close tried again found
+/// none, and said every event had reached the log.
+struct PendingRelay<'a> {
+    log: &'a RunLog,
+    relay: Option<tokio::task::JoinHandle<bool>>,
+}
+
+impl Drop for PendingRelay<'_> {
+    fn drop(&mut self) {
+        if let Some(relay) = self.relay.take() {
+            self.log.state().relay = Some(relay);
+        }
     }
 }
 
@@ -1527,6 +1558,121 @@ mod tests {
             ),
             "its summary holds the evidence"
         );
+    }
+
+    /// What a finished log's summary says, and its report.
+    fn summary_in(path: &std::path::Path) -> crate::job_log::Summary {
+        use crate::job_log::{open_log, LogLine};
+        open_log(path)
+            .unwrap()
+            .find_map(|line| match line {
+                Ok(LogLine::Event(event)) => match event.body {
+                    EventBody::Summary(summary) => Some(summary),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("a summary")
+    }
+
+    /// cr-ecm42-3: a close dropped while it waits for the relay puts it back,
+    /// and a close tried again waits for it: past the limit, the relay is cut
+    /// and the log says so; drained, its event is there. Dropped with the
+    /// first close, the relay was forgotten, and the second said every event
+    /// had reached the log, with none of them in it.
+    #[tokio::test(start_paused = true)]
+    async fn a_close_tried_again_waits_for_the_relay_the_first_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = || {
+            Some(LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: DEFAULT_KEEP,
+                finished: None,
+            })
+        };
+        for (run_id, let_go) in [
+            ("2123456789abcdef0123456789abcdef", false),
+            ("3123456789abcdef0123456789abcdef", true),
+        ] {
+            let log = RunLog::new(place(), run_id);
+            log.start(Role::Initiator, RunInfo::default(), None);
+            let held = crate::remote::transfer::RemoteTransferProgress::audit_only(
+                log.audit_lane_at(End::Receiving).expect("a lane"),
+            );
+            held.report_file_failed("a.txt".into(), "denied".into())
+                .await;
+            let first = tokio::time::timeout(
+                Duration::from_millis(1),
+                log.close(Outcome::Failed, None, Some(RunTotals::default())),
+            )
+            .await;
+            assert!(first.is_err(), "the first close interrupted");
+            if let_go {
+                drop(held);
+                let report = log
+                    .close(Outcome::Failed, None, Some(RunTotals::default()))
+                    .await
+                    .expect("a report");
+                assert!(report.complete, "{report:?}");
+                let path = report.path.expect("a log");
+                assert!(summary_in(&path).all_events_logged);
+                let failed = crate::job_log::open_log(&path).unwrap().any(|line| {
+                    matches!(line, Ok(crate::job_log::LogLine::Event(event))
+                        if matches!(event.body, EventBody::FileFailed { .. }))
+                });
+                assert!(failed, "the relay's event is in the log");
+            } else {
+                let report = log
+                    .close(Outcome::Failed, None, Some(RunTotals::default()))
+                    .await
+                    .expect("a report");
+                drop(held);
+                assert!(!report.complete, "{report:?}");
+                assert!(!summary_in(&report.path.expect("a log")).all_events_logged);
+            }
+        }
+    }
+
+    /// cr-ecm42-3: a relay stopped with its runtime lost its events, and a
+    /// later lane's relay, chained after it, carries that on: the close is
+    /// told the relay was cut. Waiting on the stopped one and going on, the
+    /// chain was taken as drained.
+    #[test]
+    fn a_relay_stopped_with_its_runtime_is_not_taken_for_drained() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = RunLog::new(
+            Some(LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: DEFAULT_KEEP,
+                finished: None,
+            }),
+            "4123456789abcdef0123456789abcdef",
+        );
+        let gone = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let earlier = gone.block_on(async {
+            log.start(Role::Initiator, RunInfo::default(), None);
+            log.audit_lane_at(End::Receiving).expect("a lane")
+        });
+        drop(gone);
+        let here = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let report = here.block_on(async {
+            let later = log.audit_lane_at(End::Receiving).expect("a lane");
+            drop(later);
+            drop(earlier);
+            log.close(Outcome::Failed, None, Some(RunTotals::default()))
+                .await
+                .expect("a report")
+        });
+        assert!(!report.complete, "{report:?}");
+        assert!(!summary_in(&report.path.expect("a log")).all_events_logged);
     }
 
     /// log-named-text: a failure the account names by its text alone is a
