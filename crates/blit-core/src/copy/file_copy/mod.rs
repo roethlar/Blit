@@ -1541,6 +1541,56 @@ mod mode_tests {
         assert!(root.join("sub").join("c").is_dir());
     }
 
+    /// cr-ecm40-5 (Linux): an absolute link within the destination through an
+    /// alias of a directory BENEATH the root is followed: written through,
+    /// and a directory made through it, with `openat2` and without; through
+    /// an alias of a directory outside, refused. Placed by the alias's own
+    /// names, no ancestor of it was the root, and the copy failed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_absolute_link_through_an_alias_beneath_the_root_is_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("dst").join("sub")).unwrap();
+        std::fs::create_dir_all(dir.path().join("outside")).unwrap();
+        let root = std::fs::canonicalize(dir.path().join("dst")).unwrap();
+        std::os::unix::fs::symlink(root.join("sub"), dir.path().join("subalias")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("outside"), dir.path().join("outalias"))
+            .unwrap();
+        let through = dir.path().join("subalias");
+        std::os::unix::fs::symlink(through.join("target.bin"), root.join("link.bin")).unwrap();
+        std::os::unix::fs::symlink(&through, root.join("into")).unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("outalias").join("x.bin"),
+            root.join("out.bin"),
+        )
+        .unwrap();
+        let within = Within::hold(&root);
+        for refused in [false, true] {
+            std::fs::write(root.join("sub").join("target.bin"), b"old").unwrap();
+            super::NO_OPENAT2.with(|seam| seam.set(refused));
+            let written = open_to_write(&root.join("link.bin"), Some(&within), false);
+            let made = create_dirs_within(&root.join("into").join("c"), Some(&within));
+            let out = open_to_write(&root.join("out.bin"), Some(&within), false);
+            super::NO_OPENAT2.with(|seam| seam.set(false));
+            let mut written = written.unwrap_or_else(|e| panic!("no openat2: {refused}: {e}"));
+            std::io::Write::write_all(&mut written, b"new").unwrap();
+            drop(written);
+            assert_eq!(
+                std::fs::read(root.join("sub").join("target.bin")).unwrap(),
+                b"new",
+                "no openat2: {refused}"
+            );
+            made.unwrap_or_else(|e| panic!("no openat2: {refused}: {e}"));
+            assert!(root.join("sub").join("c").is_dir(), "no openat2: {refused}");
+            std::fs::remove_dir(root.join("sub").join("c")).unwrap();
+            assert!(
+                out.is_err(),
+                "no openat2: {refused}: out of the destination"
+            );
+            assert!(!dir.path().join("outside").join("x.bin").exists());
+        }
+    }
+
     /// cr-ecm39-5 (Linux): a name written as a directory is no file, with
     /// `openat2` and without: nothing is made. Its place found by its names
     /// alone, a regular file was made at it.

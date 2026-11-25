@@ -921,9 +921,12 @@ impl<'a> Walk<'a> {
 
     /// cr-ecm39-5: where an absolute `target` lies beneath the root when it
     /// names it by another path — an alias — told by the directory's
-    /// identity: the ancestor of `target` that IS the root. By its path
-    /// alone, a second absolute name for the destination led out, and the
-    /// copy the base had made through it failed.
+    /// identity: the ancestor that IS the root. By its path alone, a second
+    /// absolute name for the destination led out, and the copy the base had
+    /// made through it failed. cr-ecm40-5: the ancestors of the real path of
+    /// the deepest directory of `target` there is, its links resolved — an
+    /// alias to a directory BENEATH the root has no ancestor that is the
+    /// root by its own names, and was refused.
     fn alias_place(&self, target: &Path) -> Option<std::path::PathBuf> {
         use std::os::unix::fs::MetadataExt as _;
         // SAFETY: `stat` is plain integers, filled by the call.
@@ -933,12 +936,26 @@ impl<'a> Walk<'a> {
         if unsafe { libc::fstat(self.root, &mut root) } < 0 {
             return None;
         }
-        target.ancestors().find_map(|ancestor| {
-            let found = std::fs::metadata(ancestor).ok()?;
-            (found.is_dir() && found.dev() == root.st_dev && found.ino() == root.st_ino)
-                .then(|| target.strip_prefix(ancestor).ok().map(Path::to_path_buf))
-                .flatten()
-        })
+        for ancestor in target.ancestors() {
+            let Ok(real) = std::fs::canonicalize(ancestor) else {
+                continue;
+            };
+            if !std::fs::metadata(&real).is_ok_and(|found| found.is_dir()) {
+                continue;
+            }
+            let rest = target.strip_prefix(ancestor).ok()?;
+            return real.ancestors().find_map(|above| {
+                let found = std::fs::metadata(above).ok()?;
+                (found.dev() == root.st_dev && found.ino() == root.st_ino)
+                    .then(|| {
+                        real.strip_prefix(above)
+                            .ok()
+                            .map(|inside| inside.join(rest))
+                    })
+                    .flatten()
+            });
+        }
+        None
     }
 
     fn is_link(&self, name: &std::ffi::CStr) -> std::io::Result<bool> {
