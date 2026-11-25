@@ -1674,16 +1674,49 @@ mod mode_tests {
     #[test]
     fn an_ordinary_path_is_walked_by_the_kernel() {
         let (_dir, within, file) = a_deep_path();
-        // cr-ecm40-7: only where the kernel can walk beneath the root — the
-        // seam, or a host without `openat2`, leaves the walk to serve, and
+        // cr-ecm40-7: only where the kernel can walk beneath the root — a
+        // host without `openat2` leaves the walk to serve, and
         // `a_deep_walk_holds_one_directory_at_a_time` is its guard.
+        // cr-ecm41-6: asked of the kernel by a call of the guard's own, and
+        // only its absence stands the guard down. Asked by the code's own
+        // call, any failure of it — a broken call — was taken for absence.
         {
             use std::os::unix::io::AsRawFd as _;
             let held = within.held.as_ref().expect("held").as_raw_fd();
-            if openat2_beneath(held, Path::new("."), libc::O_PATH | libc::O_DIRECTORY, 0).is_err() {
-                eprintln!("no openat2 here: the kernel's walk is not what serves");
-                return;
+            // SAFETY: `open_how` is plain integers; zero is each field's
+            // empty value, and the two the probe needs are set below.
+            let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+            how.flags = (libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) as u64;
+            how.resolve = libc::RESOLVE_BENEATH;
+            // SAFETY: `held` is open for the call; the path is NUL-terminated
+            // and `how` a properly sized `open_how`, both outliving it.
+            let probed = unsafe {
+                libc::syscall(
+                    libc::SYS_openat2,
+                    held,
+                    c".".as_ptr(),
+                    &how as *const libc::open_how,
+                    std::mem::size_of::<libc::open_how>(),
+                )
+            };
+            if probed < 0 {
+                let error = std::io::Error::last_os_error();
+                match error.raw_os_error() {
+                    Some(libc::ENOSYS) | Some(libc::EPERM) => {
+                        eprintln!(
+                            "no openat2 here ({error}): the kernel's walk is not what serves"
+                        );
+                        return;
+                    }
+                    _ => panic!("openat2 refused a plain call: {error}"),
+                }
             }
+            // SAFETY: `probed` is an open descriptor nothing else owns.
+            drop(unsafe {
+                <std::os::unix::io::OwnedFd as std::os::unix::io::FromRawFd>::from_raw_fd(
+                    probed as i32,
+                )
+            });
         }
         super::resume::WALK_HELD.with(|(now, most)| most.set(now.get()));
         let before = super::resume::WALK_HELD.with(|(now, _)| now.get());
