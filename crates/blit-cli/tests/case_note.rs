@@ -1094,6 +1094,37 @@ fn the_line_claims_only_what_the_mirror_then_does() {
                 );
             }
         }
+        // cr-ecm42-7: and each entry on its own, in a destination of its own.
+        // On a filesystem that folds case two spellings are one entry, and
+        // the run with all of them checks none; alone, each is itself. Run
+        // with all of them only, a wrong removal of `xA` passed there.
+        for (n, (entry, kept_as_typed, kept_ignoring_case)) in case.entries.iter().enumerate() {
+            let alone = tmp.path().join(format!("alone{n}"));
+            let to = with_slash(&alone);
+            for (mode, kept) in [
+                (None, kept_as_typed),
+                (Some("--ignore-case"), kept_ignoring_case),
+            ] {
+                write(&alone, entry);
+                let mut run = args.clone();
+                run.push("-y");
+                run.extend(mode);
+                let ran = blit(tmp.path(), &[&run[..], &[&from, &to]].concat(), None);
+                assert_eq!(
+                    ran.code,
+                    Some(0),
+                    "{:?}, {entry} alone: {}",
+                    case.excludes,
+                    ran.all()
+                );
+                assert_eq!(
+                    alone.join(entry).exists(),
+                    *kept,
+                    "{:?}, {entry} alone, {mode:?}",
+                    case.excludes
+                );
+            }
+        }
     }
 }
 
