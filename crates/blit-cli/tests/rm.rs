@@ -543,7 +543,21 @@ fn rm_asks_of_a_directory_what_the_system_rm_asks() {
 fn a_name_in_a_message_is_written_as_the_system_commands_write_it() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::process::CommandExt as _;
 
+    // ci-linux-du-reference: the reference is GNU's — its way of writing a
+    // name is what this guard holds ours to. CI's `ubuntu-26.04` has uutils
+    // as `du`, which writes `bad\xff.dat` as `$'bad\xFF.dat'`, and GNU's as
+    // `gnudu`; so `rm`, `du` and `df` are GNU's wherever they are installed.
+    // `find` is findutils, not coreutils.
+    let coreutils: Vec<_> = ["rm", "du", "df"]
+        .into_iter()
+        .map(|tool| (tool, common::gnu_coreutils(tool)))
+        .collect();
+    if let Some((tool, _)) = coreutils.iter().find(|(_, gnu)| gnu.is_none()) {
+        eprintln!("no GNU {tool} here, the reference: nothing is compared with it");
+        return;
+    }
     let ctx = TestContext::new();
     let elsewhere = ctx.workspace.join("system");
     fs::create_dir_all(&elsewhere).unwrap();
@@ -586,7 +600,16 @@ fn a_name_in_a_message_is_written_as_the_system_commands_write_it() {
             ("df", &[][..], name),
             ("find", &[][..], &beside[..]),
         ] {
-            let mut system = Command::new(verb);
+            let mut system = match coreutils.iter().find(|(tool, _)| *tool == verb) {
+                // Called by its own name: GNU names itself by what it was
+                // called (cr-ecm42-5).
+                Some((_, Some(gnu))) => {
+                    let mut gnu = Command::new(gnu);
+                    gnu.arg0(verb);
+                    gnu
+                }
+                _ => Command::new(verb),
+            };
             if verb != "find" {
                 system.arg("--");
             }
