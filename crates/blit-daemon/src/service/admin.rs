@@ -1676,9 +1676,18 @@ mod typed_operand_tests {
         assert!(root.join("report").exists() && !root.join("report ").exists());
         // ci-windows-missing-text: in the system's own words for a name
         // that is not there — Unix's were expected, and Windows says
-        // "The system cannot find the file specified."
-        let missing = os_reason(&fs::symlink_metadata(root.join(" report")).unwrap_err());
-        assert_eq!(removed(&[" report"], false, false), (0, vec![(0, missing)]));
+        // "The system cannot find the file specified." cr-ecm43-7: written
+        // here, as each system writes them, not asked of `os_reason`, the
+        // formatter this checks.
+        let missing = if cfg!(windows) {
+            "The system cannot find the file specified."
+        } else {
+            "No such file or directory"
+        };
+        assert_eq!(
+            removed(&[" report"], false, false),
+            (0, vec![(0, missing.to_string())])
+        );
 
         // A directory typed as one, or with names on the way that say
         // nothing, is the directory.
