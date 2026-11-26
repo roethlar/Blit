@@ -924,7 +924,7 @@ impl<'a> Walk<'a> {
         if target.is_absolute() {
             let place = match self.within.place(target) {
                 Some(place) => place,
-                None => self.alias_place(target).ok_or_else(|| self.leads_out())?,
+                None => self.alias_place(target)?.ok_or_else(|| self.leads_out())?,
             };
             self.here = None;
             self.names.clear();
@@ -948,23 +948,26 @@ impl<'a> Walk<'a> {
     /// asked instead, and the file was refused. cr-ecm42-4: and a part that
     /// is a link to nothing is followed to where it points ([`real_path`]):
     /// an alias to a file not yet made had no real path, its outside parent
-    /// was asked, and the file was refused.
-    fn alias_place(&self, target: &Path) -> Option<std::path::PathBuf> {
+    /// was asked, and the file was refused. cr-ecm43-1: resolved as the
+    /// kernel resolves it ([`real_path`]), its links counted on the walk's
+    /// own count; what the kernel refuses is refused, in its words — `None`
+    /// only where it leads out.
+    fn alias_place(&mut self, target: &Path) -> std::io::Result<Option<std::path::PathBuf>> {
         use std::os::unix::fs::MetadataExt as _;
         // SAFETY: `stat` is plain integers, filled by the call.
         let mut root: libc::stat = unsafe { std::mem::zeroed() };
         // SAFETY: `self.root` is open for the call and `root` a properly
         // sized `stat` that outlives it.
         if unsafe { libc::fstat(self.root, &mut root) } < 0 {
-            return None;
+            return Err(std::io::Error::last_os_error());
         }
-        let real = real_path(target, &mut 0)?;
-        real.ancestors().find_map(|above| {
+        let real = real_path(target, &mut self.links)?;
+        Ok(real.ancestors().find_map(|above| {
             let found = std::fs::metadata(above).ok()?;
             (found.dev() == root.st_dev && found.ino() == root.st_ino)
                 .then(|| real.strip_prefix(above).ok().map(Path::to_path_buf))
                 .flatten()
-        })
+        }))
     }
 
     fn is_link(&self, name: &std::ffi::CStr) -> std::io::Result<bool> {
@@ -1052,35 +1055,101 @@ fn identity_of(directory: std::os::unix::io::RawFd) -> std::io::Result<(libc::de
     Ok((found.st_dev, found.st_ino))
 }
 
-/// cr-ecm42-4: `path`'s real path, as the system would follow it, its last
-/// parts allowed not to exist: what exists resolved (`canonicalize`), a link
-/// to nothing followed to where it points (at most [`MAX_FOLLOWED_LINKS`]),
-/// and a name that is not there kept after its parent's real path.
+/// cr-ecm42-4: the absolute `path`'s real path, as the system would follow
+/// it, its last name allowed not to exist — kept after its parent's real
+/// path — and a link to nothing followed to where it points.
+///
+/// cr-ecm43-1: resolved as the kernel resolves it, a name at a time from
+/// `/`: every link counted on `links`, the count of the whole walk this
+/// resolution is part of, and refused past [`MAX_FOLLOWED_LINKS`] (`ELOOP`);
+/// a name a `/` or `/.` follows — as typed, or in a link's text — asked to
+/// be a directory (`ENOTDIR`); and only a LAST name that is not there taken
+/// as missing, any other error the kernel's. Resolved by `canonicalize`,
+/// with a count of its own begun at 0, a chain the kernel refused was
+/// followed and the file at its end truncated; and a link to `leaf/` was
+/// taken for `leaf`, whose bytes were written over.
 #[cfg(target_os = "linux")]
-fn real_path(path: &Path, links: &mut usize) -> Option<std::path::PathBuf> {
-    if let Ok(real) = std::fs::canonicalize(path) {
-        return Some(real);
+fn real_path(path: &Path, links: &mut usize) -> std::io::Result<std::path::PathBuf> {
+    use std::collections::VecDeque;
+    use std::ffi::OsString;
+    /// What the resolved part names.
+    #[derive(PartialEq)]
+    enum Found {
+        Directory,
+        Other,
+        Missing,
     }
-    match std::fs::symlink_metadata(path) {
-        Ok(found) if found.file_type().is_symlink() => {
-            *links += 1;
-            if *links > MAX_FOLLOWED_LINKS {
-                return None;
+    /// `text`'s names, `..` kept, and `.` after the last where `text` asks
+    /// for a directory there.
+    fn names_of(text: &Path) -> VecDeque<OsString> {
+        let mut names: VecDeque<OsString> = text
+            .components()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(name) => Some(name.to_os_string()),
+                std::path::Component::ParentDir => Some("..".into()),
+                _ => None,
+            })
+            .collect();
+        if typed_as_directory(text) {
+            names.push_back(".".into());
+        }
+        names
+    }
+    if !path.is_absolute() {
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    }
+    let mut real = std::path::PathBuf::from("/");
+    let mut found = Found::Directory;
+    let mut rest = names_of(path);
+    while let Some(name) = rest.pop_front() {
+        match found {
+            Found::Directory => {}
+            // A name, `..` or `.` after what is no directory.
+            Found::Other => return Err(std::io::Error::from_raw_os_error(libc::ENOTDIR)),
+            // Missing, and not the last name.
+            Found::Missing if name == "." => {
+                return Err(std::io::Error::from_raw_os_error(libc::ENOTDIR))
             }
-            let text = std::fs::read_link(path).ok()?;
-            let next = if text.is_absolute() {
-                text
-            } else {
-                path.parent()?.join(text)
-            };
-            real_path(&next, links)
+            Found::Missing => return Err(std::io::Error::from_raw_os_error(libc::ENOENT)),
         }
-        Ok(_) => None,
-        Err(_) => {
-            let name = path.file_name()?;
-            Some(real_path(path.parent()?, links)?.join(name))
+        if name == "." {
+            continue;
+        }
+        if name == ".." {
+            real.pop();
+            continue;
+        }
+        let candidate = real.join(&name);
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(there) if there.file_type().is_symlink() => {
+                *links += 1;
+                if *links > MAX_FOLLOWED_LINKS {
+                    return Err(std::io::Error::from_raw_os_error(libc::ELOOP));
+                }
+                let text = std::fs::read_link(&candidate)?;
+                if text.is_absolute() {
+                    real = std::path::PathBuf::from("/");
+                }
+                for spliced in names_of(&text).into_iter().rev() {
+                    rest.push_front(spliced);
+                }
+            }
+            Ok(there) => {
+                found = if there.is_dir() {
+                    Found::Directory
+                } else {
+                    Found::Other
+                };
+                real = candidate;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                found = Found::Missing;
+                real = candidate;
+            }
+            Err(error) => return Err(error),
         }
     }
+    Ok(real)
 }
 
 #[cfg(target_os = "linux")]

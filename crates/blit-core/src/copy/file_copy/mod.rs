@@ -1638,6 +1638,98 @@ mod mode_tests {
         }
     }
 
+    /// cr-ecm43-1 (Linux): an alias is followed as the kernel follows it,
+    /// the kernel asked the same path for the answer; with `openat2` and
+    /// without, to make, to write and to resume. Through an outside alias
+    /// whose link asks for a directory — `leaf/`, `leaf/.` — no file is had,
+    /// `leaf` there or not, and `leaf` is left as it was; and a chain of
+    /// links the kernel refuses (`ELOOP`) is refused, the file at its end
+    /// untouched. Resolved by `canonicalize` with a count of its own, the
+    /// first wrote over `leaf` and the second truncated it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_alias_is_followed_as_the_kernel_follows_it() {
+        // Whether each way refused: to make, to write, to resume.
+        let refuses = |entry: &std::path::Path, within: &Within| {
+            [
+                create_regular_within(entry, Some(within)).is_err(),
+                open_to_write(entry, Some(within), false).is_err(),
+                super::resume::resolve_destination(entry, Some(within)).is_err(),
+            ]
+        };
+        for refused in [false, true] {
+            super::NO_OPENAT2.with(|seam| seam.set(refused));
+            for suffix in ["/", "/."] {
+                for existing in [true, false] {
+                    let dir = tempfile::tempdir().unwrap();
+                    std::fs::create_dir_all(dir.path().join("dst").join("sub")).unwrap();
+                    let root = std::fs::canonicalize(dir.path().join("dst")).unwrap();
+                    let leaf = root.join("sub").join("leaf");
+                    if existing {
+                        std::fs::write(&leaf, b"original").unwrap();
+                    }
+                    let mut text = leaf.clone().into_os_string();
+                    text.push(suffix);
+                    std::os::unix::fs::symlink(&text, dir.path().join("alias")).unwrap();
+                    let entry = root.join("entry");
+                    std::os::unix::fs::symlink(dir.path().join("alias"), &entry).unwrap();
+                    let kernel = std::fs::metadata(&entry).unwrap_err().raw_os_error();
+                    let what = format!("no openat2: {refused}: {suffix:?}, there: {existing}");
+                    assert_eq!(
+                        kernel,
+                        Some(if existing {
+                            libc::ENOTDIR
+                        } else {
+                            libc::ENOENT
+                        }),
+                        "{what}"
+                    );
+                    assert_eq!(refuses(&entry, &Within::hold(&root)), [true; 3], "{what}");
+                    if existing {
+                        assert_eq!(std::fs::read(&leaf).unwrap(), b"original", "{what}");
+                    } else {
+                        assert!(!leaf.exists(), "{what}");
+                    }
+                }
+            }
+            // The entry's link, then a chain of outside aliases to the file.
+            for (aliases, existing) in [(39, false), (40, false), (42, true)] {
+                let dir = tempfile::tempdir().unwrap();
+                std::fs::create_dir_all(dir.path().join("dst")).unwrap();
+                let root = std::fs::canonicalize(dir.path().join("dst")).unwrap();
+                let leaf = root.join("leaf");
+                if existing {
+                    std::fs::write(&leaf, b"existing").unwrap();
+                }
+                let mut link = leaf.clone();
+                for n in 0..aliases {
+                    let here = dir.path().join(format!("alias{n}"));
+                    std::os::unix::fs::symlink(&link, &here).unwrap();
+                    link = here;
+                }
+                let entry = root.join("entry");
+                std::os::unix::fs::symlink(&link, &entry).unwrap();
+                let kernel_refuses = std::fs::metadata(&entry)
+                    .err()
+                    .and_then(|error| error.raw_os_error())
+                    == Some(libc::ELOOP);
+                let what = format!("no openat2: {refused}: {} links", aliases + 1);
+                assert_eq!(kernel_refuses, aliases >= 40, "{what}: the kernel's limit");
+                let made = create_regular_within(&entry, Some(&Within::hold(&root)));
+                assert_eq!(made.is_err(), kernel_refuses, "{what}");
+                if existing {
+                    assert_eq!(std::fs::read(&leaf).unwrap(), b"existing", "{what}");
+                } else {
+                    assert_eq!(leaf.exists(), !kernel_refuses, "{what}");
+                }
+                if kernel_refuses {
+                    assert_eq!(refuses(&entry, &Within::hold(&root)), [true; 3], "{what}");
+                }
+            }
+            super::NO_OPENAT2.with(|seam| seam.set(false));
+        }
+    }
+
     /// cr-ecm41-4 (Linux): an absolute link within the destination to an
     /// alias of a regular FILE beneath the root is followed — written
     /// through, with `openat2` and without — and an alias of a file outside
