@@ -70,8 +70,12 @@ fn remote(ctx: &TestContext, below: &str) -> String {
 /// through a file, by a name too long), and a pipe — every entry's time
 /// set, so that two such trees print alike: most an hour ago, one long
 /// ago, one still to come.
+///
+/// fold-ls-twins: `A.txt` beside `a.txt` only where the filesystem keeps
+/// the two apart — where it folds case they are one file, and the second
+/// written was the first — and so says whether it did.
 #[cfg(unix)]
-fn tree(root: &Path) {
+fn tree(root: &Path) -> bool {
     use filetime::FileTime;
     use std::os::unix::ffi::OsStrExt;
 
@@ -100,8 +104,15 @@ fn tree(root: &Path) {
         ("b1023", 1023),
         ("k1", 1024),
     ] {
+        if name == "A.txt" && t.join(name).exists() {
+            continue;
+        }
         fs::write(t.join(name), vec![b'x'; bytes]).unwrap();
     }
+    let twins = fs::read_dir(&t)
+        .unwrap()
+        .flatten()
+        .any(|entry| entry.file_name() == "A.txt");
     fs::write(t.join(std::ffi::OsStr::from_bytes(b"bad\xffname")), b"x").unwrap();
     std::os::unix::fs::symlink("sub", t.join("link")).unwrap();
     std::os::unix::fs::symlink("a.txt", t.join("flink")).unwrap();
@@ -119,8 +130,8 @@ fn tree(root: &Path) {
     let now = FileTime::now().unix_seconds();
     let recent = FileTime::from_unix_time(now - hour, 0);
     let times = |path: &Path| match path.file_name().and_then(|name| name.to_str()) {
-        // 2025-01-02T03:04:05Z
-        Some("A.txt") => FileTime::from_unix_time(1_735_787_045, 0),
+        // 2025-01-02T03:04:05Z — on `Z`, which every filesystem holds.
+        Some("Z") => FileTime::from_unix_time(1_735_787_045, 0),
         Some("b") => FileTime::from_unix_time(now + 200 * 24 * hour, 0),
         _ => recent,
     };
@@ -142,6 +153,7 @@ fn tree(root: &Path) {
     for dir in dirs {
         filetime::set_symlink_file_times(&dir, recent, recent).unwrap();
     }
+    twins
 }
 
 /// The system `ls`, in the reference locale and UTC, from `root`.
@@ -462,7 +474,7 @@ fn ls_of_a_local_path_equals_the_system_ls() {
 #[test]
 fn ls_prints_names_and_tells_a_file_from_a_directory_holding_one() {
     let ctx = TestContext::new();
-    tree(&ctx.module_dir);
+    let twins = tree(&ctx.module_dir);
     let lines = |ran: &Ran| -> Vec<String> {
         String::from_utf8_lossy(&ran.stdout)
             .lines()
@@ -472,7 +484,10 @@ fn ls_prints_names_and_tells_a_file_from_a_directory_holding_one() {
     let plain = blit(&ctx, &["ls", &remote(&ctx, "t")]);
     assert_eq!(plain.code, Some(0), "{}", plain.all());
     let names = lines(&plain);
-    assert_eq!(&names[..4], ["!bang", "-dash", "0n", "A.txt"], "{names:?}");
+    // fold-ls-twins: by their bytes, `A.txt` before `a.txt` — where the
+    // filesystem keeps them apart; where it folds, there is no `A.txt`.
+    let fourth = if twins { "A.txt" } else { "Empty" };
+    assert_eq!(&names[..4], ["!bang", "-dash", "0n", fourth], "{names:?}");
     assert!(!names.iter().any(|name| name.starts_with('.')), "{names:?}");
     assert_eq!(names.last().map(String::as_str), Some("é.txt"));
     assert!(plain.stderr.is_empty(), "{}", plain.all());
@@ -564,7 +579,7 @@ fn ls_json_gives_the_entries_and_what_the_path_was() {
     assert_eq!(named("link")["kind"], "link");
     assert_eq!(named("link")["target"], "sub");
     assert_eq!(named("pipe")["kind"], "fifo");
-    assert_eq!(named("A.txt")["mtime_seconds"], 1_735_787_045);
+    assert_eq!(named("Z")["mtime_seconds"], 1_735_787_045);
     assert_eq!(named("bad\u{fffd}name")["raw"], "bad\\xffname");
 
     let file = remote(&ctx, "t/a.txt");
