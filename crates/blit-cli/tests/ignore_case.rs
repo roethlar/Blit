@@ -720,17 +720,21 @@ fn a_pattern_that_cannot_be_compiled_widened_is_refused_before_anything_is_delet
     }
     let deep = nested(takes);
 
+    // fold-saved-cfg: each spelling in a folder of its own. Side by side,
+    // where the filesystem folds case, `SAVED.CFG` and `saved.cfg` were one
+    // file, and the guard expected one kept and the other gone.
+    const NAMES: [&str; 3] = ["s", "upper/SAVED.CFG", "lower/saved.cfg"];
     let fixture = || {
         let tmp = tempdir().unwrap();
         let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
         write(&src, "shared");
-        for name in ["s", "SAVED.CFG", "saved.cfg"] {
+        for name in NAMES {
             write(&dst, name);
         }
         (tmp, src, dst)
     };
     let present = |dst: &Path| -> Vec<&'static str> {
-        ["s", "SAVED.CFG", "saved.cfg"]
+        NAMES
             .into_iter()
             .filter(|name| dst.join(name).exists())
             .collect()
@@ -750,7 +754,7 @@ fn a_pattern_that_cannot_be_compiled_widened_is_refused_before_anything_is_delet
         &with_slash(&dst),
     ]);
     assert_eq!(code, Some(0), "{out}{err}");
-    assert_eq!(present(&dst), ["s", "saved.cfg"]);
+    assert_eq!(present(&dst), ["s", "lower/saved.cfg"]);
 
     let (_tmp, src, dst) = fixture();
     let (code, out, err) = blit(&[
@@ -770,11 +774,7 @@ fn a_pattern_that_cannot_be_compiled_widened_is_refused_before_anything_is_delet
         combined.contains("cannot be compiled with --ignore-case"),
         "{combined}"
     );
-    assert_eq!(
-        present(&dst),
-        ["s", "SAVED.CFG", "saved.cfg"],
-        "refused before anything was deleted"
-    );
+    assert_eq!(present(&dst), NAMES, "refused before anything was deleted");
     assert!(
         !dst.join("shared").exists(),
         "refused before anything was copied"
