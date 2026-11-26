@@ -944,13 +944,21 @@ pub struct LogRead {
     ///
     /// [`LogShape`]: crate::job_log::LogShape
     shape: crate::job_log::LogShape,
+    /// cr-ecm43-4: a session's log is being read — begun, not yet ended.
+    open: bool,
 }
 
 impl LogRead {
     /// cr-ecm41-2: one session's log begins; its events are numbered from 0.
+    /// cr-ecm43-4: one begun while another is read ends that one here, held
+    /// to its shape like any other.
     pub fn begin_log(&mut self) {
+        if self.open {
+            self.end_log();
+        }
         self.logs += 1;
         self.shape = crate::job_log::LogShape::default();
+        self.open = true;
     }
 
     /// cr-ecm41-2: that log ends here. It lost nothing only where it gave
@@ -959,15 +967,19 @@ impl LogRead {
         if !self.shape.whole() {
             self.incomplete = true;
         }
+        self.open = false;
     }
 
     /// Review cr-jl3a-1: the log alone says how the run ended only when it
     /// is finished, ends with its `run-end` and `summary`, and lost nothing.
     /// cr-ecm41-1: and its summary says every event reached it.
+    /// cr-ecm43-4: and the session still being read is whole so far: asked
+    /// before its `end_log`, a log that went on past its end was complete.
     pub fn complete(&self) -> bool {
         self.logs > 0
             && !self.unfinished
             && !self.incomplete
+            && (!self.open || self.shape.whole())
             && self.ended.is_some()
             && self
                 .summary
@@ -1564,6 +1576,39 @@ mod tests {
         }
         hidden.end_log();
         assert!(!hidden.complete(), "one session without the evidence");
+
+        // cr-ecm43-4: asked while a session is still being read, before its
+        // `end_log` — as an incremental reader asks.
+        let mut reading = LogRead::default();
+        reading.begin_log();
+        for (seq, body) in [
+            (0, start()),
+            (1, failed("missing")),
+            (2, summary()),
+            (3, end()),
+        ] {
+            reading.read_line(event(seq, body));
+        }
+        assert!(reading.complete(), "whole so far");
+        reading.read_line(event(4, copied("missing")));
+        assert!(
+            !reading.complete(),
+            "an event after the end, before the log is ended"
+        );
+        // A session begun while another is read ends that one.
+        let mut unended = LogRead::default();
+        unended.begin_log();
+        unended.read_line(event(0, start()));
+        unended.read_line(event(1, failed("missing")));
+        unended.begin_log();
+        for (seq, body) in [(0, start()), (1, summary()), (2, end())] {
+            unended.read_line(event(seq, body));
+        }
+        unended.end_log();
+        assert!(
+            !unended.complete(),
+            "a session never ended, then a whole one"
+        );
     }
 
     /// cr-ecm41-1: a daemon's log whose summary holds no evidence that every
