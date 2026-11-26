@@ -117,25 +117,34 @@ fn mirror_ignore_case_pairs_letters_of_any_alphabet_and_nothing_more() {
         "\u{fc}bung/saved.txt",    // übung, for the pattern Übung
         "x/\u{3c2}.txt",           // ς.txt, for the pattern σ*
         "STRA\u{1e9e}E/saved.txt", // STRAẞE, for the pattern straße
-        "STRASSE/gone.txt",        // never named by straße
         "extra.txt",
     ] {
         write(&dst, rel);
     }
-    let (code, out, err) = blit(&[
-        "mirror",
-        "--yes",
-        "--ignore-case",
-        "--exclude",
-        "\u{dc}bung",
-        "--exclude",
-        "\u{3c3}*",
-        "--exclude",
-        "stra\u{df}e",
-        &with_slash(&src),
-        &with_slash(&dst),
-    ]);
-    assert_eq!(code, Some(0), "stdout:\n{out}\nstderr:\n{err}");
+    // fold-plain-name-pairing: `STRASSE`, never named by `straße`, in a
+    // destination of its own — beside `STRAẞE`, where the filesystem folds
+    // case fully (APFS), the two were one folder. And there a plain-name
+    // exclude keeps the entry the filesystem pairs with it (cr-g3fix5-1):
+    // where it folds `ß` to `ss`, `straße` is the folder `STRASSE`.
+    let apart = tmp.path().join("apart");
+    write(&apart, "STRASSE/gone.txt");
+    let paired = apart.join("stra\u{df}e").exists();
+    for to in [&dst, &apart] {
+        let (code, out, err) = blit(&[
+            "mirror",
+            "--yes",
+            "--ignore-case",
+            "--exclude",
+            "\u{dc}bung",
+            "--exclude",
+            "\u{3c3}*",
+            "--exclude",
+            "stra\u{df}e",
+            &with_slash(&src),
+            &with_slash(to),
+        ]);
+        assert_eq!(code, Some(0), "stdout:\n{out}\nstderr:\n{err}");
+    }
     for kept in [
         "\u{fc}bung/saved.txt",
         "x/\u{3c2}.txt",
@@ -143,9 +152,15 @@ fn mirror_ignore_case_pairs_letters_of_any_alphabet_and_nothing_more() {
     ] {
         assert!(dst.join(kept).exists(), "{kept} is named and kept");
     }
-    for deleted in ["STRASSE", "extra.txt"] {
-        assert!(!dst.join(deleted).exists(), "{deleted} is named by nothing");
-    }
+    assert!(
+        !dst.join("extra.txt").exists(),
+        "extra.txt is named by nothing"
+    );
+    assert_eq!(
+        apart.join("STRASSE").exists(),
+        paired,
+        "STRASSE is named by nothing, and kept only where the filesystem pairs it with straße"
+    );
 }
 
 /// AC-12: `check` reads the patterns as the transfer did when it is given
@@ -861,6 +876,15 @@ fn mirror_ignore_case_keeps_a_class_one_byte_wide() {
         write(&dst, "one/ſaved/x.txt");
         write(&dst, "two/Saved/x.txt");
         write(&dst, "three/saved/x.txt");
+        // fold-plain-name-pairing: as typed, `[s]aved` is the plain name
+        // `saved` (a class of one member is how a character is written), and
+        // a plain-name exclude keeps the entry the filesystem pairs with it
+        // (cr-g3fix5-1): where it folds case, `Saved` is `saved` there, and
+        // where it pairs `ſ` with `s` (NTFS, APFS), so is `ſaved`. With
+        // `--ignore-case` a class holding a letter is a glob (cr-ecm2-1),
+        // read by its text alone.
+        let paired = |dir: &str| !ignores && dst.join(dir).join("saved").exists();
+        let (one, two) = (paired("one"), paired("two"));
         let (code, out, err) = blit(&[
             "mirror",
             "--yes",
@@ -875,9 +899,10 @@ fn mirror_ignore_case_keeps_a_class_one_byte_wide() {
             dst.join("from/ſaved/in-source.txt").exists(),
             "{mode}: the source walk does not leave ſaved out"
         );
-        assert!(
-            !dst.join("one/ſaved").exists(),
-            "{mode}: nor does the destination keep it"
+        assert_eq!(
+            dst.join("one/ſaved").exists(),
+            one,
+            "{mode}: nor does the destination keep it, but where its filesystem pairs it"
         );
         assert!(
             dst.join("three/saved/x.txt").exists(),
@@ -885,8 +910,9 @@ fn mirror_ignore_case_keeps_a_class_one_byte_wide() {
         );
         assert_eq!(
             dst.join("two/Saved/x.txt").exists(),
-            ignores,
-            "{mode}: the ASCII partner is kept only when case is ignored"
+            ignores || two,
+            "{mode}: the ASCII partner is kept only when case is ignored, or where its \
+             filesystem pairs it"
         );
     }
 }
