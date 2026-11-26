@@ -273,10 +273,19 @@ struct State {
     totals: Option<RunTotals>,
     /// The run's own failure message, kept over a caller's marker.
     error: Option<String>,
-    /// The task draining the audit lane into the log, and the lane's
+    /// The task draining the newest audit lane into the log, and the lane's
     /// planned totals.
     /// cr-ecm42-3: whether it, and every relay before it, drained.
-    relay: Option<tokio::task::JoinHandle<bool>>,
+    /// cr-ecm43-3: watched, never taken — every close waits on its own
+    /// watch of it — and counted (`lanes`), so a close knows whether a lane
+    /// was accepted while it waited. Taken by the close that waited for it,
+    /// a second close at once found none and said every event had reached
+    /// the log; and a close cancelled put its relay back over a newer one.
+    relay: Option<Relay>,
+    lanes: u64,
+    /// cr-ecm43-3: the writer is taken: no lane is accepted after it, whose
+    /// events no close would wait for.
+    closed: bool,
     planned: Option<Arc<PlannedTotals>>,
     disposition: Disposition,
     /// The closed log's non-UTF-8 names, kept for the run's record (review
@@ -353,6 +362,8 @@ impl RunLog {
                 totals: None,
                 error: None,
                 relay: None,
+                lanes: 0,
+                closed: false,
                 planned: None,
                 disposition: Disposition::Written,
                 closed_raw_names: HashMap::new(),
@@ -438,6 +449,7 @@ impl RunLog {
             name: "transfer".into(),
             state: PhaseState::Start,
         });
+        state.closed = false;
         state.active = Some(ActiveLog {
             writer,
             sender,
@@ -497,21 +509,22 @@ impl RunLog {
 
     fn lane(&self, end: Option<End>) -> Option<AuditSender> {
         let mut state = self.state();
-        if state.place.is_none() && state.active.is_none() {
+        if state.closed || (state.place.is_none() && state.active.is_none()) {
             return None;
         }
         let (sender, receiver) = audit_lane(AUDIT_LANE_DEPTH);
         let planned = receiver.planned();
         let log = self.clone();
-        let earlier = state.relay.take();
+        let earlier = state.relay.as_ref().map(|relay| relay.drained.clone());
+        let (drained, watched) = tokio::sync::watch::channel(None);
         state.planned = Some(planned);
-        state.relay = Some(tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             // One lane at a time, in order: an earlier pass's events land
             // before this one's. cr-ecm42-3: and whether that one drained
             // is carried on — one that was cut, failed or stopped with its
             // runtime lost its events, and the chain was taken as drained.
             let earlier_drained = match earlier {
-                Some(earlier) => matches!(earlier.await, Ok(true)),
+                Some(earlier) => Relay::settled(earlier).await == Some(true),
                 None => true,
             };
             // cr-ecm39-4: the names this lane's pass heard, its own — one
@@ -521,8 +534,14 @@ impl RunLog {
             while let Some(event) = receiver.recv().await {
                 log.observe_from(&event, end, Some(&mut names)).await;
             }
-            earlier_drained
-        }));
+            // Cut or stopped before here, it says nothing: not drained.
+            let _ = drained.send(Some(earlier_drained));
+        });
+        state.relay = Some(Relay {
+            drained: watched,
+            task: task.abort_handle(),
+        });
+        state.lanes += 1;
         Some(sender)
     }
 
@@ -705,30 +724,42 @@ impl RunLog {
         // Every fact the transfer reported reaches the log before it closes:
         // the relay ends once the transfer has dropped its senders.
         // cr-ecm42-3: drained only where the relay, and every relay before
-        // it, ended draining — not cut, failed, or stopped with its runtime;
-        // and a close dropped while it waits puts the relay back for the next.
-        let mut pending = PendingRelay {
-            log: self,
-            relay: self.state().relay.take(),
-        };
+        // it, ended draining — not cut, failed, or stopped with its runtime.
+        // cr-ecm43-3: each close waits on its own watch of the newest relay,
+        // which stays where every other close finds it, and then, before it
+        // takes the writer, waits too for a lane accepted while it waited;
+        // once it has the writer, no lane is accepted.
+        let deadline = tokio::time::Instant::now() + RELAY_DRAIN_LIMIT;
         let mut relay_cut = false;
-        if let Some(relay) = pending.relay.as_mut() {
-            match tokio::time::timeout(RELAY_DRAIN_LIMIT, &mut *relay).await {
-                Ok(Ok(true)) => {}
-                Ok(_) => relay_cut = true,
-                Err(_) => {
-                    relay.abort();
-                    relay_cut = true;
+        let (mut active, notes, totals, error, run_id, planned, disposition) = loop {
+            let (waiting, lanes) = {
+                let state = self.state();
+                (
+                    state
+                        .relay
+                        .as_ref()
+                        .map(|relay| (relay.drained.clone(), relay.task.clone())),
+                    state.lanes,
+                )
+            };
+            if let Some((drained, task)) = waiting {
+                match tokio::time::timeout_at(deadline, Relay::settled(drained)).await {
+                    Ok(Some(true)) => {}
+                    Ok(_) => relay_cut = true,
+                    Err(_) => {
+                        task.abort();
+                        relay_cut = true;
+                    }
                 }
             }
-        }
-        // Settled: drained, or cut and told.
-        pending.relay = None;
-        let (mut active, notes, totals, error, run_id, planned, disposition) = {
             let mut state = self.state();
+            if state.lanes != lanes {
+                continue;
+            }
             let active = state.active.take()?;
+            state.closed = true;
             state.closed_raw_names = active.raw_names.clone();
-            (
+            break (
                 active,
                 std::mem::take(&mut state.notes),
                 totals.or_else(|| state.totals.take()),
@@ -739,7 +770,7 @@ impl RunLog {
                     .as_ref()
                     .map_or((0, 0), |planned| planned.get()),
                 state.disposition,
-            )
+            );
         };
         // The open phase ends first: what the summary adds below was learned
         // at the end, while every failure seen live sits inside the phase.
@@ -881,20 +912,23 @@ impl RunLog {
     }
 }
 
-/// cr-ecm42-3: the relay a close has taken to wait for, put back if that close
-/// is dropped before it settles, so a close tried again waits for it in
-/// turn. Dropped with the close, it was forgotten: a close tried again found
-/// none, and said every event had reached the log.
-struct PendingRelay<'a> {
-    log: &'a RunLog,
-    relay: Option<tokio::task::JoinHandle<bool>>,
+/// cr-ecm43-3: the newest relay, as every close and the next lane's relay
+/// watch it: `Some(drained)` once it, and every relay before it, ended — or
+/// its sender gone without a word, cut or stopped with its runtime.
+struct Relay {
+    drained: tokio::sync::watch::Receiver<Option<bool>>,
+    task: tokio::task::AbortHandle,
 }
 
-impl Drop for PendingRelay<'_> {
-    fn drop(&mut self) {
-        if let Some(relay) = self.relay.take() {
-            self.log.state().relay = Some(relay);
-        }
+impl Relay {
+    /// Whether the relay watched by `drained`, and every one before it,
+    /// drained; `None` when it ended without saying — it did not.
+    async fn settled(mut drained: tokio::sync::watch::Receiver<Option<bool>>) -> Option<bool> {
+        drained
+            .wait_for(Option::is_some)
+            .await
+            .ok()
+            .and_then(|said| *said)
     }
 }
 
@@ -1673,6 +1707,114 @@ mod tests {
         });
         assert!(!report.complete, "{report:?}");
         assert!(!summary_in(&report.path.expect("a log")).all_events_logged);
+    }
+
+    /// cr-ecm43-3: every close waits for every lane the log accepted. Two
+    /// closes at once both wait, and the one that takes the log finds the
+    /// lane's event there — taken by the first, the relay was not there for
+    /// the second, which said every event had reached the log with none of
+    /// them in it. A close cancelled leaves the newest relay where it is —
+    /// it put its own back over a newer lane's — and a lane accepted while a
+    /// close waits is waited for too. Once the log is closed, no lane is.
+    #[tokio::test(start_paused = true)]
+    async fn every_close_waits_for_every_lane_the_log_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = || {
+            Some(LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: DEFAULT_KEEP,
+                finished: None,
+            })
+        };
+        let failures_in = |path: &std::path::Path| -> Vec<String> {
+            crate::job_log::open_log(path)
+                .unwrap()
+                .filter_map(|line| match line {
+                    Ok(crate::job_log::LogLine::Event(event)) => match event.body {
+                        EventBody::FileFailed { path, .. } => Some(path),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect()
+        };
+        let lane = |log: &RunLog| {
+            crate::remote::transfer::RemoteTransferProgress::audit_only(
+                log.audit_lane_at(End::Receiving).expect("a lane"),
+            )
+        };
+        let closing = |log: &RunLog| {
+            let log = log.clone();
+            tokio::spawn(async move {
+                log.close(Outcome::Failed, None, Some(RunTotals::default()))
+                    .await
+            })
+        };
+        let a_while = || tokio::time::sleep(Duration::from_millis(10));
+
+        // Two closes at once.
+        let log = RunLog::new(place(), "5123456789abcdef0123456789abcdef");
+        log.start(Role::Initiator, RunInfo::default(), None);
+        let held = lane(&log);
+        held.report_file_failed("queued".into(), "denied".into())
+            .await;
+        let (first, second) = (closing(&log), closing(&log));
+        a_while().await;
+        assert!(
+            !first.is_finished() && !second.is_finished(),
+            "both wait for the lane"
+        );
+        drop(held);
+        let (first, second) = (first.await.unwrap(), second.await.unwrap());
+        assert_eq!(
+            usize::from(first.is_some()) + usize::from(second.is_some()),
+            1,
+            "one close takes the log"
+        );
+        let report = first.or(second).unwrap();
+        assert!(report.complete, "{report:?}");
+        let path = report.path.expect("a log");
+        assert!(summary_in(&path).all_events_logged);
+        assert_eq!(failures_in(&path), ["queued"]);
+        assert!(log.audit_lane().is_none(), "no lane once the log is closed");
+
+        // A close cancelled after a newer lane was accepted; a lane accepted
+        // while the next close waits.
+        let log = RunLog::new(place(), "6123456789abcdef0123456789abcdef");
+        log.start(Role::Initiator, RunInfo::default(), None);
+        let earlier = lane(&log);
+        let mut cancelled = Box::pin(log.close(Outcome::Failed, None, Some(RunTotals::default())));
+        tokio::select! {
+            biased;
+            _ = &mut cancelled => panic!("the close waits for the lane"),
+            _ = std::future::ready(()) => {}
+        }
+        let later = lane(&log);
+        drop(cancelled);
+        let close = closing(&log);
+        drop(earlier);
+        a_while().await;
+        assert!(
+            !close.is_finished(),
+            "the close waits for the lane accepted before the first was cancelled"
+        );
+        let latest = lane(&log);
+        drop(later);
+        a_while().await;
+        assert!(
+            !close.is_finished(),
+            "and for the one accepted while it waits"
+        );
+        latest
+            .report_file_failed("late".into(), "denied".into())
+            .await;
+        drop(latest);
+        let report = close.await.unwrap().expect("a report");
+        assert!(report.complete, "{report:?}");
+        let path = report.path.expect("a log");
+        assert!(summary_in(&path).all_events_logged);
+        assert_eq!(failures_in(&path), ["late"]);
     }
 
     /// log-named-text: a failure the account names by its text alone is a
