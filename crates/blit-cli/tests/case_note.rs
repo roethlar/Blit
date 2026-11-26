@@ -1101,9 +1101,28 @@ fn the_line_claims_only_what_the_mirror_then_does() {
         for (n, (entry, kept_as_typed, kept_ignoring_case)) in case.entries.iter().enumerate() {
             let alone = tmp.path().join(format!("alone{n}"));
             let to = with_slash(&alone);
+            // ci-case-alone-pairing: an exclude written as a plain name keeps
+            // the entry the destination's filesystem pairs with it, in either
+            // mode (cr-g3fix5-1): where the filesystem folds case, `Keep` is
+            // the file `keep`. Asked of the filesystem, with the entry alone
+            // there: a name it does not pair is not found. Where nothing
+            // folds, a plain name pairs only with itself, which the table
+            // already keeps.
+            write(&alone, entry);
+            let at = Path::new(entry);
+            let dir = alone.join(at.parent().unwrap_or(Path::new("")));
+            let paired = case.excludes.iter().any(|exclude| {
+                let (anchored, name) = match exclude.strip_prefix("./") {
+                    Some(name) => (true, name),
+                    None => (false, *exclude),
+                };
+                !name.contains(['*', '?', '[', ']', '{', '}', '\\', '/'])
+                    && !(anchored && at.parent().is_some_and(|p| !p.as_os_str().is_empty()))
+                    && dir.join(name).exists()
+            });
             for (mode, kept) in [
-                (None, kept_as_typed),
-                (Some("--ignore-case"), kept_ignoring_case),
+                (None, *kept_as_typed || paired),
+                (Some("--ignore-case"), *kept_ignoring_case || paired),
             ] {
                 write(&alone, entry);
                 let mut run = args.clone();
@@ -1119,7 +1138,7 @@ fn the_line_claims_only_what_the_mirror_then_does() {
                 );
                 assert_eq!(
                     alone.join(entry).exists(),
-                    *kept,
+                    kept,
                     "{:?}, {entry} alone, {mode:?}",
                     case.excludes
                 );
