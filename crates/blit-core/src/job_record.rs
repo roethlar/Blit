@@ -951,13 +951,16 @@ pub struct LogRead {
 impl LogRead {
     /// cr-ecm41-2: one session's log begins; its events are numbered from 0.
     /// cr-ecm43-4: one begun while another is read ends that one here, held
-    /// to its shape like any other.
-    pub fn begin_log(&mut self) {
+    /// to its shape like any other. cr-ecm43-2: `expected` is the log asked
+    /// for — its run-start must name it; with none, the log is not whole.
+    pub fn begin_log(&mut self, expected: Option<crate::job_log::LogKey>) {
         if self.open {
             self.end_log();
         }
         self.logs += 1;
-        self.shape = crate::job_log::LogShape::default();
+        self.shape = expected
+            .map(crate::job_log::LogShape::of)
+            .unwrap_or_default();
         self.open = true;
     }
 
@@ -1207,6 +1210,7 @@ pub async fn ask_daemon(record: &RunRecord) -> eyre::Result<DaemonAnswer> {
 
     let read = Arc::new(Mutex::new(LogRead::default()));
     let sink = Arc::clone(&read);
+    let run_id = record.run_id.clone();
     let fetched = jobs::read_job_logs(
         &remote,
         &record.run_id,
@@ -1214,7 +1218,17 @@ pub async fn ask_daemon(record: &RunRecord) -> eyre::Result<DaemonAnswer> {
         false,
         move |header, lines| {
             let mut read = sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            read.begin_log();
+            // cr-ecm43-2: the log asked for — this run's, as a destination —
+            // kept by the participant and in the attempt its header names.
+            read.begin_log(
+                crate::job_log::LogKey::new(
+                    run_id.as_str(),
+                    header.participant.as_str(),
+                    Role::Destination,
+                    header.attempt,
+                )
+                .ok(),
+            );
             read.unfinished |= !header.finished;
             for line in LogLines::new(lines) {
                 read.read_line(line?);
@@ -1260,6 +1274,28 @@ mod tests {
     use super::*;
 
     const RUN: &str = "0123456789abcdef0123456789abcdef";
+
+    /// cr-ecm43-2: the log these tests' detached reader asks for — this
+    /// run's, kept by `m1` as its destination, its first attempt.
+    fn asked() -> crate::job_log::LogKey {
+        crate::job_log::LogKey::new(RUN, "m1", crate::job_log::Role::Destination, 1).unwrap()
+    }
+
+    /// A log's run-start, as its writer writes it first, naming `run_id`'s
+    /// log kept by `m1` as its destination.
+    fn started(run_id: &str) -> crate::job_log::EventBody {
+        crate::job_log::EventBody::RunStart(Box::new(crate::job_log::RunStart {
+            format: crate::job_log::FORMAT.into(),
+            version: crate::job_log::VERSION,
+            run_id: run_id.into(),
+            participant: "m1".into(),
+            role: crate::job_log::Role::Destination,
+            attempt: 1,
+            host: String::new(),
+            build: String::new(),
+            run: Default::default(),
+        }))
+    }
 
     fn set_mtime(path: &Path, secs: i64) {
         filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(secs, 0)).unwrap();
@@ -1485,9 +1521,7 @@ mod tests {
                 body,
             })
         };
-        let start = || EventBody::Diagnostic {
-            message: "the log's start".into(),
-        };
+        let start = || started(RUN);
         let failed = |path: &str| EventBody::FileFailed {
             path: path.into(),
             reason: "denied".into(),
@@ -1512,7 +1546,7 @@ mod tests {
         };
         let read = |events: Vec<(u64, EventBody)>| {
             let mut read = LogRead::default();
-            read.begin_log();
+            read.begin_log(Some(asked()));
             for (seq, body) in events {
                 read.read_line(event(seq, body));
             }
@@ -1554,7 +1588,7 @@ mod tests {
         assert!(!after_end.complete(), "an event after the end");
         // A second session's log with no summary or end of its own.
         let mut two = whole.clone();
-        two.begin_log();
+        two.begin_log(Some(asked()));
         two.read_line(event(0, start()));
         two.read_line(event(1, copied("other")));
         two.end_log();
@@ -1570,7 +1604,7 @@ mod tests {
             (2, EventBody::Summary(Summary::default())),
             (3, end()),
         ]);
-        hidden.begin_log();
+        hidden.begin_log(Some(asked()));
         for (seq, body) in [(0, start()), (1, summary()), (2, end())] {
             hidden.read_line(event(seq, body));
         }
@@ -1580,7 +1614,7 @@ mod tests {
         // cr-ecm43-4: asked while a session is still being read, before its
         // `end_log` — as an incremental reader asks.
         let mut reading = LogRead::default();
-        reading.begin_log();
+        reading.begin_log(Some(asked()));
         for (seq, body) in [
             (0, start()),
             (1, failed("missing")),
@@ -1597,10 +1631,10 @@ mod tests {
         );
         // A session begun while another is read ends that one.
         let mut unended = LogRead::default();
-        unended.begin_log();
+        unended.begin_log(Some(asked()));
         unended.read_line(event(0, start()));
         unended.read_line(event(1, failed("missing")));
-        unended.begin_log();
+        unended.begin_log(Some(asked()));
         for (seq, body) in [(0, start()), (1, summary()), (2, end())] {
             unended.read_line(event(seq, body));
         }
@@ -1609,6 +1643,22 @@ mod tests {
             !unended.complete(),
             "a session never ended, then a whole one"
         );
+
+        // cr-ecm43-2: another run's whole log, given for this one's; and a
+        // log read with no key to hold it to.
+        let other = "fedcba9876543210fedcba9876543210";
+        for (what, expected, opening) in [
+            ("another run's log", Some(asked()), started(other)),
+            ("a log asked for by no key", None, started(RUN)),
+        ] {
+            let mut read = LogRead::default();
+            read.begin_log(expected);
+            for (seq, body) in [(0, opening), (1, summary()), (2, end())] {
+                read.read_line(event(seq, body));
+            }
+            read.end_log();
+            assert!(!read.complete(), "{what}");
+        }
     }
 
     /// cr-ecm41-1: a daemon's log whose summary holds no evidence that every
@@ -1794,13 +1844,8 @@ mod tests {
             left_in_place: Some(false),
         };
         let mut read = LogRead::default();
-        read.begin_log();
-        read.read_line(event(
-            0,
-            EventBody::Diagnostic {
-                message: "the log's start".into(),
-            },
-        ));
+        read.begin_log(Some(asked()));
+        read.read_line(event(0, started(RUN)));
         read.read_line(event(1, failed()));
         read.read_line(event(2, failed()));
         read.read_line(event(

@@ -1694,8 +1694,17 @@ pub enum LogLine {
 /// reached the log (cr-ecm41-1), and then its `run-end`, with nothing after.
 /// Read each its own way, the retry's reader took events after the end, and
 /// neither held a log to one summary and then the end.
+///
+/// cr-ecm43-2: and the log is the one the reader asked for. It opens with
+/// its `run-start`, which names the key the reader expects — the run, the
+/// participant that kept the log, its role and its attempt; a shape made
+/// without a key ([`Default`]) is never whole. Not asked, one run's whole
+/// log under another's name gave a retry its files: it recopied one that
+/// had landed and left out the one that had failed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LogShape {
+    expected: Option<LogKey>,
+    started: bool,
     next_seq: u64,
     summaries: u32,
     evidence: bool,
@@ -1704,6 +1713,14 @@ pub struct LogShape {
 }
 
 impl LogShape {
+    /// cr-ecm43-2: the shape of the log `key` names.
+    pub fn of(key: LogKey) -> Self {
+        Self {
+            expected: Some(key),
+            ..Self::default()
+        }
+    }
+
     /// Take in the log's next event.
     pub fn take(&mut self, event: &Event) {
         if self.ended || event.seq != self.next_seq {
@@ -1711,6 +1728,20 @@ impl LogShape {
         }
         self.next_seq = event.seq.saturating_add(1);
         match &event.body {
+            // cr-ecm43-2: first, once, and naming the log expected.
+            EventBody::RunStart(start) => {
+                let named = self.expected.as_ref().is_some_and(|key| {
+                    key.run_id == start.run_id
+                        && key.participant == start.participant
+                        && key.role == start.role
+                        && key.attempt == start.attempt
+                });
+                if self.started || !named {
+                    self.broken = true;
+                }
+                self.started = true;
+            }
+            _ if !self.started => self.broken = true,
             EventBody::Summary(summary) => {
                 self.summaries += 1;
                 self.evidence = summary.all_events_logged;
@@ -1730,7 +1761,7 @@ impl LogShape {
 
     /// The log, read to its end, is whole.
     pub fn whole(&self) -> bool {
-        !self.broken && self.summaries == 1 && self.evidence && self.ended
+        self.started && !self.broken && self.summaries == 1 && self.evidence && self.ended
     }
 }
 
@@ -1906,17 +1937,71 @@ mod tests {
             outcome: Outcome::Ok,
             detail: None,
         };
-        let note = || EventBody::Diagnostic {
+        let run = "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a";
+        let key = || LogKey::new(run, "m1", Role::Destination, 1).unwrap();
+        let start_of = |run_id: &str, participant: &str, role, attempt| {
+            EventBody::RunStart(Box::new(RunStart {
+                format: FORMAT.into(),
+                version: VERSION,
+                run_id: run_id.into(),
+                participant: participant.into(),
+                role,
+                attempt,
+                host: String::new(),
+                build: String::new(),
+                run: RunInfo::default(),
+            }))
+        };
+        // The log's own start, as its writer writes it first.
+        let note = || start_of(run, "m1", Role::Destination, 1);
+        let line = || EventBody::Diagnostic {
             message: "a line".into(),
         };
-        let shape = |bodies: Vec<EventBody>| {
-            let mut shape = LogShape::default();
+        let read_as = |expected: LogShape, bodies: Vec<EventBody>| {
+            let mut shape = expected;
             for (seq, body) in bodies.into_iter().enumerate() {
                 shape.take(&event(seq as u64, body));
             }
             shape.whole()
         };
+        let shape = |bodies: Vec<EventBody>| read_as(LogShape::of(key()), bodies);
         assert!(shape(vec![note(), summary(true), end()]));
+        assert!(shape(vec![note(), line(), summary(true), end()]));
+        // cr-ecm43-2: the log the reader asked for, and no other.
+        let other_run = "7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b";
+        for (what, start) in [
+            (
+                "another run's",
+                start_of(other_run, "m1", Role::Destination, 1),
+            ),
+            (
+                "another participant's",
+                start_of(run, "m2", Role::Destination, 1),
+            ),
+            ("another role's", start_of(run, "m1", Role::Source, 1)),
+            (
+                "another attempt's",
+                start_of(run, "m1", Role::Destination, 2),
+            ),
+        ] {
+            assert!(!shape(vec![start, summary(true), end()]), "{what} log");
+        }
+        assert!(
+            !shape(vec![line(), summary(true), end()]),
+            "no run-start first"
+        );
+        assert!(
+            !shape(vec![line(), note(), summary(true), end()]),
+            "the run-start after another event"
+        );
+        assert!(
+            !shape(vec![note(), note(), summary(true), end()]),
+            "a second run-start"
+        );
+        assert!(
+            !read_as(LogShape::default(), vec![note(), summary(true), end()]),
+            "a shape without the key it expects"
+        );
         assert!(
             !shape(vec![note(), summary(true), end(), note()]),
             "after the end"
@@ -1940,12 +2025,12 @@ mod tests {
         assert!(!shape(vec![note(), summary(false), end()]), "no evidence");
         assert!(!shape(vec![note(), end()]), "no summary");
         assert!(!shape(vec![note(), summary(true)]), "no end");
-        let mut gap = LogShape::default();
+        let mut gap = LogShape::of(key());
         gap.take(&event(0, note()));
         gap.take(&event(2, summary(true)));
         gap.take(&event(3, end()));
         assert!(!gap.whole(), "a gap");
-        let mut lost = LogShape::default();
+        let mut lost = LogShape::of(key());
         lost.take(&event(0, note()));
         lost.lost();
         lost.take(&event(1, summary(true)));

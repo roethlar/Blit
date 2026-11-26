@@ -560,8 +560,9 @@ fn failed_identities(
             // cr-ecm41-1, cr-ecm42-1: in the one shape every reader asks of
             // a log (`LogShape`): its summary holds the evidence that every
             // event reached it, and nothing follows its end. Events written
-            // after the end, numbered on, completed a record.
-            let mut shape = job_log::LogShape::default();
+            // after the end, numbered on, completed a record. cr-ecm43-2: and
+            // it is the log its name says: its run-start names that key.
+            let mut shape = job_log::LogShape::of(log.key.clone());
             let (left, still_failed, unknown, said) = streams
                 .entry((log.key.participant().to_string(), log.key.role()))
                 .or_default();
@@ -2912,6 +2913,27 @@ mod retry_name_tests {
         assert!(
             failed_identities(dir.path(), &cut(gapped), false).is_err(),
             "a log with a gap completes nothing"
+        );
+
+        // cr-ecm43-2: nor another run's whole log under this run's name —
+        // the reviewer's: it recopied what that run had failed and left out
+        // this one's failure.
+        let renamed = "8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e";
+        let theirs = blit_core::job_log::logs_for_run(&logs, whole, None).unwrap()[0]
+            .path
+            .clone();
+        let name = theirs.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with(whole));
+        std::fs::copy(&theirs, logs.join(name.replacen(whole, renamed, 1))).unwrap();
+        assert_eq!(
+            blit_core::job_log::logs_for_run(&logs, renamed, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            failed_identities(dir.path(), &cut(renamed), false).is_err(),
+            "another run's log completes nothing"
         );
     }
 
