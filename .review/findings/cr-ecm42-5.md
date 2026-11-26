@@ -1,9 +1,9 @@
 # cr-ecm42-5: the `ls` guards ran GNU's `ls` under the name it is installed as
 
 **Severity**: MEDIUM — two guards fail where GNU's `ls` is installed as `gnuls` (CI's `ubuntu-26.04`); the code is right. ci-linux-ls-reference's remaining half.
-**Status**: Fixed; awaiting review and the next CI run on Linux
+**Status**: Verified — `combined-r44` (Codex openreview, 2026-11-26) reviewed `4e12d761..34c77a48` — the `combined-r43` fixes, GitHub CI's three and gate-put-race — with `guard_confirmed: true`: "I would keep the shared `LogShape` validator, per-session delivery checks, scripted manifest order and synchronized `--ignore-existing` fixture. The following cases still need changes." Verified and by GitHub CI run 45731868559 (`34c77a48`: both `ls` comparisons ran against `gnuls` on `ubuntu-26.04` and passed).
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm42-5`)
+**Commit**: `6ba421a9`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r43` over `e2c2e08d..4e12d761` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r43.codex.md`. GitHub CI run 45715973925 at `4e12d761` failed the guards first.
 
 ## Evidence

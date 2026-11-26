@@ -1,9 +1,9 @@
 # cr-ecm42-3: a close interrupted and tried again, or a relay failed or stopped with its runtime, counted as drained
 
 **Severity**: HIGH — the log says it holds every event, and holds none of the ones lost.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r44` (Codex openreview, 2026-11-26) reviewed `4e12d761..34c77a48` — the `combined-r43` fixes, GitHub CI's three and gate-put-race — with `guard_confirmed: true`: "I would keep the shared `LogShape` validator, per-session delivery checks, scripted manifest order and synchronized `--ignore-existing` fixture. The following cases still need changes." "Give one close operation ownership of the relay drain. With one failure queued and the first close pending, a second close wrote zero failure events and returned both `all_events_logged` and `LogReport.complete` as true. Cancelling a close can also overwrite the handle of a newer lane. Coordinate close and lane registration through shared state so every accepted lane contributes to the result." The remaining work is cr-ecm43-3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm42-3`)
+**Commit**: `b848405e`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r43` over `e2c2e08d..4e12d761` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r43.codex.md`.
 
 ## Evidence

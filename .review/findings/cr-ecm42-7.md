@@ -1,9 +1,9 @@
 # cr-ecm42-7: on a filesystem that folds case the mirror guard checked no entry
 
 **Severity**: MEDIUM — a wrong removal of an unambiguous name passes on macOS. ci-macos-case-mirror's remaining half.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r44` (Codex openreview, 2026-11-26) reviewed `4e12d761..34c77a48` — the `combined-r43` fixes, GitHub CI's three and gate-put-race — with `guard_confirmed: true`: "I would keep the shared `LogShape` validator, per-session delivery checks, scripted manifest order and synchronized `--ignore-existing` fixture. The following cases still need changes." "Correct the mirror fixture's expectation for literal excludes. The pinned macOS and Windows jobs both kept `keep` under `--exclude Keep`. The test expected deletion even though the documented rule protects a destination spelling that resolves to the excluded literal. Keep the per-entry assertions and account for that pairing." The remaining work is cr-ecm43-5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm42-7`)
+**Commit**: `4c3e8d42`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r43` over `e2c2e08d..4e12d761` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r43.codex.md`.
 
 ## Evidence

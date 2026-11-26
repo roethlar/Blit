@@ -1,9 +1,9 @@
 # cr-ecm42-4: an absolute alias to a missing file beneath the root was refused
 
 **Severity**: MEDIUM — a copy and a resume fail for a file inside the destination. cr-ecm41-4's remaining half.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r44` (Codex openreview, 2026-11-26) reviewed `4e12d761..34c77a48` — the `combined-r43` fixes, GitHub CI's three and gate-put-race — with `guard_confirmed: true`: "I would keep the shared `LogShape` validator, per-session delivery checks, scripted manifest order and synchronized `--ignore-existing` fixture. The following cases still need changes." "Preserve filesystem semantics through an alias. On Linux, ordinary copy and `--resume` both changed an existing file and then exited 2 when an inner symlink target ended in `/` or `/.`. The kernel returned `ENOTDIR` for that name. Separately, `create_regular_within` truncated a file through 43 links where the kernel returned `ELOOP`. Preserve the directory requirement, distinguish a missing leaf from other lookup errors, and count links across the entire walk." The remaining work is cr-ecm43-1
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm42-4`)
+**Commit**: `5fd08a19`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r43` over `e2c2e08d..4e12d761` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r43.codex.md`.
 
 ## Evidence

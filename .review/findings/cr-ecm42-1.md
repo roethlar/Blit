@@ -1,9 +1,9 @@
 # cr-ecm42-1: a reader took events after a log's end, and neither held a log to one summary then its end
 
 **Severity**: HIGH — a retry overwrites a file that landed, and leaves out one that failed.
-**Status**: Fixed; awaiting review
+**Status**: Reviewed, found incomplete — `combined-r44` (Codex openreview, 2026-11-26) reviewed `4e12d761..34c77a48` — the `combined-r43` fixes, GitHub CI's three and gate-put-race — with `guard_confirmed: true`: "I would keep the shared `LogShape` validator, per-session delivery checks, scripted manifest order and synchronized `--ignore-existing` fixture. The following cases still need changes." "Make `LogRead::complete()` honor the current session's validator. Through the public API, a consecutively numbered file event after `run-end` still gave `complete() == true` until I called `end_log()`. The daemon reader calls `end_log()`, but an incremental consumer can use the incorrect result." The remaining work is cr-ecm43-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm42-1`)
+**Commit**: `ebe038c9`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli headless one-shot, openreview `combined-r43` over `e2c2e08d..4e12d761` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/combined-r43.codex.md`.
 
 ## Evidence

@@ -1,9 +1,9 @@
 # ci-windows-df-words: a `df` guard expected Unix's words for a path that is not there
 
 **Severity**: MEDIUM — a guard fails on Windows; the code gives the system's own words, as `os_reason` documents.
-**Status**: Fixed (the guard); awaiting the next CI run on Windows
+**Status**: Reviewed, found incomplete — `combined-r44` (Codex openreview, 2026-11-26) reviewed `4e12d761..34c77a48` — the `combined-r43` fixes, GitHub CI's three and gate-put-race — with `guard_confirmed: true`: "I would keep the shared `LogShape` validator, per-session delivery checks, scripted manifest order and synchronized `--ignore-existing` fixture. The following cases still need changes." "Check `df`'s diagnostic independently. I changed the production formatter to return `review placeholder` for a missing file. The focused test still passed because it calls that same formatter to construct its expectation. Derive the expected text directly from the OS error." The remaining work is cr-ecm43-7
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix ci-windows-df-words`)
+**Commit**: `0e537474`
 **Reviewer**: none — found by GitHub CI run 45715973925 at `4e12d761`, 2026-11-25 — the third run, which reached test binaries the second never ran; for the next openreview.
 
 ## Evidence

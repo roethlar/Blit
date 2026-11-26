@@ -1,9 +1,9 @@
 # gate-put-race: the `--ignore-existing` guard's source marked its files put before it had put them
 
 **Severity**: MEDIUM — a guard fails under load, now and then; the code is right.
-**Status**: Fixed; awaiting review
+**Status**: Verified — `combined-r44` (Codex openreview, 2026-11-26) reviewed `4e12d761..34c77a48` — the `combined-r43` fixes, GitHub CI's three and gate-put-race — with `guard_confirmed: true`: "I would keep the shared `LogShape` validator, per-session delivery checks, scripted manifest order and synchronized `--ignore-existing` fixture. The following cases still need changes."
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix gate-put-race`)
+**Commit**: `c0197521`
 **Reviewer**: none — found by this session's own gate, 2026-11-25; for the next openreview.
 
 ## Evidence
