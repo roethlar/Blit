@@ -1740,6 +1740,60 @@ mod mode_tests {
         }
     }
 
+    /// alias-path-too-long (Linux): an alias to a place beneath the root whose
+    /// whole path is longer than `PATH_MAX` is followed, as the kernel
+    /// follows it a name at a time — to write a file there, and to make one —
+    /// with `openat2` and without. Resolved by a path built from `/`, it was
+    /// refused, `File name too long`, where the kernel opened it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_alias_to_a_place_deeper_than_a_path_can_say_is_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("dst")).unwrap();
+        let root = std::fs::canonicalize(dir.path().join("dst")).unwrap();
+        // Eleven names of 200 bytes, twice over: 4,400 bytes below the root.
+        let half: std::path::PathBuf = (0..11).map(|_| "d".repeat(200)).collect();
+        let middle = root.join(&half);
+        std::fs::create_dir_all(&middle).unwrap();
+        let short = dir.path().join("short");
+        std::os::unix::fs::symlink(&middle, &short).unwrap();
+        let deep = short.join(&half);
+        std::fs::create_dir_all(&deep).unwrap();
+        assert!(
+            root.join(&half).join(&half).as_os_str().len() > libc::PATH_MAX as usize,
+            "deeper than a path can say"
+        );
+        std::fs::write(deep.join("leaf"), b"old").unwrap();
+        std::os::unix::fs::symlink(deep.join("leaf"), root.join("entry")).unwrap();
+        std::os::unix::fs::symlink(deep.join("new"), root.join("made")).unwrap();
+        let within = Within::hold(&root);
+        for refused in [false, true] {
+            std::fs::write(deep.join("leaf"), b"old").unwrap();
+            let _ = std::fs::remove_file(deep.join("new"));
+            // The kernel opens it.
+            drop(
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(root.join("entry"))
+                    .expect("the kernel's own open"),
+            );
+            super::NO_OPENAT2.with(|seam| seam.set(refused));
+            let written = open_to_write(&root.join("entry"), Some(&within), false);
+            let made = create_regular_within(&root.join("made"), Some(&within)).map(|_| ());
+            super::NO_OPENAT2.with(|seam| seam.set(false));
+            let mut written = written.unwrap_or_else(|e| panic!("no openat2: {refused}: {e}"));
+            std::io::Write::write_all(&mut written, b"new").unwrap();
+            drop(written);
+            assert_eq!(
+                std::fs::read(deep.join("leaf")).unwrap(),
+                b"new",
+                "no openat2: {refused}"
+            );
+            made.unwrap_or_else(|e| panic!("no openat2: {refused}: to make one: {e}"));
+            assert!(deep.join("new").exists(), "no openat2: {refused}");
+        }
+    }
+
     /// cr-ecm41-4 (Linux): an absolute link within the destination to an
     /// alias of a regular FILE beneath the root is followed — written
     /// through, with `openat2` and without — and an alias of a file outside
