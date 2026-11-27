@@ -39,6 +39,11 @@ const RELAY_DRAIN_LIMIT: Duration = Duration::from_secs(30);
 const RELAY_CUT: &str = "the transfer still held its log lane open when the run ended; events it \
                          had not handed over are missing";
 
+/// Why a log is incomplete when the transfer handed it events before it was
+/// started (log-events-before-start).
+const EVENTS_BEFORE_START: &str = "the transfer reported events before the log was started; they \
+                                   are missing";
+
 /// Where a machine keeps its logs, and whose they are.
 #[derive(Clone, Debug)]
 pub struct LogPlace {
@@ -286,6 +291,9 @@ struct State {
     /// log-close-of-another-run: which log is open — counted up each time
     /// one starts — so a close ends only the log it was asked to end.
     started: u64,
+    /// log-events-before-start: an event was handed over with no log open to
+    /// take it, and none closed before it: the next log to close lacks it.
+    unlogged: bool,
     /// cr-ecm43-3: the writer is taken: no lane is accepted after it, whose
     /// events no close would wait for.
     closed: bool,
@@ -367,6 +375,7 @@ impl RunLog {
                 relay: None,
                 lanes: 0,
                 started: 0,
+                unlogged: false,
                 closed: false,
                 planned: None,
                 disposition: Disposition::Written,
@@ -583,6 +592,15 @@ impl RunLog {
                 .map_or((0, 0), |planned| planned.get());
             let disposition = state.disposition;
             let Some(active) = state.active.as_mut() else {
+                // log-events-before-start: an event for a log not yet
+                // started is lost to it, and the log says so at its close.
+                // Dropped in silence, a lane opened before the start took
+                // 1,025 failures, the log recorded none, and its summary
+                // said every event had reached it. (After a close, an event
+                // is the closed log's, as it always was.)
+                if !state.closed {
+                    state.unlogged = true;
+                }
                 return;
             };
             let raw = |path: &str| match names.as_deref() {
@@ -738,7 +756,7 @@ impl RunLog {
         let mut relay_cut = false;
         // log-close-of-another-run: the log this close was asked to end.
         let asked_of = self.state().started;
-        let (mut active, notes, totals, error, run_id, planned, disposition) = loop {
+        let (mut active, notes, totals, error, run_id, planned, disposition, unlogged) = loop {
             let (waiting, lanes) = {
                 let state = self.state();
                 (
@@ -790,6 +808,7 @@ impl RunLog {
                     .as_ref()
                     .map_or((0, 0), |planned| planned.get()),
                 state.disposition,
+                std::mem::take(&mut state.unlogged),
             );
         };
         // The open phase ends first: what the summary adds below was learned
@@ -845,6 +864,11 @@ impl RunLog {
         if relay_cut {
             bodies.push(EventBody::LogIncomplete {
                 reason: RELAY_CUT.into(),
+            });
+        }
+        if unlogged {
+            bodies.push(EventBody::LogIncomplete {
+                reason: EVENTS_BEFORE_START.into(),
             });
         }
         let elapsed = active.started.elapsed();
@@ -912,7 +936,7 @@ impl RunLog {
                 bytes_copied: if written { totals.bytes_copied } else { 0 },
                 elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
                 // cr-ecm41-1: said where it is known — the relay drained.
-                all_events_logged: !relay_cut,
+                all_events_logged: !(relay_cut || unlogged),
             }));
         }
         for body in bodies {
@@ -927,7 +951,13 @@ impl RunLog {
             outcome,
             detail,
             run_id,
-            events_lost: relay_cut,
+            events_lost: if relay_cut {
+                Some(RELAY_CUT)
+            } else if unlogged {
+                Some(EVENTS_BEFORE_START)
+            } else {
+                None
+            },
         })
     }
 }
@@ -961,8 +991,9 @@ pub struct ClosingLog {
     detail: Option<String>,
     run_id: String,
     /// cr-ecm41-1: the relay was cut at the close, so events are missing
-    /// that the writer never had.
-    events_lost: bool,
+    /// that the writer never had — and why (log-events-before-start: or
+    /// they were handed over before the log was started).
+    events_lost: Option<&'static str>,
 }
 
 impl ClosingLog {
@@ -983,9 +1014,11 @@ impl ClosingLog {
             Ok(mut report) => {
                 // cr-ecm41-1: the caller told, too, when events were lost
                 // before the writer had them; its report knows only its own.
-                if events_lost && report.complete {
-                    report.complete = false;
-                    report.problem.get_or_insert_with(|| RELAY_CUT.into());
+                if let Some(why) = events_lost {
+                    if report.complete {
+                        report.complete = false;
+                        report.problem.get_or_insert_with(|| why.into());
+                    }
                 }
                 if !report.complete {
                     log::warn!(
@@ -1835,6 +1868,81 @@ mod tests {
         let path = report.path.expect("a log");
         assert!(summary_in(&path).all_events_logged);
         assert_eq!(failures_in(&path), ["late"]);
+    }
+
+    /// log-events-before-start: events handed to a log before it is started
+    /// are lost to it, and it says so — incomplete, its summary holding no
+    /// evidence. The reviewer's: a lane opened before the start took one
+    /// more failure than its queue holds, so that the relay had taken one
+    /// before the log began; the log recorded none of them and said every
+    /// event had reached it.
+    #[tokio::test]
+    async fn events_before_the_start_leave_the_log_incomplete() {
+        use crate::job_log::{open_log, LogLine};
+        let dir = tempfile::tempdir().unwrap();
+        let log = RunLog::new(
+            Some(LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: DEFAULT_KEEP,
+                finished: None,
+            }),
+            "b123456789abcdef0123456789abcdef",
+        );
+        let early = crate::remote::transfer::RemoteTransferProgress::audit_only(
+            log.audit_lane_at(End::Receiving).expect("a lane"),
+        );
+        let sent = AUDIT_LANE_DEPTH + 1;
+        for n in 0..sent {
+            early
+                .report_file_failed(format!("file{n}"), "denied".into())
+                .await;
+        }
+        drop(early);
+        log.start(Role::Destination, RunInfo::default(), None);
+        let report = log
+            .close(Outcome::Failed, None, Some(RunTotals::default()))
+            .await
+            .expect("a report");
+        assert!(!report.complete, "{report:?}");
+        let path = report.path.expect("a log");
+        assert!(!summary_in(&path).all_events_logged);
+        let (mut recorded, mut marked) = (0, false);
+        for line in open_log(&path).unwrap() {
+            if let Ok(LogLine::Event(event)) = line {
+                match event.body {
+                    EventBody::FileFailed { .. } => recorded += 1,
+                    EventBody::LogIncomplete { .. } => marked = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(recorded < sent, "{recorded} of {sent}");
+        assert!(marked, "the loss marked");
+
+        // A log with no event before its start is whole, as before.
+        let whole = RunLog::new(
+            Some(LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: DEFAULT_KEEP,
+                finished: None,
+            }),
+            "c123456789abcdef0123456789abcdef",
+        );
+        let lane = whole.audit_lane_at(End::Receiving).expect("a lane");
+        whole.start(Role::Destination, RunInfo::default(), None);
+        let after = crate::remote::transfer::RemoteTransferProgress::audit_only(lane);
+        after
+            .report_file_failed("one".into(), "denied".into())
+            .await;
+        drop(after);
+        let report = whole
+            .close(Outcome::Failed, None, Some(RunTotals::default()))
+            .await
+            .expect("a report");
+        assert!(report.complete, "{report:?}");
+        assert!(summary_in(&report.path.expect("a log")).all_events_logged);
     }
 
     /// log-close-of-another-run: a close ends the log it was asked to end,
