@@ -1685,6 +1685,16 @@ mod mode_tests {
                         "{what}"
                     );
                     assert_eq!(refuses(&entry, &Within::hold(&root)), [true; 3], "{what}");
+                    // alias-kernel-words: and refused in the kernel's own
+                    // word for that path — a name not there followed by `.`
+                    // is not there; it was called no directory.
+                    assert_eq!(
+                        open_to_write(&entry, Some(&Within::hold(&root)), false)
+                            .unwrap_err()
+                            .raw_os_error(),
+                        kernel,
+                        "{what}: the kernel's word"
+                    );
                     if existing {
                         assert_eq!(std::fs::read(&leaf).unwrap(), b"original", "{what}");
                     } else {

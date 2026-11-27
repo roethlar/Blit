@@ -1106,10 +1106,9 @@ fn real_path(path: &Path, links: &mut usize) -> std::io::Result<std::path::PathB
             Found::Directory => {}
             // A name, `..` or `.` after what is no directory.
             Found::Other => return Err(std::io::Error::from_raw_os_error(libc::ENOTDIR)),
-            // Missing, and not the last name.
-            Found::Missing if name == "." => {
-                return Err(std::io::Error::from_raw_os_error(libc::ENOTDIR))
-            }
+            // Missing, and not the last name — whatever follows it, a `.`
+            // too: the kernel's word for `absent/.` is that `absent` is not
+            // there (alias-kernel-words; `ENOTDIR` was said of it).
             Found::Missing => return Err(std::io::Error::from_raw_os_error(libc::ENOENT)),
         }
         if name == "." {
