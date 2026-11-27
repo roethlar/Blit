@@ -49,6 +49,26 @@ fn blit_with_no_room_past(ctx: &TestContext, kib: u32, args: &[&str]) -> Output 
     run_with_timeout(cmd, Duration::from_secs(60))
 }
 
+/// ci-macos-clone-no-room: whether a run made under
+/// [`blit_with_no_room_past`] met no limit at all — it exited 0 and `landed`
+/// holds every byte of `whole`. On macOS a copy within one APFS volume is a
+/// clone: no byte is written, so a limit on a file's size fails nothing, and
+/// the guards that need a write to fail have nothing to check there. Nothing
+/// else passes for it — a run that exits 0 without the whole file reported
+/// success for a copy that did not land — and anywhere but macOS it is the
+/// limit that failed, which the guards say.
+#[cfg(unix)]
+fn met_no_limit(ran: &Output, landed: &Path, whole: &[u8]) -> bool {
+    let unlimited =
+        ran.status.code() == Some(0) && fs::read(landed).is_ok_and(|bytes| bytes == whole);
+    assert!(
+        !unlimited || cfg!(target_os = "macos"),
+        "the limit on a file's size did not hold here: {}",
+        text(&ran.stderr)
+    );
+    unlimited
+}
+
 /// Two source files; one cannot land because a folder occupies its
 /// destination path. Removing the folder frees it.
 fn blocked_fixture(ctx: &TestContext) -> (PathBuf, PathBuf) {
@@ -709,8 +729,12 @@ fn an_ignore_existing_run_leaves_no_partial_for_a_retry_to_write_over() {
             ],
         );
         let said = format!("{}{}", text(&first.stdout), text(&first.stderr));
-        assert_eq!(first.status.code(), Some(EXIT_PARTIAL_FAILURE), "{said}");
         let left = dst.join("big.bin");
+        if met_no_limit(&first, &left, &whole) {
+            eprintln!("the copy here is a clone, which no size limit fails: nothing to check");
+            return;
+        }
+        assert_eq!(first.status.code(), Some(EXIT_PARTIAL_FAILURE), "{said}");
         assert!(
             fs::symlink_metadata(&left).is_err(),
             "{put}: the failed write removed what it had made\n{said}"
@@ -918,6 +942,13 @@ fn a_retry_writes_where_the_run_it_retries_wrote() {
             }
         };
         let said = format!("{}{}", text(&first.stdout), text(&first.stderr));
+        #[cfg(unix)]
+        if !there_at_first
+            && met_no_limit(&first, &root.join("blocked.txt"), &vec![b'w'; 128 * 1024])
+        {
+            eprintln!("the copy here is a clone, which no size limit fails: nothing to check");
+            continue;
+        }
         assert_eq!(
             first.status.code(),
             Some(EXIT_PARTIAL_FAILURE),
