@@ -1,0 +1,24 @@
+I would make the validated list the source of the transfer manifest. The goal is for a PowerShell or `find` list to copy exactly the entries it names, report every entry it cannot deliver, and give Blit no authority to delete an omitted file. The draft’s first slice is right: refuse `mirror` with a list at the CLI, on saved-job replay, and at the daemon. For `copy`, I would resolve each record on the source machine before writing and carry its identity through delivery, reporting, and retry.
+
+**Verdict — `acceptable_with_changes`.** I would keep the rooted source reads and bounded remote messages. Five changes are material before implementation.
+
+1. **Protect unlisted destination files reached through symbolic links.** In my Linux run, `dst/selected` was a symlink to `dst/archive`. Listing only `selected` rewrote `archive` and exited 0. Its hard-link count was one, so S7’s proposed check would allow the write. Require a listed write to reject redirecting links at the destination leaf or in a parent beneath the destination root. [S7 design](/home/michael/dev/gitea_repos/blit_v2/target/plan-review/files-from-plan-r5/docs/plan/FILES_FROM_LISTS.md:131) · [Existing sink behavior](/home/michael/dev/gitea_repos/blit_v2/target/plan-review/files-from-plan-r5/crates/blit-core/src/remote/transfer/sink.rs:9865)
+
+2. **Build the manifest directly from resolved entries.** The draft retains today’s scan for plain relative names. I could open `known/file` through a directory that permitted traversal but denied listing. The listed copy reported the file missing and exited 2. Use the resolved entries for `copy` and `check`, and add this case to acceptance. [Proposed scan behavior](/home/michael/dev/gitea_repos/blit_v2/target/plan-review/files-from-plan-r5/docs/plan/FILES_FROM_LISTS.md:145) · [Current directory walk](/home/michael/dev/gitea_repos/blit_v2/target/plan-review/files-from-plan-r5/crates/blit-core/src/fs_enum.rs:1237)
+
+3. **Carry lossless identity through the transfer protocol.** I tested two Unix names, `x` followed by byte `0x80` and `x` followed by `0x81`. With retries disabled, the underlying directory copy delivered one and exited 2 because both names render as `x�`. Uploading the list losslessly still leaves manifest deduplication and transfer requests keyed by display text. Carry exact bytes or a stable entry ID through requests, payloads, and resume. Test both names together locally and over a daemon. [Manifest deduplication](/home/michael/dev/gitea_repos/blit_v2/target/plan-review/files-from-plan-r5/crates/blit-core/src/transfer_session/mod.rs:4907) · [Transfer request format](/home/michael/dev/gitea_repos/blit_v2/target/plan-review/files-from-plan-r5/crates/blit-core/proto/blit.proto:1547)
+
+4. **Extend the ambiguity check to UTF-16 marks.** I verified that `FF FE 41 0A` is both a newline-terminated Unix list naming bytes `FF FE 41` and a marked UTF-16LE list naming U+0A41. Both files can coexist. Preserve the original bytes through source validation and refuse conflicting interpretations for either UTF-16 byte order. [Encoding rule](/home/michael/dev/gitea_repos/blit_v2/target/plan-review/files-from-plan-r5/docs/plan/FILES_FROM_LISTS.md:107)
+
+5. **Keep destination ownership live across automatic retries.** The draft requires a later pass to load ownership from a whole log. `LogShape` requires a final summary and end event, and the CLI closes its log after all passes. Keep ownership and terminal outcomes in the running command, including when cleanup removes a failed owner’s file. A later `jobs retry` can reconstruct them from the completed log. [Ownership rule](/home/michael/dev/gitea_repos/blit_v2/target/plan-review/files-from-plan-r5/docs/plan/FILES_FROM_LISTS.md:127) · [Log completeness](/home/michael/dev/gitea_repos/blit_v2/target/plan-review/files-from-plan-r5/crates/blit-core/src/job_log.rs:1763) · [Command lifecycle](/home/michael/dev/gitea_repos/blit_v2/target/plan-review/files-from-plan-r5/crates/blit-cli/src/main.rs:327)
+
+I read `AGENTS.md` and `git rev-parse` returned the requested head. The pinned `git diff --check` passed. In the disposable export, removing the plan’s status header made `bash scripts/agent/check-docs.sh` exit 1. Restoring the exact blob returned it to 0.
+
+The range also changes two Rust retry tests. On Linux, raising the file-size limit above the payload made both fail, and restoring the pinned test file made both pass. The macOS/APFS branch remains unverified. I removed the export and verified the review checkout was clean.
+
+```text
+base: d8689340813c82725efbee4b56813077bc3e963f
+head: bf9739566817eacb3fc846550d55f3d6b151d5ca
+capability_ok: true
+guard_confirmed: true
+```
