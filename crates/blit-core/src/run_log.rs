@@ -283,6 +283,9 @@ struct State {
     /// the log; and a close cancelled put its relay back over a newer one.
     relay: Option<Relay>,
     lanes: u64,
+    /// log-close-of-another-run: which log is open — counted up each time
+    /// one starts — so a close ends only the log it was asked to end.
+    started: u64,
     /// cr-ecm43-3: the writer is taken: no lane is accepted after it, whose
     /// events no close would wait for.
     closed: bool,
@@ -363,6 +366,7 @@ impl RunLog {
                 error: None,
                 relay: None,
                 lanes: 0,
+                started: 0,
                 closed: false,
                 planned: None,
                 disposition: Disposition::Written,
@@ -450,6 +454,7 @@ impl RunLog {
             state: PhaseState::Start,
         });
         state.closed = false;
+        state.started += 1;
         state.active = Some(ActiveLog {
             writer,
             sender,
@@ -731,6 +736,8 @@ impl RunLog {
         // once it has the writer, no lane is accepted.
         let deadline = tokio::time::Instant::now() + RELAY_DRAIN_LIMIT;
         let mut relay_cut = false;
+        // log-close-of-another-run: the log this close was asked to end.
+        let asked_of = self.state().started;
         let (mut active, notes, totals, error, run_id, planned, disposition) = loop {
             let (waiting, lanes) = {
                 let state = self.state();
@@ -755,6 +762,14 @@ impl RunLog {
             let mut state = self.state();
             if state.lanes != lanes {
                 continue;
+            }
+            // log-close-of-another-run: another close ended that log while
+            // this one waited, and a log has started since: it is not this
+            // close's to end. Taken, a close left waiting ended the next
+            // run's log with the outcome of the run before it, and that
+            // run's own close found none.
+            if state.started != asked_of {
+                return None;
             }
             let active = state.active.take()?;
             state.closed = true;
@@ -1820,6 +1835,75 @@ mod tests {
         let path = report.path.expect("a log");
         assert!(summary_in(&path).all_events_logged);
         assert_eq!(failures_in(&path), ["late"]);
+    }
+
+    /// log-close-of-another-run: a close ends the log it was asked to end,
+    /// and no other. One left waiting on a held lane while another close
+    /// ended the log, and the log then started again for the next run, ended
+    /// that run's log — with the first run's outcome — and the next run's own
+    /// close found none.
+    #[tokio::test]
+    async fn a_close_ends_only_the_log_it_was_asked_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = RunLog::new(
+            Some(LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: DEFAULT_KEEP,
+                finished: None,
+            }),
+            "9123456789abcdef0123456789abcdef",
+        );
+        log.start(Role::Destination, RunInfo::default(), None);
+        let held = log.audit_lane().expect("a lane");
+        let mut waiting = Box::pin(log.close(
+            Outcome::Failed,
+            Some("the first run's".into()),
+            Some(RunTotals::default()),
+        ));
+        tokio::select! {
+            biased;
+            _ = &mut waiting => panic!("the close waits for the lane"),
+            _ = std::future::ready(()) => {}
+        }
+        drop(held);
+        let first = log
+            .close(Outcome::Ok, None, Some(RunTotals::default()))
+            .await
+            .expect("the first run's log");
+        assert!(first.complete, "{first:?}");
+        log.start(
+            Role::Destination,
+            RunInfo::default(),
+            Some(crate::job_log::RunTag {
+                run_id: "a123456789abcdef0123456789abcdef".into(),
+                attempt: 1,
+            }),
+        );
+        assert!(
+            waiting.await.is_none(),
+            "the close left waiting ends no other run's log"
+        );
+        let second = log
+            .close(Outcome::Ok, None, Some(RunTotals::default()))
+            .await
+            .expect("the second run's own close ends its log");
+        let path = second.path.expect("a log");
+        assert!(path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("a123456789abcdef0123456789abcdef"));
+        let ended = crate::job_log::open_log(&path)
+            .unwrap()
+            .find_map(|line| match line {
+                Ok(crate::job_log::LogLine::Event(event)) => match event.body {
+                    EventBody::RunEnd { outcome, .. } => Some(outcome),
+                    _ => None,
+                },
+                _ => None,
+            });
+        assert_eq!(ended, Some(Outcome::Ok), "ended as its own run ended");
     }
 
     /// log-restart-after-cut: a log started again is whole on its own. One
