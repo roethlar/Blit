@@ -1,7 +1,7 @@
 # ci-macos-find-raw: the `find -delete` fixture made a name that is not text on a filesystem that refuses one
 
 **Severity**: MEDIUM — two guards fail on macOS before they begin; the code is right.
-**Status**: Fixed (the guard); awaiting the next CI run on macOS
+**Status**: Verified — GitHub CI run 45823369010 at `ebc9d81c` (2026-11-26): macOS: `find.rs` passed, its nine guards.
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: this commit (`Fix ci-macos-find-raw`)
 **Reviewer**: none — found by GitHub CI run 45715973925 at `4e12d761`, 2026-11-25 — the third run, which reached test binaries the second never ran; for the next openreview.

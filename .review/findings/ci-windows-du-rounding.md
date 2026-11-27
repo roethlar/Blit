@@ -1,7 +1,7 @@
 # ci-windows-du-rounding: a `du` guard expected a parent's 1K blocks to cover its children's, rounded each on its own
 
 **Severity**: MEDIUM — a guard fails on Windows; the code counts as documented.
-**Status**: Fixed (the guard); awaiting the next CI run on Windows
+**Status**: Verified — GitHub CI run 45823369010 at `ebc9d81c` (2026-11-26): Windows: the job passed whole.
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: this commit (`Fix ci-windows-du-rounding`)
 **Reviewer**: none — found by GitHub CI run 45715973925 at `4e12d761`, 2026-11-25 — the third run, which reached test binaries the second never ran; for the next openreview.
