@@ -1,0 +1,22 @@
+I would make `--files-from` an exact selection for `copy`. A PowerShell list of full paths and a Unix `find` list should each copy the entries they name. Listing a directory should select only its listed descendants. I would resolve the selection once against the source root and carry each entry’s identity through transfer, comparison, and retry so the final record can say what landed, what already matched, what was deliberately kept, and what failed.
+
+**Verdict** `acceptable_with_changes`. The draft puts the most urgent change first. Refusing `mirror --files-from` at the CLI, on saved-job replay, and at the daemon closes the documented `--delete-scope all` hazard independently of the parser work. I would also keep the rooted source reads and bounded upload. Five parts need revision before activation.
+
+1. **Preserve every byte in NUL-separated names.** In the disposable copy, `find -print0` emitted `EF BB BF 6E 6F 74 65 00` for a filename beginning with U+FEFF. Applying the draft’s BOM rule selected a different file, `note`, which also existed. Give `--files-from0` raw-record semantics and accept zero bytes as zero records, which is what `find` emits for no matches. Reserve BOM decoding for the text format. [Reader design](/home/michael/dev/gitea_repos/blit_v2/docs/plan/FILES_FROM_LISTS.md:101)
+
+2. **Make the producer’s path syntax explicit.** I created both `a\b` and `a/b` in one Unix source, with different contents. A Windows reader interpreting the first spelling as two components can successfully select the second file. The draft says it will be reported missing. Define the supported producer syntax, preserve component boundaries through the destination open, and report any component the destination cannot represent. [Stated limit](/home/michael/dev/gitea_repos/blit_v2/docs/plan/FILES_FROM_LISTS.md:39) · [Receive-side path handling](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/path_safety.rs:91)
+
+3. **Decide destination ownership using the actual directory entries.** The repository already records `PROFES~1.XML` and `Professional.xml` resolving to one Windows entry. Case and normalization folding puts them in different groups. Comparing only with the first member also misses collisions *within* a group. In a case-insensitive, normalization-sensitive model, `E\u0301`, `É`, and `é` passed that test as three names for two entries. Check every reserved destination entry, account for aliases in parent directories, and retain ownership even if the first write fails or is retried. [Collision design](/home/michael/dev/gitea_repos/blit_v2/docs/plan/FILES_FROM_LISTS.md:112) · [Recorded Windows alias](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/transfer_session/dir_stat.rs:504)
+
+4. **Replay legacy jobs automatically only when their selection is unambiguous.** Old records retain lines such as `#notes` and names with trailing spaces. The old parser drops or trims them, so replay under the old rules preserves the draft’s measured silent omissions and substitutions. Where the old and exact readings differ, identify the line and require migration before copying. Land the lossless job format before exposing newline-containing names on a route that saves jobs. [Replay design](/home/michael/dev/gitea_repos/blit_v2/docs/plan/FILES_FROM_LISTS.md:118) · [Stored lines](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/src/run_log.rs:768)
+
+5. **Carry complete outcomes back from the destination.** The bounded upload and preflight reply cover selection. Files can still fail afterward. The closing summary carries at most 64 detailed failures and caps the failed-path set at 1 MiB. Specify how the job durably records each terminal outcome against its selection entry. Test a detached run exceeding both caps, then verify that `jobs retry` picks exactly the retryable entries. [Per-entry contract](/home/michael/dev/gitea_repos/blit_v2/docs/plan/FILES_FROM_LISTS.md:86) · [Summary limits](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/sink.rs:33)
+
+I read `AGENTS.md`, and `git rev-parse` returned the supplied head. In the disposable Linux export, the pinned `git diff --check` and `bash scripts/agent/check-docs.sh` passed. Giving the draft an invalid status made the docs check exit 1. Restoring its exact Git blob made it exit 0. I removed the export afterward.
+
+```text
+base: d8689340813c82725efbee4b56813077bc3e963f
+head: b71c29b61f9ecfb9c720813fb35dcdb16459b243
+capability_ok: true
+guard_confirmed: true
+```
