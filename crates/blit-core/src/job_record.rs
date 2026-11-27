@@ -994,6 +994,14 @@ impl LogRead {
     /// line that cannot be read.
     pub fn read_line(&mut self, line: crate::job_log::LogLine) {
         use crate::job_log::{EventBody, LogLine};
+        // log-line-outside-a-log: a line given with no log begun is no log's.
+        // Nothing is taken from it, and the read is not whole: taken, a
+        // failure read after a whole log's end was kept in a read still
+        // called complete.
+        if !self.open {
+            self.incomplete = true;
+            return;
+        }
         let LogLine::Event(event) = line else {
             self.shape.lost();
             self.incomplete = true;
@@ -1643,6 +1651,20 @@ mod tests {
             !unended.complete(),
             "a session never ended, then a whole one"
         );
+
+        // log-line-outside-a-log: a line given after a whole log was ended,
+        // with no log begun, is taken into nothing and leaves the read not
+        // whole.
+        let mut outside = read(vec![
+            (0, start()),
+            (1, failed("missing")),
+            (2, summary()),
+            (3, end()),
+        ]);
+        assert!(outside.complete());
+        outside.read_line(event(4, failed("after the log")));
+        assert!(!outside.complete(), "a line with no log begun");
+        assert_eq!(outside.failures.len(), 1, "and nothing taken from it");
 
         // cr-ecm43-2: another run's whole log, given for this one's; and a
         // log read with no key to hold it to.
