@@ -42,7 +42,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
   test-macos:
     name: Test (macOS)
@@ -54,7 +54,7 @@ jobs:
       - name: temporary firewall helper
         run: scripts/macos/test-with-temporary-firewall-rule.sh
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
   test-windows:
     name: Test (Windows)
@@ -64,7 +64,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
   build-release:
     name: Build Release (${{ matrix.target }})
