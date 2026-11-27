@@ -923,6 +923,10 @@ pub struct LogRead {
     pub unfinished: bool,
     /// One says events were lost (`log-incomplete`).
     pub incomplete: bool,
+    /// log-not-its-own: one is not the log asked for — another run's, or one
+    /// that does not open with its `run-start` — and nothing was taken from
+    /// it.
+    pub not_its_own: bool,
     /// Its `run-end`: when, how, and why.
     pub ended: Option<(u64, Outcome, Option<String>)>,
     pub summary: Option<crate::job_log::Summary>,
@@ -1012,6 +1016,16 @@ impl LogRead {
         // named a file that had landed as the one that failed, in a record it
         // called whole.
         self.shape.take(&event);
+        // log-not-its-own: a log that is not the one asked for gives the read
+        // nothing — no failure, no summary, no end. Taken, another run's
+        // whole log read for this one was rightly not complete, and then
+        // ended this run as that one had ended, where its daemon no longer
+        // knew the job.
+        if !self.shape.its_own() {
+            self.incomplete = true;
+            self.not_its_own = true;
+            return;
+        }
         match event.body {
             EventBody::FileFailed {
                 path,
@@ -1188,6 +1202,8 @@ pub fn settle(
             }
             let why = if read.logs == 0 {
                 "and no log of it"
+            } else if read.not_its_own && read.ended.is_none() {
+                "and the log kept there under its name is not its own"
             } else {
                 "and its log there is unfinished"
             };
@@ -1675,11 +1691,36 @@ mod tests {
         ] {
             let mut read = LogRead::default();
             read.begin_log(expected);
-            for (seq, body) in [(0, opening), (1, summary()), (2, end())] {
+            for (seq, body) in [
+                (0, opening),
+                (1, failed("theirs")),
+                (2, summary()),
+                (3, end()),
+            ] {
                 read.read_line(event(seq, body));
             }
             read.end_log();
             assert!(!read.complete(), "{what}");
+            // log-not-its-own: and nothing is taken from it — it ends no
+            // run, where the daemon knows the job no more.
+            assert!(
+                read.not_its_own
+                    && read.failures.is_empty()
+                    && read.summary.is_none()
+                    && read.ended.is_none(),
+                "{what}: nothing taken"
+            );
+            let mut waiting = RunRecord::starting(RUN, &spec());
+            waiting.state = RunState::Waiting {
+                daemon: "server:9031".into(),
+                job_id: "t1-0".into(),
+            };
+            let settled = settle(
+                &waiting,
+                &read,
+                Some(&crate::admin::jobs::WatchSnapshot::NotFound),
+            );
+            assert!(settled.is_err(), "{what}: it settles nothing: {settled:?}");
         }
     }
 

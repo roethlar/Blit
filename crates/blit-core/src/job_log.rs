@@ -1704,6 +1704,10 @@ pub enum LogLine {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LogShape {
     expected: Option<LogKey>,
+    /// log-not-its-own: an event was taken; and the first one was the
+    /// `run-start` of the log expected.
+    seen: bool,
+    own: bool,
     started: bool,
     next_seq: u64,
     summaries: u32,
@@ -1723,6 +1727,8 @@ impl LogShape {
 
     /// Take in the log's next event.
     pub fn take(&mut self, event: &Event) {
+        let first = !self.seen;
+        self.seen = true;
         if self.ended || event.seq != self.next_seq {
             self.broken = true;
         }
@@ -1738,6 +1744,9 @@ impl LogShape {
                 });
                 if self.started || !named {
                     self.broken = true;
+                }
+                if first {
+                    self.own = named;
                 }
                 self.started = true;
             }
@@ -1757,6 +1766,16 @@ impl LogShape {
     /// A line that is not an event: something was lost.
     pub fn lost(&mut self) {
         self.broken = true;
+    }
+
+    /// log-not-its-own: the log is the one asked for, as far as it has been
+    /// read — its first event is its `run-start`, naming the key expected.
+    /// A reader takes a log's events only while this holds: one that is
+    /// another run's, or that does not say whose it is, gives it nothing.
+    /// Held only not to be whole, another run's log still gave a detached
+    /// run its outcome, and a retry the files that run had failed.
+    pub fn its_own(&self) -> bool {
+        self.own
     }
 
     /// The log, read to its end, is whole.
@@ -1967,6 +1986,30 @@ mod tests {
         let shape = |bodies: Vec<EventBody>| read_as(LogShape::of(key()), bodies);
         assert!(shape(vec![note(), summary(true), end()]));
         assert!(shape(vec![note(), line(), summary(true), end()]));
+        // log-not-its-own: whose log it is, told by its first event alone.
+        let owned = |bodies: Vec<EventBody>| {
+            let mut shape = LogShape::of(key());
+            for (seq, body) in bodies.into_iter().enumerate() {
+                shape.take(&event(seq as u64, body));
+            }
+            shape.its_own()
+        };
+        assert!(owned(vec![note()]));
+        assert!(owned(vec![note(), line(), summary(true), end(), line()]));
+        assert!(!owned(vec![]), "nothing read yet");
+        assert!(
+            !owned(vec![start_of(
+                "7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
+                "m1",
+                Role::Destination,
+                1
+            )]),
+            "another run's"
+        );
+        assert!(
+            !owned(vec![line(), note()]),
+            "its run-start not its first event"
+        );
         // cr-ecm43-2: the log the reader asked for, and no other.
         let other_run = "7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b";
         for (what, start) in [

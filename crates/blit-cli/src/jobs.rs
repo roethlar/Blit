@@ -572,6 +572,14 @@ fn failed_identities(
                     continue;
                 };
                 shape.take(&event);
+                // log-not-its-own: a log that is not the one its name says
+                // gives the retry nothing. Held only not to be whole, another
+                // run's log under this run's name still added the files it
+                // had failed to the ones retried, where the record's own
+                // list was whole.
+                if !shape.its_own() {
+                    break;
+                }
                 match event.body {
                     job_log::EventBody::FileFailed {
                         path,
@@ -2935,6 +2943,16 @@ mod retry_name_tests {
             failed_identities(dir.path(), &cut(renamed), false).is_err(),
             "another run's log completes nothing"
         );
+        // log-not-its-own: and gives a retry nothing where the record's own
+        // list is whole — the file that run failed is not this one's to
+        // retry, nor its evidence this one's.
+        let mut own = cut(renamed);
+        own.files_failed = 1;
+        own.failures_truncated = false;
+        let (failed, logged) =
+            failed_identities(dir.path(), &own, true).expect("the record's own list");
+        assert_eq!(failed, [("a.txt".to_string(), None)].into());
+        assert!(logged.settled.is_empty(), "{:?}", logged.settled);
     }
 
     /// cr-ecm38-7: a record whose list was cut, completed from a whole log
