@@ -163,6 +163,13 @@ between them.
   module a new test lands in before claiming it covers a platform. A guard
   for a platform DISAGREEMENT must live in an ungated module, or it cannot
   see the disagreement.
+- **A filesystem that folds case can be had on Linux**, without root:
+  `scripts/linux/fold-run.sh cargo test --workspace --no-fail-fast` runs the
+  suite with its temporary files on a casefold tmpfs (it folds as APFS does;
+  NTFS folds less). Run it after touching names, case, patterns or a guard's
+  fixture: on 2026-11-26 one such run found five guards macOS and Windows CI
+  had not yet reached. It is not those systems — CI and the owner's machines
+  stay the evidence — and one setgid test fails inside it only.
 - **Say which platform a result came from.** "Workspace green" means
   "green on the platform I ran it on"; report it that way when the change
   touches anything `cfg`-conditional.
