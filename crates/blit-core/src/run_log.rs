@@ -758,6 +758,11 @@ impl RunLog {
             }
             let active = state.active.take()?;
             state.closed = true;
+            // log-restart-after-cut: the relays belong to the log now closed.
+            // Left in place, a log started again chained its first lane's
+            // relay after this one's — and where this one had been cut, the
+            // new log was called incomplete with every event of its own in it.
+            state.relay = None;
             state.closed_raw_names = active.raw_names.clone();
             break (
                 active,
@@ -1815,6 +1820,63 @@ mod tests {
         let path = report.path.expect("a log");
         assert!(summary_in(&path).all_events_logged);
         assert_eq!(failures_in(&path), ["late"]);
+    }
+
+    /// log-restart-after-cut: a log started again is whole on its own. One
+    /// whose relay was cut at its close, then started again for another run
+    /// with a lane of its own, holds that run's every event and says so:
+    /// chained after the cut relay, the new lane's was not taken for
+    /// drained, and the new log was called incomplete.
+    #[tokio::test(start_paused = true)]
+    async fn a_log_started_again_after_a_cut_is_whole_on_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = RunLog::new(
+            Some(LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: DEFAULT_KEEP,
+                finished: None,
+            }),
+            "7123456789abcdef0123456789abcdef",
+        );
+        log.start(Role::Destination, RunInfo::default(), None);
+        let held = log.audit_lane().expect("a lane");
+        let cut = log
+            .close(Outcome::Failed, None, Some(RunTotals::default()))
+            .await
+            .expect("a report");
+        assert!(!cut.complete, "{cut:?}");
+        drop(held);
+        log.start(
+            Role::Destination,
+            RunInfo::default(),
+            Some(crate::job_log::RunTag {
+                run_id: "8123456789abcdef0123456789abcdef".into(),
+                attempt: 1,
+            }),
+        );
+        let fresh = crate::remote::transfer::RemoteTransferProgress::audit_only(
+            log.audit_lane().expect("a lane"),
+        );
+        fresh
+            .report_file_failed("only".into(), "denied".into())
+            .await;
+        drop(fresh);
+        let again = log
+            .close(Outcome::Failed, None, Some(RunTotals::default()))
+            .await
+            .expect("a report");
+        assert!(again.complete, "{again:?}");
+        let path = again.path.expect("a log");
+        assert!(summary_in(&path).all_events_logged);
+        let failed = crate::job_log::open_log(&path)
+            .unwrap()
+            .filter(|line| {
+                matches!(line, Ok(crate::job_log::LogLine::Event(event))
+                    if matches!(event.body, EventBody::FileFailed { .. }))
+            })
+            .count();
+        assert_eq!(failed, 1, "its own event");
     }
 
     /// log-named-text: a failure the account names by its text alone is a
